@@ -30,6 +30,8 @@ pub fn classify(c: char) -> Option<FindingKind> {
     match c {
         '\n' | '\t' => None,
         '\u{FFFD}' => Some(FindingKind::InvalidUtf8),
+        // Line and paragraph separators break lines in many renderers.
+        '\u{2028}' | '\u{2029}' => Some(FindingKind::ControlChar),
         '\u{061C}'
         | '\u{200E}'
         | '\u{200F}'
@@ -100,6 +102,14 @@ mod tests {
                 FindingKind::Invisible,
                 FindingKind::NonAscii
             ]
+        );
+    }
+
+    #[test]
+    fn flags_line_separators() {
+        assert_eq!(
+            kinds("a\u{2028}b\u{2029}c"),
+            [FindingKind::ControlChar, FindingKind::ControlChar]
         );
     }
 

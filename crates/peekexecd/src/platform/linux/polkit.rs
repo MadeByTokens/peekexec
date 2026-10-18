@@ -1,8 +1,16 @@
 //! Approval through the desktop's own polkit authentication agent, for
-//! displays the daemon cannot verify (Wayland). The agent was registered with
-//! polkitd when the user logged in (on GNOME it is drawn by the shell itself),
-//! so a requester cannot route the password prompt through a display server
-//! of its own.
+//! displays the daemon cannot verify (Wayland). The session's agent was
+//! registered with polkitd when the user logged in (on GNOME it is drawn by
+//! the shell itself).
+//!
+//! polkit prefers an agent registered for the *subject process* over the
+//! session's, and any process may register one for a process of its own
+//! user, so a requester could otherwise receive (and fake) the prompt itself.
+//! Before asking, the daemon therefore registers a *fallback* agent of its own
+//! for the subject: only one agent may exist per subject, so this blocks the
+//! requester from registering one, while `fallback` makes polkit still use
+//! the session's agent. If the slot is already taken, peekexec refuses. The
+//! guard agent itself never authenticates anyone.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,6 +30,40 @@ const IFACE: &str = "org.freedesktop.PolicyKit1.Authority";
 const ALLOW_USER_INTERACTION: u32 = 1;
 
 pub struct Polkit;
+
+/// The guard: a fallback agent that only declines, and records that it was
+/// asked (meaning the session has no agent of its own).
+struct Guard(std::sync::Arc<AtomicBool>);
+
+#[zbus::interface(name = "org.freedesktop.PolicyKit1.AuthenticationAgent")]
+impl Guard {
+    fn begin_authentication(
+        &self,
+        _action_id: &str,
+        _message: &str,
+        _icon_name: &str,
+        _details: HashMap<String, String>,
+        _cookie: &str,
+        _identities: Vec<(String, HashMap<String, zbus::zvariant::OwnedValue>)>,
+    ) -> zbus::fdo::Result<()> {
+        self.0.store(true, Ordering::SeqCst);
+        Err(zbus::fdo::Error::Failed(
+            "peekexec guard agent: no desktop authentication agent to ask".into(),
+        ))
+    }
+
+    fn cancel_authentication(&self, _cookie: &str) {}
+}
+
+fn subject_details(pid: u32, start_time: u64, uid: u32) -> HashMap<&'static str, Value<'static>> {
+    // A `unix-process` subject (pid + start time + uid): never `unix-session`,
+    // which makes polkitd abort (see docs/notes).
+    HashMap::from([
+        ("pid", Value::from(pid)),
+        ("start-time", Value::from(start_time)),
+        ("uid", Value::from(uid as i32)),
+    ])
+}
 
 type Reply = zbus::Result<(bool, bool, HashMap<String, String>)>;
 
@@ -45,17 +87,86 @@ impl SystemPrompt for Polkit {
             .map_err(|e| PlatformError::Other(format!("system bus: {e}")))?;
         let cancellation_id = format!("peekexec-{}-{}", subject.pid, start_time);
 
+        // Hold the subject's agent slot before asking (see the module docs).
+        let guard_path = format!("/org/peekexec/Guard/p{}_{}", subject.pid, start_time);
+        let guard_asked = std::sync::Arc::new(AtomicBool::new(false));
+        conn.object_server()
+            .at(guard_path.as_str(), Guard(guard_asked.clone()))
+            .map_err(|e| PlatformError::Other(format!("guard agent: {e}")))?;
+        let options: HashMap<&str, Value> = HashMap::from([("fallback", Value::from(true))]);
+        let registered = conn.call_method(
+            Some(DEST),
+            PATH,
+            Some(IFACE),
+            "RegisterAuthenticationAgentWithOptions",
+            &(
+                (
+                    "unix-process",
+                    subject_details(subject.pid, start_time, uid),
+                ),
+                "C.UTF-8",
+                guard_path.as_str(),
+                options,
+            ),
+        );
+        if let Err(e) = registered {
+            let _ = conn.object_server().remove::<Guard, _>(guard_path.as_str());
+            return Err(PlatformError::Other(format!(
+                "refusing: could not reserve the requester's polkit agent slot ({e}); another \
+                 program may have registered its own agent for it"
+            )));
+        }
+        let result = self.ask(
+            &conn,
+            subject,
+            start_time,
+            uid,
+            message,
+            &cancellation_id,
+            deadline,
+            cancel,
+        );
+        let _ = conn.call_method(
+            Some(DEST),
+            PATH,
+            Some(IFACE),
+            "UnregisterAuthenticationAgent",
+            &(
+                (
+                    "unix-process",
+                    subject_details(subject.pid, start_time, uid),
+                ),
+                guard_path.as_str(),
+            ),
+        );
+        let _ = conn.object_server().remove::<Guard, _>(guard_path.as_str());
+        if guard_asked.load(Ordering::SeqCst) {
+            return Ok(PromptOutcome::NoAgent);
+        }
+        result
+    }
+}
+
+impl Polkit {
+    #[allow(clippy::too_many_arguments)]
+    fn ask(
+        &self,
+        conn: &zbus::blocking::Connection,
+        subject: &ProcessInfo,
+        start_time: u64,
+        uid: u32,
+        message: &str,
+        cancellation_id: &str,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Result<PromptOutcome, PlatformError> {
+        let cancellation_id = cancellation_id.to_string();
+
         let (tx, rx) = mpsc::channel::<Reply>();
         let worker = conn.clone();
         let (pid, id, text) = (subject.pid, cancellation_id.clone(), message.to_string());
         std::thread::spawn(move || {
-            // A `unix-process` subject (pid + start time + uid): never
-            // `unix-session`, which makes polkitd abort (see docs/notes).
-            let subject_details: HashMap<&str, Value> = HashMap::from([
-                ("pid", Value::from(pid)),
-                ("start-time", Value::from(start_time)),
-                ("uid", Value::from(uid as i32)),
-            ]);
+            let subject_details = subject_details(pid, start_time, uid);
             // polkit expands `$(name)` inside messages, and an unterminated
             // `$(` would swallow the rest. Passing the text as a detail and
             // the message as a single reference makes polkit insert it

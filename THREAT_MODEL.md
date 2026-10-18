@@ -103,8 +103,18 @@ It does not promise:
    command (or each section's first lines and length), where it came from,
    the working directory, the limits, warnings and the hash. The summary is
    passed so that polkit inserts it verbatim (no `$(...)` expansion). The
-   subject is the requesting process (`unix-process`: pid, start time, uid). A
-   requester with no agent in its session (e.g. over ssh) gets an error.
+   subject is the requesting process (`unix-process`: pid, start time, uid).
+   polkit would prefer an agent registered for that very process over the
+   session's, and a process may register one for any process of its own user,
+   so a requester could otherwise receive and fake the prompt itself. The
+   daemon therefore first registers a *fallback* agent of its own for the
+   subject: polkit allows one agent per subject, so this blocks the requester
+   from registering one, while `fallback` keeps the session's agent in use.
+   If the slot is already taken, peekexec refuses (tested with `pkttyagent
+   --process`). A requester with no agent in its session (e.g. over ssh)
+   gets an error. Residual risk: if the session's agent is not running (e.g.
+   while GNOME Shell restarts), a process in that session could register a
+   session agent of its own.
    Without the polkit action installed, the password falls back to the
    unverified window, flagged on every request.
 5. **Executed command → system.** It runs as full root. The process group is

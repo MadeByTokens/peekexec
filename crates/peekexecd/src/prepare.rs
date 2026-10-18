@@ -344,23 +344,39 @@ pub fn system_prompt_message(view: &PromptView) -> String {
             ));
         }
     }
+    // Every value below is already escaped where the view is built; escaping
+    // again here keeps the prompt safe even if that ever changes.
     let from = match &view.provenance {
         Provenance::InSession { agent, since, .. } => {
-            format!("{agent}'s session (registered {since})")
+            format!("{}'s session (registered {since})", display_line(agent, 60))
         }
         Provenance::Unregistered => view
             .requester
             .first()
-            .map(|p| format!("{} (pid {}), not a registered agent", p.name(), p.pid))
+            .map(|p| {
+                format!(
+                    "{} (pid {}), not a registered agent",
+                    display_line(&p.name(), 40),
+                    p.pid
+                )
+            })
             .unwrap_or_default(),
     };
-    m.push_str(&format!("\nfrom: {from}\nin: {}\n", view.cwd));
+    m.push_str(&format!(
+        "\nfrom: {from}\nin: {}\n",
+        display_line(&view.cwd, 120)
+    ));
     if view.kind == ViewKind::Root {
-        let facts: Vec<String> = view.summary(0).into_iter().map(|(_, t)| t).collect();
+        let facts: Vec<String> = view
+            .summary(0)
+            .into_iter()
+            .map(|(_, t)| display_line(&t, 160))
+            .collect();
         m.push_str(&format!("{}\n", facts.join(" · ")));
     }
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
+            let others: Vec<String> = others.iter().map(|o| display_line(o, 40)).collect();
             m.push_str(&format!(
                 "⚠ a script or program it started may be asking: {}\n",
                 others.join(", ")
