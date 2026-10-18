@@ -40,7 +40,8 @@ in_service() {
     grep -q 'peekexecd\.service' /proc/self/cgroup 2>/dev/null
 }
 later() {
-    systemd-run --quiet --collect --on-active=3 --unit="peekexec-upgrade-$$" systemctl "$@"
+    systemd-run --quiet --collect --on-active=3 --timer-property=AccuracySec=100ms \
+        --unit="peekexec-upgrade-$$" systemctl "$@"
 }
 
 if [ "$action" = uninstall ]; then
