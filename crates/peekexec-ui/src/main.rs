@@ -6,7 +6,6 @@
 
 mod code;
 mod fonts;
-mod grab;
 
 use std::io::{BufReader, Write};
 use std::sync::mpsc::{self, Receiver};
@@ -66,7 +65,6 @@ fn main() {
             .with_title(title)
             .with_inner_size([900.0, 640.0])
             .with_min_inner_size([560.0, 420.0])
-            .with_always_on_top()
             .with_active(true),
         centered: true,
         persist_window: false,
@@ -121,7 +119,6 @@ fn scrub(s: &mut String) {
 struct Dialog {
     view: PromptView,
     glyphs: &'static fonts::Glyphs,
-    grab: grab::KeyboardGrab,
     /// `None` = the daemon closed our stdin.
     rx: Receiver<Option<ToUi>>,
     highlighter: Highlighter,
@@ -147,7 +144,6 @@ impl Dialog {
         Dialog {
             view,
             glyphs,
-            grab: grab::KeyboardGrab::new(),
             rx,
             highlighter: Highlighter::new(),
             cache: None,
@@ -211,9 +207,8 @@ impl Dialog {
 }
 
 impl eframe::App for Dialog {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.grab.poll(frame);
         let now = ctx.input(|i| i.time);
         if self.opened_at.is_none() {
             // Window managers may not focus a new window on their own.
@@ -469,17 +464,10 @@ impl Dialog {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let remaining = (self.view.timeout_secs as f64 - (now - opened)).max(0.0) as u64;
-            let tier = match (
-                self.view.display_verified,
-                self.view.display_tier,
-                self.grab.grabbed,
-            ) {
-                (false, _, _) => "display server NOT verified",
-                (true, DisplayTier::X11, true) => {
-                    "X11, keyboard grabbed (X11 cannot fully isolate windows)"
-                }
-                (true, DisplayTier::X11, false) => "X11: other apps of yours can see this window",
-                (true, DisplayTier::Wayland, _) => "Wayland: isolated from other apps",
+            let tier = match (self.view.display_verified, self.view.display_tier) {
+                (false, _) => "display server NOT verified",
+                (true, DisplayTier::X11) => "X11: other apps of yours can see this window",
+                (true, DisplayTier::Wayland) => "Wayland: isolated from other apps",
             };
             ui.label(
                 RichText::new(format!(

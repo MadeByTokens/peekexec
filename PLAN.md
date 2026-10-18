@@ -88,14 +88,13 @@ peekexec (CLI, unprivileged) ──Unix socket + kernel peer creds──▶ peek
 crates/
   peekexec-core   request model, hashing, display helpers, text checks   (no OS code)
   peekexec-proto  client ⇄ daemon ⇄ dialog messages, Status, Response    (no OS code)
-  peekexec-ui     the dialog (egui); X11 keyboard grab
+  peekexec-ui     the dialog (egui), a normal window (no keyboard grab)
   peekexec        the CLI (binary `peekexec`, optional alias `pkx`)
   peekexecd       daemon logic + platform traits:
                     PeerInfo       linux: SO_PEERCRED + /proc  | macos: getpeereid + LOCAL_PEERPID
                     Authenticator  linux: PAM                  | macos: LocalAuthentication / Touch ID
                     Sandbox        linux: Landlock + netns     | macos: sandbox-exec (best effort)
                     Listener       linux: systemd socket / bind| macos: launchd
-                    KeyboardGuard  X11 grab / Wayland none     | macos: SecureEventInput
 ```
 
 ### Porting rules (Linux first, macOS-ready)
@@ -138,7 +137,7 @@ pkexec's PwnKit). Crates: `nix`, `pam-client`, `landlock`, `egui`/`eframe` +
 | | Scope |
 |---|---|
 | **M0** ✅ | Plan, threat model, CLI spec; workspace with platform traits; `preview` and `help` work; Linux peer identification |
-| **M1** ✅ | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason, X11 keyboard grab), PAM, snapshot execution, trusted-program rule, env allowlist, `--json`, pidfd-pinned peer, `--no-net` via netns, `--dev` mode, systemd units + install script |
+| **M1** ✅ | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason), PAM, snapshot execution, trusted-program rule, env allowlist, `--json`, pidfd-pinned peer, `--no-net` via netns, `--dev` mode, systemd units + install script |
 | **M2** | **Wayland display verification first** (the user's other machines run Wayland; see below), then Landlock write limits, `install` diffs, risk flags (runtime-read user files, udev/systemd/cron/sudoers targets) |
 | **M3** | Packaging + CI matrix → **first public release** |
 | **M4** | macOS backends + Homebrew |

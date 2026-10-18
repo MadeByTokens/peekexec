@@ -1892,10 +1892,8 @@ dependencies = [
  "libc",
  "peekexec-core",
  "peekexec-proto",
- "raw-window-handle",
  "serde_json",
  "syntect",
- "x11-dl",
 ]
 
 [[package]]

@@ -70,7 +70,7 @@ something harmful; peekexec makes sure they could see it first.
 
 | Tier | Setup | Holds against |
 |---|---|---|
-| 1 | X11 dialog + keyboard grab | Buggy or overeager requesters. **Not** a malicious same-user process: X11 lets any client draw fake windows, poll the keyboard state and synthesize input. The keyboard grab stops ordinary key snooping only. sudo and pkexec share this limit. |
+| 1 | X11 dialog | Buggy or overeager requesters. **Not** a malicious same-user process: X11 lets any client draw fake windows, read the keyboard and synthesize input. sudo and pkexec share this limit. (A keyboard grab was tried and removed: it trapped the human when they switched windows, and X11 offers ways around it anyway.) |
 | 2 | Wayland, compositor verified | Adds isolation: other clients cannot read the dialog's input or inject events. Compositor verification is not implemented yet, so Wayland is currently reported as unverified. |
 | 3 | Dedicated VT and/or FIDO2 touch (`pam_u2f`) | A compromised user session: the prompt is outside it, and physical presence cannot be faked in software. (planned) |
 
@@ -97,7 +97,7 @@ state the tier in effect.
 
 | | Peer identity | Auth | Write limit | Network limit | Keyboard |
 |---|---|---|---|---|---|
-| Linux ≥ 6.5 | SO_PEERCRED + pidfd | PAM | declared_only (Landlock: M2) | netns (kernel) | X11 grab / Wayland |
+| Linux ≥ 6.5 | SO_PEERCRED + pidfd | PAM | declared_only (Landlock: M2) | netns (kernel) | none / Wayland isolation |
 | Linux < 6.5 | SO_PEERCRED, not pinned | PAM | same | netns (kernel) | same |
 | macOS (M4) | getpeereid + LOCAL_PEERPID | LocalAuthentication | sandbox-exec, best effort | sandbox-exec, best effort | SecureEventInput |
 
