@@ -147,6 +147,12 @@ impl Daemon {
         if !self.opts.dev {
             let admin = user_of(peer.uid).is_ok_and(|u| is_admin(&u.name, peer.gid));
             if !admin {
+                eprintln!(
+                    "peekexecd: audit rejected uid={} pid={} exe={:?} reason=\"not an administrator\"",
+                    peer.uid,
+                    peer.process.pid,
+                    peer.process.exe.as_deref().unwrap_or("?")
+                );
                 let _ = write_msg(
                     &mut conn,
                     &Response::error(format!(
