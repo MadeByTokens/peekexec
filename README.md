@@ -1,12 +1,23 @@
 # peekexec
 
+> [!WARNING]
+> **Experimental software. Use at your own risk.**
+>
+> peekexec installs a daemon that runs as **root** and runs commands as root
+> once a human approves them. It is pre-alpha and has **not** been audited by
+> independent security experts; bugs in it could let a local program gain root
+> without approval. It comes with no warranty (see the licenses). Do not
+> install it on shared or multi-user machines, or on machines you cannot
+> afford to lose. Read [THREAT_MODEL.md](THREAT_MODEL.md) for what it does and
+> does not protect against, and report problems privately as described in
+> [SECURITY.md](SECURITY.md).
+
 **peek**, then **exec**: an approval dialog for root commands that shows the
 human what they are approving: the exact command, the full script, or the
 file being installed, plus who is asking and why. Built so AI coding agents
 can ask for root with a reason the human can read, and get a structured
 answer back.
 
-> **Pre-alpha. Not audited. Do not use it on machines you care about yet.**
 > Linux only. On X11 the password goes into peekexec's dialog. On Wayland
 > (where peekexec cannot verify its own window) you read the request in
 > peekexec's window and type the password into your desktop's own polkit
