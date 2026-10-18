@@ -22,7 +22,16 @@ if [ "${1:-}" = "--uninstall" ]; then
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin"
     rm -rf "$libexec"
     systemctl daemon-reload
-    echo "peekexec removed (left $pam in place; delete it if unused)"
+    # Remove the PAM file only if it is exactly one we ship (not edited).
+    if cmp -s "$pam" "$repo/packaging/pam/peekexec.debian" \
+        || cmp -s "$pam" "$repo/packaging/pam/peekexec.redhat"; then
+        rm -f "$pam"
+        echo "peekexec removed"
+    elif [ -e "$pam" ]; then
+        echo "peekexec removed (kept $pam: it was modified)"
+    else
+        echo "peekexec removed"
+    fi
     exit 0
 fi
 
@@ -34,7 +43,7 @@ for f in peekexec peekexecd peekexec-ui; do
     fi
 done
 # The test approver answers without a human; it must never be installed.
-if grep -q PEEKEXEC_TEST_APPROVER "$rel/peekexecd"; then
+if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$rel/peekexecd"; then
     echo "install.sh: $rel/peekexecd was built with the test-approver feature; refusing" >&2
     exit 1
 fi

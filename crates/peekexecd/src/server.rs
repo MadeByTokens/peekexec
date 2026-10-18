@@ -277,7 +277,7 @@ impl Daemon {
                 ADMIN_GROUPS.join(", ")
             ));
         }
-        let display = if self.opts.test_approver.is_some() {
+        let found = if self.opts.test_approver.is_some() {
             Some(Display {
                 vars: Vec::new(),
                 tier: DisplayTier::X11,
@@ -286,17 +286,27 @@ impl Daemon {
         } else {
             self.display_for(peer)
         };
-        let Some(display) = display else {
-            return fail(format!(
-                "no graphical session found for {}: the dialog needs a desktop session",
-                user.name
-            ));
-        };
+        // Validate the request before anything else, so callers get the
+        // specific reason a request is refused whatever display there is.
+        let display = found.clone().unwrap_or(Display {
+            vars: Vec::new(),
+            tier: DisplayTier::X11,
+            verified: false,
+        });
         let prepared = match prepare::prepare(&self.ctx(), peer, &user, request, id, &display, true)
         {
             Ok(p) => p,
             Err(e) => return fail(e),
         };
+        if found.is_none() {
+            if let Some(dir) = &prepared.snapshot_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            return fail(format!(
+                "no graphical session found for {}: the dialog needs a desktop session",
+                user.name
+            ));
+        }
 
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();

@@ -50,7 +50,24 @@ pub fn ask(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
     if let Some((uid, gid)) = dialog.run_as {
-        cmd.uid(uid).gid(gid);
+        // Drop root completely and explicitly: no supplementary groups (root's
+        // group 0 must not leak), then the gid, then the uid, then make sure
+        // root cannot be regained. Not left to std's uid()/gid() internals.
+        // SAFETY: only async-signal-safe libc calls, no allocation.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setgid(gid) != 0
+                    || libc::setuid(uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setuid(0) == 0 || libc::getegid() != gid {
+                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                }
+                Ok(())
+            });
+        }
     }
     let mut child = cmd
         .spawn()

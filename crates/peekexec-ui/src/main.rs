@@ -41,6 +41,11 @@ fn harden() {
 }
 
 fn main() {
+    // The dialog only ever needs the approving user's rights.
+    // SAFETY: trivial libc getters.
+    if unsafe { libc::geteuid() == 0 || libc::getegid() == 0 } {
+        fail("refusing to run as root");
+    }
     harden();
 
     let mut stdin = BufReader::new(std::io::stdin());
