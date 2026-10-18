@@ -4,9 +4,25 @@
 #   cargo build --release            # as your user, never as root
 #   pkexec "$PWD/packaging/install.sh"            # install
 #   pkexec "$PWD/packaging/install.sh" --uninstall
+#
+# Upgrading through peekexec itself (the script then runs from a snapshot,
+# so name the checkout):
+#   peekexec script --why "..." packaging/install.sh --from="$PWD"
 set -eu
 
-repo=$(cd "$(dirname "$0")/.." && pwd)
+action=install
+from=""
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall) action=uninstall ;;
+        --from=*) from=${arg#--from=} ;;
+        *)
+            echo "usage: install.sh [--uninstall] [--from=REPO_DIR]" >&2
+            exit 2
+            ;;
+    esac
+done
+repo=${from:-$(cd "$(dirname "$0")/.." && pwd)}
 libexec=/usr/libexec/peekexec
 bin=/usr/local/bin/peekexec
 units=/etc/systemd/system
@@ -17,11 +33,25 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if [ "${1:-}" = "--uninstall" ]; then
-    systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
+# Run through peekexec, this script lives inside peekexecd.service: stopping
+# that service directly would kill the script halfway. Such steps are handed
+# to a short-lived transient unit that runs them a few seconds later.
+in_service() {
+    grep -q 'peekexecd\.service' /proc/self/cgroup 2>/dev/null
+}
+later() {
+    systemd-run --quiet --collect --on-active=3 --unit="peekexec-upgrade-$$" systemctl "$@"
+}
+
+if [ "$action" = uninstall ]; then
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin"
     rm -rf "$libexec"
-    systemctl daemon-reload
+    if in_service; then
+        later disable --now peekexecd.socket peekexecd.service
+    else
+        systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
+        systemctl daemon-reload
+    fi
     # Remove the PAM file only if it is exactly one we ship (not edited).
     if cmp -s "$pam" "$repo/packaging/pam/peekexec.debian" \
         || cmp -s "$pam" "$repo/packaging/pam/peekexec.redhat"; then
@@ -73,8 +103,13 @@ if [ ! -e "$pam" ]; then
 fi
 
 systemctl daemon-reload
-# Stop a running daemon so an upgrade takes effect on the next request.
-systemctl stop peekexecd.service 2>/dev/null || true
 systemctl enable peekexecd.socket
-systemctl restart peekexecd.socket
-echo "peekexec installed: $bin, $libexec, peekexecd.socket enabled"
+# Stop a running daemon so the next request starts the new one.
+if in_service; then
+    later stop peekexecd.service
+    echo "peekexec installed: $bin, $libexec; the daemon restarts in 3 s"
+else
+    systemctl stop peekexecd.service 2>/dev/null || true
+    systemctl restart peekexecd.socket
+    echo "peekexec installed: $bin, $libexec, peekexecd.socket enabled"
+fi
