@@ -79,7 +79,7 @@ the run.
 ```
 peekexec (CLI, unprivileged) ──Unix socket + kernel peer creds──▶ peekexecd (root)
                                                                    ├─ snapshot + sha256
-                                                                   ├─ peekexec-ui (dialog, separate process, _peekexec user)
+                                                                   ├─ peekexec-ui (dialog, separate process, non-dumpable)
                                                                    ├─ authenticate
                                                                    └─ sandboxed exec + audit log
 ```
@@ -88,7 +88,7 @@ peekexec (CLI, unprivileged) ──Unix socket + kernel peer creds──▶ peek
 crates/
   peekexec-core   request model, hashing, display helpers, text checks   (no OS code)
   peekexec-proto  client ⇄ daemon ⇄ dialog messages, Status, Response    (no OS code)
-  peekexec-ui     dialog; KeyboardGuard trait
+  peekexec-ui     the dialog (egui); X11 keyboard grab
   peekexec        the CLI (binary `peekexec`, optional alias `pkx`)
   peekexecd       daemon logic + platform traits:
                     PeerInfo       linux: SO_PEERCRED + /proc  | macos: getpeereid + LOCAL_PEERPID
@@ -109,7 +109,8 @@ crates/
   `declared_only` / `not_requested`). Weaker platforms show weaker guarantees
   with no special-casing in the UI.
 - The dialog is a separate process speaking `peekexec-proto`, so a native
-  SwiftUI dialog can replace it later.
+  SwiftUI dialog can replace it later. In M1 it runs as the approving user
+  (non-dumpable); a dedicated system user is a later hardening step.
 
 ## Stack
 
@@ -137,7 +138,7 @@ pkexec's PwnKit). Crates: `nix`, `pam-client`, `landlock`, `egui`/`eframe` +
 | | Scope |
 |---|---|
 | **M0** ✅ | Plan, threat model, CLI spec; workspace with platform traits; `preview` and `help` work; Linux peer identification |
-| **M1** | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason), PAM, snapshot execution, `--json`, pidfd-pinned peer |
+| **M1** ✅ | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason, X11 keyboard grab), PAM, snapshot execution, trusted-program rule, env allowlist, `--json`, pidfd-pinned peer, `--no-net` via netns, `--dev` mode, systemd units + install script |
 | **M2** | Landlock + netns scopes, real `enforced`, `install` diffs, risk flags, refusing resubmitted denied requests |
 | **M3** | Packaging + CI matrix → **first public release** |
 | **M4** | macOS backends + Homebrew |

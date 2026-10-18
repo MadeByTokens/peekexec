@@ -51,6 +51,15 @@ fn tokenize(s: &str) -> Vec<(Tok, usize, usize)> {
                 out.push((Tok::Comment, i, end));
                 i = end;
             }
+            // Redirections, not separators: `>&2`, `<&3`, `&>file`, `>|file`.
+            b'&' | b'|' if i > 0 && matches!(b[i - 1], b'>' | b'<') => {
+                out.push((Tok::Other, i, i + 1));
+                i += 1;
+            }
+            b'&' if b.get(i + 1) == Some(&b'>') => {
+                out.push((Tok::Other, i, i + 1));
+                i += 1;
+            }
             b'&' | b'|' => {
                 let double = b.get(i + 1) == Some(&c);
                 let kind = if double || c == b'|' {
@@ -282,6 +291,18 @@ mod tests {
         assert_eq!(
             shown("for f in *.rules; do cp \"$f\" /etc/; done"),
             ["for f in *.rules; do", "  cp \"$f\" /etc/;", "done"]
+        );
+    }
+
+    #[test]
+    fn redirections_are_not_separators() {
+        assert_eq!(
+            shown("echo missing >&2; exit 1"),
+            ["echo missing >&2;", "exit 1"]
+        );
+        assert_eq!(
+            shown("cmd &>/dev/null || cmd 2>&1 >|f"),
+            ["cmd &>/dev/null ||", "  cmd 2>&1 >|f"]
         );
     }
 

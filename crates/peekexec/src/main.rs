@@ -80,7 +80,8 @@ struct Scope {
     /// Block network access
     #[arg(long)]
     no_net: bool,
-    /// Pass an environment variable (repeatable). Default: clean environment
+    /// Set an environment variable (repeatable). Default: clean environment. Only harmless
+    /// variables are accepted: DEBIAN_FRONTEND, LANG, LC_*, TZ, TERM, NO_COLOR, ...
     #[arg(long = "env", value_name = "K=V", value_parser = parse_env)]
     env: Vec<(String, String)>,
     /// Seconds the human has to respond

@@ -71,17 +71,26 @@ pub struct PromptView {
 }
 
 impl PromptView {
-    /// One-line requester chain: `claude (pid 4121) ← bash ← claude-code`.
-    pub fn requester_chain(&self) -> String {
-        let mut parts = Vec::new();
-        for (i, p) in self.requester.iter().enumerate() {
-            if i == 0 {
-                parts.push(format!("{} (pid {})", p.name(), p.pid));
-            } else {
-                parts.push(p.name());
-            }
+    /// One-line requester chain, e.g. `claude (pid 4121) ← bash ← kitty`,
+    /// showing at most `max` processes.
+    pub fn requester_chain(&self, sep: &str, max: usize) -> String {
+        let mut parts: Vec<String> = self
+            .requester
+            .iter()
+            .take(max)
+            .enumerate()
+            .map(|(i, p)| {
+                if i == 0 {
+                    format!("{} (pid {})", p.name(), p.pid)
+                } else {
+                    p.name()
+                }
+            })
+            .collect();
+        if self.requester.len() > max {
+            parts.push("…".into());
         }
-        parts.join(" ← ")
+        parts.join(sep)
     }
 
     /// The summary line: writes, network, findings.
@@ -125,7 +134,7 @@ impl PromptView {
         line("Root access requested".into());
         line(format!(
             "  from    : {}  [user {}]",
-            self.requester_chain(),
+            self.requester_chain(" ← ", 6),
             self.requester_user
         ));
         line(format!("  in      : {}", self.cwd));

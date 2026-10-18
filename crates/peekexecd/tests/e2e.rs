@@ -107,12 +107,12 @@ fn environment_is_clean() {
     // The daemon inherits SECRET; the command must not.
     std::env::set_var("SECRET", "leaked");
     let d = Daemon::start("approve");
-    let mut req = sh("echo \"$PATH|${SECRET:-unset}|$EXTRA\"");
-    req.env.insert("EXTRA".into(), "yes".into());
+    let mut req = sh("echo \"$PATH|${SECRET:-unset}|$TZ\"");
+    req.env.insert("TZ".into(), "UTC".into());
     let r = d.run(req);
     assert_eq!(
         r.stdout.as_deref(),
-        Some("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|unset|yes\n")
+        Some("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|unset|UTC\n")
     );
 }
 

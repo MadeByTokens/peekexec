@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2016  # backticks below are literal Markdown
 # Regenerate docs/cli.md from the binary's own help output.
 set -eu
 cd "$(dirname "$0")/.."

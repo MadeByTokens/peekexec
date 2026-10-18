@@ -1,0 +1,13 @@
+[Unit]
+Description=peekexec daemon: shows exactly what will run as root, then runs only that
+Requires=peekexecd.socket
+After=peekexecd.socket
+
+[Service]
+ExecStart=/usr/libexec/peekexec/peekexecd
+# Approved commands run as root from here, so no sandboxing that would
+# change what they can do; the per-request limits are applied by peekexecd.
+StandardError=journal
+
+[Install]
+Also=peekexecd.socket

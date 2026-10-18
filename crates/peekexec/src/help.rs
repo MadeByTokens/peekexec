@@ -35,20 +35,31 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
 
 4. "cancelled" means stop. Do not retry; ask the user in your own channel.
 
-5. "enforced" says what the kernel actually guaranteed. "declared_only" means
-   the human saw the limit but this platform could not enforce it.
+5. "enforced" says what was actually guaranteed for each limit: "kernel" (the
+   kernel enforces it), "builtin" (peekexec wrote the file itself; no command
+   ran), "declared_only" (the human saw it, but it was not enforced), or
+   "not_requested". "dev_mode": true means it ran as you, not as root.
 
 6. Requests the human can judge at a glance:
    - one purpose per request; --why says what and why, specifically
    - the narrowest --write paths; --no-net unless you need the network
-   - prefer `peekexec install` over `sh -c 'cp ...'` (the human sees a diff)
+   - prefer `peekexec install` over `sh -c 'cp ...'` (the human sees the file)
    - prefer `peekexec script file.sh` over long one-liners
 
-7. If your tool call has a timeout shorter than the human needs:
+7. What gets rejected (status "error", nothing shown to the human):
+   - `run` only starts programs found in the system PATH, owned by root and not
+     writable by others. To run a file you wrote, use `peekexec script FILE`
+     (it is snapshotted: edits after submission have no effect).
+   - --env accepts only harmless variables (DEBIAN_FRONTEND, LANG, LC_*, TZ,
+     TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.
+   - Files a command reads while running (e.g. `cp ./x /etc/`) are NOT shown to
+     the human and could change after approval; use `peekexec install` instead.
+
+8. If your tool call has a timeout shorter than the human needs:
      peekexec submit --json run ...     -> {"status":"pending","request_id":ID}
      peekexec wait --json ID --timeout 60   (repeat while status is "pending")
 
-8. You cannot approve, pre-approve, or skip the dialog. There is no flag for it.
+9. You cannot approve, pre-approve, or skip the dialog. There is no flag for it.
 "#;
 
 pub fn exit_codes() -> String {

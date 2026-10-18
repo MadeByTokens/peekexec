@@ -44,35 +44,33 @@ pub const MAX_TIMEOUT_SECS: u32 = 600;
 
 const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "busybox"];
 
-/// Variables that make a program load code from somewhere the dialog does
-/// not show. Rejected rather than displayed.
-const ENV_DENY: &[&str] = &[
-    "PATH",
-    "IFS",
-    "ENV",
-    "BASH_ENV",
-    "SHELLOPTS",
-    "BASHOPTS",
-    "PS4",
-    "PROMPT_COMMAND",
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "PYTHONSTARTUP",
-    "PERL5LIB",
-    "PERL5OPT",
-    "PERLLIB",
-    "RUBYLIB",
-    "RUBYOPT",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "GCONV_PATH",
-    "LOCPATH",
-    "HOSTALIASES",
-    "GIT_EXEC_PATH",
-    "GIT_SSH_COMMAND",
-    "SSH_ASKPASS",
+/// The only variables a request may set. An allowlist, because the list of
+/// variables that make *some* program load code from an unshown place
+/// (LD_*, PATH, BASH_ENV, PYTHONPATH, GIT_CONFIG_*, PAGER, JAVA_TOOL_OPTIONS,
+/// ...) is open-ended.
+pub const ENV_ALLOW: &[&str] = &[
+    "DEBIAN_FRONTEND",
+    "DEBCONF_NONINTERACTIVE_SEEN",
+    "APT_LISTCHANGES_FRONTEND",
+    "NEEDRESTART_MODE",
+    "NEEDRESTART_SUSPEND",
+    "LANG",
+    "LANGUAGE",
+    "TZ",
+    "TERM",
+    "NO_COLOR",
+    "COLUMNS",
+    "LINES",
 ];
-const ENV_DENY_PREFIX: &[&str] = &["LD_", "DYLD_", "BASH_FUNC_"];
+pub const ENV_ALLOW_PREFIX: &[&str] = &["LC_"];
+
+/// Values are restricted too: no `/`, so none of them can name a file
+/// (`TZ=:/home/u/x`, `LANG=/home/u/locale`).
+fn env_value_ok(v: &str) -> bool {
+    v.len() <= 256
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_.@:+,-".contains(c))
+}
 
 pub fn prepare(
     ctx: &Ctx,
@@ -272,15 +270,19 @@ fn validate(req: &Request) -> Result<(), String> {
         }
     }
     for (k, v) in &req.env {
-        let valid = !k.is_empty()
-            && !k.starts_with(|c: char| c.is_ascii_digit())
-            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !valid || v.contains('\0') {
-            return Err(format!("invalid environment variable {k:?}"));
-        }
-        if ENV_DENY.contains(&k.as_str()) || ENV_DENY_PREFIX.iter().any(|p| k.starts_with(p)) {
+        let allowed =
+            ENV_ALLOW.contains(&k.as_str()) || ENV_ALLOW_PREFIX.iter().any(|p| k.starts_with(p));
+        if !allowed {
             return Err(format!(
-                "--env {k} is not allowed: it can make root load code that the dialog cannot show"
+                "--env {k} is not allowed. Allowed: {}, {}*. Other variables can make root \
+                 load code that the dialog cannot show",
+                ENV_ALLOW.join(", "),
+                ENV_ALLOW_PREFIX.join("*, ")
+            ));
+        }
+        if !env_value_ok(v) {
+            return Err(format!(
+                "--env {k}: value may only contain letters, digits and _.@:+,- (no paths)"
             ));
         }
     }
@@ -469,26 +471,33 @@ mod tests {
     }
 
     #[test]
-    fn rejects_code_loading_env() {
+    fn env_is_an_allowlist() {
+        let with = |k: &str, v: &str| {
+            let mut r = req(Action::Run {
+                argv: vec!["true".into()],
+            });
+            r.env.insert(k.into(), v.into());
+            validate(&r)
+        };
         for k in [
             "LD_PRELOAD",
             "PATH",
             "BASH_ENV",
             "PYTHONPATH",
+            "GIT_CONFIG_GLOBAL",
+            "PAGER",
+            "JAVA_TOOL_OPTIONS",
             "BASH_FUNC_x%%",
         ] {
-            let mut r = req(Action::Run {
-                argv: vec!["true".into()],
-            });
-            r.env.insert(k.into(), "/home/u/x".into());
-            assert!(validate(&r).is_err(), "{k} accepted");
+            assert!(with(k, "x").is_err(), "{k} accepted");
         }
-        let mut ok = req(Action::Run {
-            argv: vec!["true".into()],
-        });
-        ok.env
-            .insert("DEBIAN_FRONTEND".into(), "noninteractive".into());
-        assert!(validate(&ok).is_ok());
+        assert!(with("DEBIAN_FRONTEND", "noninteractive").is_ok());
+        assert!(with("LC_ALL", "C.UTF-8").is_ok());
+        assert!(
+            with("TZ", ":/home/u/zone").is_err(),
+            "path in value accepted"
+        );
+        assert!(with("LANG", "/home/u/locale").is_err());
     }
 
     #[test]
