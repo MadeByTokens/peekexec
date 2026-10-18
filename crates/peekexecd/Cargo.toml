@@ -19,3 +19,6 @@ peekexec-core.workspace = true
 peekexec-proto.workspace = true
 similar = "2"
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

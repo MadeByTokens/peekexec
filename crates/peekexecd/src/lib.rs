@@ -10,4 +10,5 @@ pub mod prepare;
 pub mod prompt;
 pub mod server;
 pub mod session;
+pub mod sessions;
 pub mod trust;

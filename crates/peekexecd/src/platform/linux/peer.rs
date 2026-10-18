@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 
-use crate::platform::{Peer, PeerInfo, PlatformError, ProcessInfo, XServer};
+use crate::platform::{Peer, PeerInfo, Pinned, PlatformError, ProcessInfo, XServer};
 
 /// SO_PEERCRED for the identity, /proc for the description, and a pidfd
 /// (SO_PEERPIDFD, Linux 6.5+) to prove the description is of that process.
@@ -49,6 +49,26 @@ impl PeerInfo for ProcPeerInfo {
 
     fn verified_x_server(&self, uid: u32) -> Option<XServer> {
         super::display::verified_x_server(uid)
+    }
+
+    fn pin(&self, pid: u32, start_time: u64) -> Option<Pinned> {
+        // SAFETY: pidfd_open returns a new fd we own, or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: fd is a fresh, valid descriptor owned by nobody else.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        // Opened after looking: confirm it is still the same process.
+        (start_time_of(pid) == Some(start_time) && pidfd_alive(&fd, pid)).then_some(Pinned {
+            pid,
+            start_time,
+            handle: Some(fd),
+        })
+    }
+
+    fn alive(&self, p: &Pinned) -> bool {
+        p.handle.as_ref().is_some_and(|fd| pidfd_alive(fd, p.pid))
     }
 
     fn processes_of(&self, uid: u32) -> Vec<u32> {
@@ -146,7 +166,19 @@ fn process_info(pid: u32) -> ProcessInfo {
         pid,
         exe: readlink(pid, "exe"),
         cmdline,
+        start_time: start_time_of(pid),
     }
+}
+
+fn start_time_of(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_start_time(&stat)
+}
+
+/// Field 22 of /proc/<pid>/stat; fields are counted after the `(comm)`.
+fn parse_start_time(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
 }
 
 fn parent_pid(pid: u32) -> Option<u32> {
@@ -187,6 +219,15 @@ mod tests {
         assert_eq!(parse_ppid("42 (evil) 1 2 ) S 777 42 42"), Some(777));
         assert_eq!(parse_ppid("42 (bash) S 100 42 42"), Some(100));
         assert_eq!(parse_ppid("garbage"), None);
+    }
+
+    #[test]
+    fn pins_self_and_rejects_wrong_start_time() {
+        let me = std::process::id();
+        let st = start_time_of(me).unwrap();
+        let pinned = ProcPeerInfo.pin(me, st).expect("pin self");
+        assert!(ProcPeerInfo.alive(&pinned));
+        assert!(ProcPeerInfo.pin(me, st + 1).is_none());
     }
 
     #[test]

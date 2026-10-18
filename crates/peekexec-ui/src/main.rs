@@ -16,7 +16,7 @@ use eframe::egui::{
 };
 use peekexec_core::textcheck::scan;
 use peekexec_proto::ui::{FromUi, ToUi};
-use peekexec_proto::view::PromptView;
+use peekexec_proto::view::{PromptView, Provenance, ViewKind};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::DisplayTier;
 
@@ -257,13 +257,17 @@ impl Dialog {
     fn header(&mut self, ui: &mut egui::Ui, _dark: bool) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let heading = if self.view.dev_mode {
-                RichText::new("Development-mode request (not root)").color(WARN)
-            } else {
-                RichText::new("Root access requested")
+            let heading = match (self.view.kind, self.view.dev_mode) {
+                (ViewKind::Register, _) => RichText::new("Register an agent session"),
+                (ViewKind::Root, true) => {
+                    RichText::new("Development-mode request (not root)").color(WARN)
+                }
+                (ViewKind::Root, false) => RichText::new("Root access requested"),
             };
             ui.heading(heading.strong());
         });
+        ui.add_space(2.0);
+        self.provenance_badge(ui);
         ui.add_space(4.0);
         egui::Grid::new("facts")
             .num_columns(2)
@@ -319,8 +323,12 @@ impl Dialog {
                 }
             });
         ui.add_space(4.0);
+        let summary = match self.view.kind {
+            ViewKind::Root => self.view.summary(self.findings),
+            ViewKind::Register => Vec::new(),
+        };
         ui.horizontal_wrapped(|ui| {
-            for (warn, text) in self.view.summary(self.findings) {
+            for (warn, text) in summary {
                 let (icon, color) = if warn {
                     (self.glyphs.warn, WARN)
                 } else {
@@ -350,6 +358,60 @@ impl Dialog {
             });
         }
         ui.add_space(6.0);
+    }
+
+    /// Which registered agent session this request comes from, if any.
+    fn provenance_badge(&self, ui: &mut egui::Ui) {
+        if self.view.kind == ViewKind::Register {
+            return;
+        }
+        let ok = Color32::from_rgb(46, 160, 67);
+        match &self.view.provenance {
+            Provenance::Direct {
+                agent,
+                since,
+                command,
+            } => {
+                ui.label(
+                    RichText::new(format!(
+                        "{} {agent} (session registered {since}): its own command",
+                        self.glyphs.ok
+                    ))
+                    .color(ok)
+                    .strong(),
+                );
+                if let Some(cmd) = command {
+                    let short: String = cmd.chars().take(140).collect();
+                    let more = if cmd.chars().count() > 140 { "…" } else { "" };
+                    ui.label(
+                        RichText::new(format!("agent's command: {short}{more}"))
+                            .monospace()
+                            .weak()
+                            .small(),
+                    )
+                    .on_hover_text(cmd);
+                }
+            }
+            Provenance::Indirect { agent, since, via } => {
+                let forward = if self.glyphs.arrow.contains('←') {
+                    " → "
+                } else {
+                    " > "
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "{} {agent} (session registered {since}), but via a program it started: {}",
+                        self.glyphs.warn,
+                        via.join(forward)
+                    ))
+                    .color(WARN)
+                    .strong(),
+                );
+            }
+            Provenance::Unregistered => {
+                ui.label(RichText::new("Not from a registered agent session").weak());
+            }
+        }
     }
 
     fn code(&mut self, ui: &mut egui::Ui, dark: bool, page: f32) {

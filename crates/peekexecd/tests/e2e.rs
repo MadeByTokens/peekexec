@@ -392,3 +392,99 @@ fn install_clears_setuid_bits() {
     let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode, 0o755);
 }
+
+fn preview_view(d: &Daemon, request: Request) -> peekexec_proto::view::PromptView {
+    let reply: PreviewReply = call(&d.socket, &ClientMsg::Preview { request }).unwrap();
+    match reply {
+        PreviewReply::Ok { view } => *view,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn register(d: &Daemon, pid: u32) -> Response {
+    d.send(&ClientMsg::Register {
+        name: "Test Agent".into(),
+        agent_pid: Some(pid),
+        why: Some("e2e".into()),
+        timeout_secs: 30,
+    })
+}
+
+#[test]
+fn registered_agent_requests_are_labelled() {
+    use peekexec_proto::view::Provenance;
+    let d = Daemon::start("approve");
+    let me = std::process::id();
+
+    assert_eq!(
+        preview_view(&d, sh("true")).provenance,
+        Provenance::Unregistered
+    );
+
+    let r = register(&d, me);
+    assert_eq!(r.status, Status::Approved, "{r:?}");
+    let session = r.session.unwrap();
+    assert!(session.starts_with("s-"));
+    assert_eq!(
+        register(&d, me).session.as_deref(),
+        Some(session.as_str()),
+        "idempotent"
+    );
+
+    // The agent process itself asks: direct.
+    let v = preview_view(&d, sh("true"));
+    assert!(
+        matches!(&v.provenance, Provenance::Direct { agent, .. } if agent == "Test Agent"),
+        "{:?}",
+        v.provenance
+    );
+
+    // A program the agent started asks (not the peekexec CLI): indirect.
+    let script = format!(
+        "import json,socket;s=socket.socket(socket.AF_UNIX);s.connect({:?});\
+         s.sendall((json.dumps({{'op':'preview','request':json.loads({:?})}})+'\\n').encode());\
+         print(s.makefile().readline())",
+        d.socket.to_str().unwrap(),
+        serde_json::to_string(&sh("true")).unwrap()
+    );
+    let out = Command::new("sh")
+        .args(["-c", "python3 -c \"$0\"", &script])
+        .output()
+        .unwrap();
+    let reply: PreviewReply =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {out:?}"));
+    let PreviewReply::Ok { view } = reply else {
+        panic!("{reply:?}")
+    };
+    let Provenance::Indirect { via, .. } = &view.provenance else {
+        panic!("{:?}", view.provenance)
+    };
+    assert!(via.iter().any(|p| p.starts_with("python3")), "{via:?}");
+    assert!(view
+        .notes
+        .iter()
+        .any(|n| n.contains("a program it started")));
+    assert!(!view.enter_approves);
+
+    let r = d.send(&ClientMsg::Unregister);
+    assert_eq!(r.stdout.as_deref(), Some("removed 1 agent session(s)\n"));
+    assert_eq!(
+        preview_view(&d, sh("true")).provenance,
+        Provenance::Unregistered
+    );
+}
+
+#[test]
+fn denied_registration_creates_no_session() {
+    let d = Daemon::start("deny:not now");
+    let r = register(&d, std::process::id());
+    assert_eq!(r.status, Status::Denied);
+    assert!(r.session.is_none());
+    let r = d.send(&ClientMsg::Register {
+        name: "x".into(),
+        agent_pid: Some(1),
+        why: None,
+        timeout_secs: 30,
+    });
+    assert!(r.error.unwrap().contains("ancestors"));
+}

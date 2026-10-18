@@ -49,6 +49,24 @@ enum Cmd {
     },
     /// Withdraw a pending request (the dialog closes)
     Cancel { id: String },
+    /// Register your agent session (one dialog), so later requests are
+    /// labelled as yours, direct or via a program you started
+    Register {
+        /// Name shown on your requests, e.g. "Claude Code"
+        #[arg(long, default_value = "agent")]
+        name: String,
+        /// The agent process [default: nearest ancestor that is not a shell]
+        #[arg(long, value_name = "PID")]
+        agent_pid: Option<u32>,
+        /// Why you are registering, shown to the human marked "unverified"
+        #[arg(long)]
+        why: Option<String>,
+        /// Seconds the human has to respond
+        #[arg(long, default_value_t = 120)]
+        timeout: u32,
+    },
+    /// End your agent session's registration
+    Unregister,
     /// More help: `agents` (guide for automated callers) or `schema` (JSON Schema of --json output)
     Help { topic: Option<Topic> },
 }
@@ -425,5 +443,20 @@ fn main() -> ExitCode {
             json,
         ),
         Cmd::Cancel { id } => send(ClientMsg::Cancel { id }, json),
+        Cmd::Register {
+            name,
+            agent_pid,
+            why,
+            timeout,
+        } => send(
+            ClientMsg::Register {
+                name,
+                agent_pid,
+                why,
+                timeout_secs: timeout,
+            },
+            json,
+        ),
+        Cmd::Unregister => send(ClientMsg::Unregister, json),
     }
 }

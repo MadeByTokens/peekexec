@@ -191,7 +191,7 @@ such displays are reported as unverified. Work, in a Ubuntu 24.04 desktop VM:
 The uid is certain; process names are not (any program of the user can name
 itself "claude"). Plan:
 
-1. **Registered agent sessions.** The human approves once, at agent start:
+1. **Registered agent sessions** ✅ (`peekexec register`). The human approves once, at agent start:
    "register Claude Code (pid N) in ~/proj". The daemon pins that process
    (pidfd) and checks every later request's ancestry against it, showing
    *direct* requests (agent → shell → peekexec) differently from requests by

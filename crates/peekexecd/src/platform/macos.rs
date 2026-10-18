@@ -9,8 +9,8 @@ use std::process::Child;
 use peekexec_proto::Enforced;
 
 use super::{
-    declared_only, Authenticator, ExecPlan, Listener, Peer, PeerInfo, Platform, PlatformError,
-    Sandbox, XServer,
+    declared_only, Authenticator, ExecPlan, Listener, Peer, PeerInfo, Pinned, Platform,
+    PlatformError, Sandbox, XServer,
 };
 
 pub fn platform() -> Platform {
@@ -41,6 +41,14 @@ impl PeerInfo for Unported {
 
     fn verified_x_server(&self, _uid: u32) -> Option<XServer> {
         None
+    }
+
+    fn pin(&self, _pid: u32, _start_time: u64) -> Option<Pinned> {
+        None
+    }
+
+    fn alive(&self, _p: &Pinned) -> bool {
+        false
     }
 }
 

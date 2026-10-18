@@ -12,7 +12,7 @@ use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
 use peekexec_core::textcheck::{classify, scan, FindingKind};
 use peekexec_core::{Action, Request};
-use peekexec_proto::view::{ProcLine, PromptView, Section, Syntax};
+use peekexec_proto::view::{ProcLine, PromptView, Provenance, Section, Syntax, ViewKind};
 use peekexec_proto::{Enforced, Level};
 
 use crate::platform::{ExecPlan, Peer, ProcessInfo, Sandbox};
@@ -21,6 +21,8 @@ use crate::trust::{self, SAFE_PATH};
 
 pub enum Execution {
     Command(ExecPlan),
+    /// Nothing runs (agent registration).
+    Nothing,
     /// Written by the daemon itself; no program runs.
     Install {
         dest: PathBuf,
@@ -234,6 +236,8 @@ pub fn prepare(
         .map(proc_line)
         .collect();
     let view = PromptView {
+        kind: ViewKind::Root,
+        provenance: Provenance::Unregistered,
         request_id: id.to_string(),
         sha256: req.digest(),
         requester,
@@ -275,7 +279,7 @@ pub fn prepare(
 
 /// Text for a single dialog line: characters that could fake extra lines or
 /// hide text become visible `⟨U+XXXX⟩` tokens, and long text is cut.
-fn display_line(s: &str, max_chars: usize) -> String {
+pub fn display_line(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
         if i == max_chars {
@@ -664,7 +668,7 @@ fn install_target(dest: &str, src: &str, owners: &[u32]) -> Result<PathBuf, Stri
 /// Process details are under the control of whoever runs the process, so
 /// they are escaped, and `trusted` says whether the executable is a
 /// root-owned file that only root could have put there.
-fn proc_line(p: &ProcessInfo) -> ProcLine {
+pub fn proc_line(p: &ProcessInfo) -> ProcLine {
     let trusted = p
         .exe
         .as_deref()

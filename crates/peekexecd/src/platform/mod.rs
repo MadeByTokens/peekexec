@@ -42,6 +42,19 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub exe: Option<String>,
     pub cmdline: Vec<String>,
+    /// Kernel start time (clock ticks since boot): with the pid, identifies
+    /// the process even after the pid is reused.
+    pub start_time: Option<u64>,
+}
+
+/// A process held so that its pid cannot silently come to mean another one.
+#[derive(Debug)]
+pub struct Pinned {
+    pub pid: u32,
+    pub start_time: u64,
+    /// Kept open to hold the process; read by the Linux backend.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) handle: Option<std::os::fd::OwnedFd>,
 }
 
 /// Who is asking, as established by the kernel, not by the caller.
@@ -77,6 +90,10 @@ pub trait PeerInfo: Send + Sync {
     /// from sources the requester cannot control. `None` if it cannot be
     /// verified (the dialog then says so).
     fn verified_x_server(&self, uid: u32) -> Option<XServer>;
+    /// Hold `pid` if it is still the process that started at `start_time`.
+    fn pin(&self, pid: u32, start_time: u64) -> Option<Pinned>;
+    /// Whether a pinned process is still running.
+    fn alive(&self, p: &Pinned) -> bool;
 }
 
 /// Checks the human's credentials. The approval itself (the Approve click)

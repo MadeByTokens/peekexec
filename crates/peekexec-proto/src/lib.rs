@@ -152,6 +152,9 @@ pub struct Response {
     /// the requesting user, not as root.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dev_mode: bool,
+    /// The agent session id (register).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -177,6 +180,7 @@ impl Response {
             display_tier: None,
             display_verified: None,
             dev_mode: false,
+            session: None,
             error: None,
         }
     }
@@ -205,6 +209,16 @@ pub enum ClientMsg {
     Preview {
         request: Request,
     },
+    /// Ask the human to register an agent process (default: the caller's
+    /// nearest non-shell ancestor), so its later requests are labelled.
+    Register {
+        name: String,
+        agent_pid: Option<u32>,
+        why: Option<String>,
+        timeout_secs: u32,
+    },
+    /// End the registrations of the caller's agent ancestors.
+    Unregister,
 }
 
 /// Daemon → client reply to [`ClientMsg::Preview`].

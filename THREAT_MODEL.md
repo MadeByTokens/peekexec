@@ -42,6 +42,24 @@ It does not promise:
    proves the pid was not reused, not that the process did not exec something
    else. Ancestors are best effort. Processes whose executable is not
    root-owned are marked.
+
+   **Registered agent sessions** make "which agent asked" checkable. The human
+   approves a registration once (password, like any request); it pins one
+   process (pidfd plus kernel start time, so a reused pid does not inherit
+   it) and ends when that process exits. Each later request is matched
+   against the kernel's ancestry of the connecting process:
+   - *direct*: the installed, root-owned `peekexec` was run by a root-owned
+     shell started with `-c` by the registered process (the agent's own
+     command, shown in the dialog), or by that process itself;
+   - *via a program it started*: anything else between them (a script file,
+     `make`, an interpreter, another client), flagged and Enter disabled;
+   - *unregistered*: no registered process among the ancestors.
+
+   A process cannot add a registered agent to its own ancestry, so it cannot
+   claim "direct" for a request it makes on its own. What this cannot prove:
+   what the agent intended (its `--why` is a claim), or that the agent itself
+   was not compromised; a process that can control the agent (same uid,
+   ptrace allowed) can act as it.
 2. **Shown ↔ executed.**
    - Script and install contents travel inside the request. Scripts run from a
      root-only snapshot; the caller's file is never re-read.

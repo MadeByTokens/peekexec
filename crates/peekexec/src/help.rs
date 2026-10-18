@@ -14,6 +14,12 @@ or deny with a written reason that is returned to you.";
 
 pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
 
+0. Once per session, register:  peekexec register --json --name "Claude Code" \
+     --why "so you can tell my requests apart from other programs"
+   The human approves once. Afterwards each dialog says whether a request is
+   your own command (direct) or came from a program you started (flagged).
+   It ends when your process exits, or with `peekexec unregister`.
+
 1. Preview first:  peekexec preview run --write /etc/foo -- sh -c '...'
    It shows what the human will see, without root and without a prompt.
    Fix any flags you did not intend before asking the human.

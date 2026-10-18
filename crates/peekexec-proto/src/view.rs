@@ -28,6 +28,35 @@ impl ProcLine {
     }
 }
 
+/// What the human is asked to approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewKind {
+    /// Running something as root.
+    Root,
+    /// Registering an agent process; nothing runs.
+    Register,
+}
+
+/// Where a request came from, relative to registered agent sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Provenance {
+    Unregistered,
+    /// From the agent's own command (shown), or the agent process itself.
+    Direct {
+        agent: String,
+        since: String,
+        command: Option<String>,
+    },
+    /// From a program the agent started.
+    Indirect {
+        agent: String,
+        since: String,
+        via: Vec<String>,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Syntax {
@@ -51,6 +80,8 @@ pub struct Section {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptView {
+    pub kind: ViewKind,
+    pub provenance: Provenance,
     pub request_id: String,
     pub sha256: String,
     /// The requesting process first, then its parent, grandparent, ...
@@ -145,7 +176,22 @@ impl PromptView {
             t.push_str(&s);
             t.push('\n');
         };
-        line("Root access requested".into());
+        line(match self.kind {
+            ViewKind::Root => "Root access requested".into(),
+            ViewKind::Register => "Register an agent session".into(),
+        });
+        line(format!(
+            "  origin  : {}",
+            match &self.provenance {
+                Provenance::Unregistered => "not from a registered agent session".to_string(),
+                Provenance::Direct { agent, since, .. } =>
+                    format!("{agent} (registered {since}), its own command"),
+                Provenance::Indirect { agent, since, via } => format!(
+                    "{agent} (registered {since}), via a program it started: {}",
+                    via.join(" → ")
+                ),
+            }
+        ));
         line(format!(
             "  from    : {}  [user {}]",
             self.requester_chain(" ← ", 6),

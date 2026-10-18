@@ -14,10 +14,15 @@ use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::{ClientMsg, DisplayTier, PreviewReply, Response, Status};
 
 use crate::exec;
-use crate::platform::{Peer, Platform};
-use crate::prepare::{self, Ctx, Execution, Prepared, User};
+use crate::platform::{Peer, Platform, ProcessInfo};
+use crate::prepare::{self, display_line, proc_line, Ctx, Execution, Prepared, User};
 use crate::prompt::{self, Decision, Dialog};
 use crate::session::{self, Display};
+use crate::sessions::{self, AgentSession};
+use crate::trust;
+use peekexec_core::format::verbatim;
+use peekexec_proto::view::{PromptView, Provenance, Section, Syntax, ViewKind};
+use peekexec_proto::{Enforced, Level};
 
 pub struct Options {
     pub socket: PathBuf,
@@ -40,6 +45,8 @@ const MAX_PENDING_PER_USER: usize = 3;
 const BACK_TO_BACK: Duration = Duration::from_secs(10);
 /// Open connections a user may hold at once.
 const MAX_CONNECTIONS_PER_USER: usize = 16;
+/// Registered agent sessions a user may have at once.
+const MAX_AGENTS_PER_USER: usize = 4;
 
 pub struct Daemon {
     opts: Options,
@@ -52,6 +59,8 @@ pub struct Daemon {
     last_prompt: Mutex<Option<Instant>>,
     /// Open connections per uid.
     connections: Mutex<HashMap<u32, usize>>,
+    /// Agent processes the human registered.
+    agents: Mutex<Vec<AgentSession>>,
 }
 
 struct Entry {
@@ -94,6 +103,7 @@ impl Daemon {
             prompt_lock: Mutex::new(()),
             last_prompt: Mutex::new(None),
             connections: Mutex::default(),
+            agents: Mutex::default(),
         }
     }
 
@@ -221,6 +231,13 @@ impl Daemon {
                     .unwrap_or_else(|| pending(&id)),
                 None => Response::error(format!("no such request: {id}")),
             },
+            ClientMsg::Register {
+                name,
+                agent_pid,
+                why,
+                timeout_secs,
+            } => self.register(&peer, &name, agent_pid, why.as_deref(), timeout_secs),
+            ClientMsg::Unregister => self.unregister(&peer),
             ClientMsg::Cancel { id } => match self.lookup(&id, peer.uid) {
                 Some(entry) => {
                     entry.cancel.store(true, Ordering::SeqCst);
@@ -323,7 +340,261 @@ impl Daemon {
             &display,
             false,
         )
-        .map(|p| p.view)
+        .map(|p| {
+            let mut view = p.view;
+            self.apply_provenance(peer, &mut view);
+            view
+        })
+    }
+
+    fn chain(peer: &Peer) -> Vec<ProcessInfo> {
+        std::iter::once(peer.process.clone())
+            .chain(peer.ancestry.iter().cloned())
+            .collect()
+    }
+
+    /// Where this request came from, relative to the registered agents.
+    fn provenance(&self, peer: &Peer) -> Provenance {
+        let chain = Self::chain(peer);
+        let mut agents = self.agents.lock().unwrap();
+        agents.retain(|s| self.platform.peer.alive(&s.pinned));
+        let mine: Vec<&AgentSession> = agents.iter().filter(|s| s.uid == peer.uid).collect();
+        let owners = trust::trusted_owners();
+        let is_live = |s: &AgentSession, p: &ProcessInfo| {
+            p.pid == s.pinned.pid && p.start_time == Some(s.pinned.start_time)
+        };
+        let trusted = |exe: &str| trust::check(std::path::Path::new(exe), &owners).is_ok();
+        let since = |name: &str| {
+            mine.iter()
+                .find(|s| s.name == name)
+                .map(|s| hhmm(s.registered_at))
+                .unwrap_or_default()
+        };
+        match sessions::classify(&chain, &mine, &is_live, &trusted) {
+            sessions::Provenance::Unregistered => Provenance::Unregistered,
+            sessions::Provenance::Direct { session, command } => Provenance::Direct {
+                since: since(&session),
+                agent: session,
+                command: command.map(|c| display_line(&c, 600)),
+            },
+            sessions::Provenance::Indirect { session, via } => Provenance::Indirect {
+                since: since(&session),
+                agent: session,
+                via: via.iter().map(|v| display_line(v, 120)).collect(),
+            },
+        }
+    }
+
+    fn apply_provenance(&self, peer: &Peer, view: &mut PromptView) {
+        let provenance = self.provenance(peer);
+        if let Provenance::Indirect { agent, via, .. } = &provenance {
+            view.notes.insert(
+                0,
+                format!(
+                    "Not {agent}'s own command: a program it started is asking ({}).",
+                    via.join(" → ")
+                ),
+            );
+            view.enter_approves = false;
+        }
+        view.provenance = provenance;
+    }
+
+    fn register(
+        &self,
+        peer: &Peer,
+        name: &str,
+        agent_pid: Option<u32>,
+        why: Option<&str>,
+        timeout_secs: u32,
+    ) -> Response {
+        let id = format!("s-{}", &new_id()[2..]);
+        let fail = |m: String| Response {
+            request_id: Some(id.clone()),
+            ..Response::error(m)
+        };
+        let user = match user_of(peer.uid) {
+            Ok(u) => u,
+            Err(e) => return fail(e),
+        };
+        let name = match display_line(name.trim(), 40) {
+            n if n.is_empty() => "agent".to_string(),
+            n => n,
+        };
+        let chain = Self::chain(peer);
+        let agent = match agent_pid {
+            Some(pid) => chain.iter().find(|p| p.pid == pid),
+            None => sessions::default_agent(&chain),
+        };
+        let Some(agent) = agent else {
+            return fail(
+                "no agent process: --agent-pid must be the caller or one of its ancestors".into(),
+            );
+        };
+        let Some(start_time) = agent.start_time else {
+            return fail(format!("cannot read the start time of pid {}", agent.pid));
+        };
+        {
+            let mut agents = self.agents.lock().unwrap();
+            agents.retain(|s| self.platform.peer.alive(&s.pinned));
+            if let Some(s) = agents.iter().find(|s| {
+                s.uid == peer.uid && s.pinned.pid == agent.pid && s.pinned.start_time == start_time
+            }) {
+                return Response {
+                    session: Some(s.id.clone()),
+                    stdout: Some(format!("already registered as \"{}\"\n", s.name)),
+                    ..Response::new(Status::Approved)
+                };
+            }
+            if agents.iter().filter(|s| s.uid == peer.uid).count() >= MAX_AGENTS_PER_USER {
+                return fail(format!(
+                    "refused: {MAX_AGENTS_PER_USER} agent sessions are already registered"
+                ));
+            }
+        }
+        let Some(pinned) = self.platform.peer.pin(agent.pid, start_time) else {
+            return fail(format!("cannot pin pid {} (it may have exited)", agent.pid));
+        };
+        let display = if self.opts.test_approver.is_some() {
+            Some(Display {
+                vars: Vec::new(),
+                tier: DisplayTier::X11,
+                verified: false,
+            })
+        } else {
+            self.display_for(peer)
+        };
+        let Some(display) = display else {
+            return fail(format!(
+                "no graphical session found for {}: the dialog needs a desktop session",
+                user.name
+            ));
+        };
+        let line = proc_line(agent);
+        let exe = line.exe.clone().unwrap_or_else(|| "?".into());
+        let description = format!(
+            "Register this process as the agent \"{name}\":\n\n  pid {} (started at tick {start_time})\n  executable: {exe}\n  command line: {}\n\nFrom now on, its requests are labelled \"{name}\": the ones it makes \
+             directly (its own shell commands) as direct, the ones made by programs it \
+             starts as such. Nothing runs as root now. The registration ends when this \
+             process exits.\n",
+            agent.pid,
+            line.cmdline.join(" "),
+        );
+        let mut notes = Vec::new();
+        if self.opts.dev {
+            notes.push("DEVELOPMENT MODE.".to_string());
+        }
+        if !display.verified {
+            notes.push("Could not verify which display server shows this dialog.".into());
+        }
+        if !line.trusted {
+            notes.push(format!(
+                "{exe} can be modified by its owner: anything running as you could replace it."
+            ));
+        }
+        let enforced = Enforced {
+            write: Some(Vec::new()),
+            write_level: Level::Builtin,
+            network: false,
+            network_level: Level::Builtin,
+        };
+        let view = PromptView {
+            kind: ViewKind::Register,
+            provenance: Provenance::Unregistered,
+            request_id: id.clone(),
+            sha256: peekexec_core::request::sha256_hex(description.as_bytes()),
+            requester: chain.iter().map(proc_line).collect(),
+            requester_user: user.name.clone(),
+            pinned: peer.pinned,
+            cwd: display_line(peer.cwd.as_deref().unwrap_or("?"), 300),
+            run_as: "nothing runs (registration only)".into(),
+            dev_mode: self.opts.dev,
+            why: why.map(|w| display_line(w, 300)),
+            enforced: enforced.clone(),
+            display_tier: display.tier,
+            display_verified: display.verified,
+            env: Vec::new(),
+            sections: vec![Section {
+                title: "agent session".into(),
+                header: None,
+                syntax: Syntax::Plain,
+                formatted: verbatim(&description),
+                raw: description,
+            }],
+            notes,
+            timeout_secs: timeout_secs.clamp(5, prepare::MAX_TIMEOUT_SECS),
+            wants_password: self.platform.auth.wants_password(),
+            input_guard_ms: 400,
+            enter_approves: false,
+        };
+        let prepared = Prepared {
+            view,
+            exec: Execution::Nothing,
+            enforced,
+            snapshot_dir: None,
+        };
+        let cancel = AtomicBool::new(false);
+        let decision = {
+            let _one_at_a_time = self.prompt_lock.lock().unwrap();
+            let d = self.decide(&prepared, &display, &user, peer, &cancel);
+            *self.last_prompt.lock().unwrap() = Some(Instant::now());
+            d
+        };
+        let base = |status| Response {
+            request_id: Some(id.clone()),
+            dev_mode: self.opts.dev,
+            display_tier: Some(display.tier),
+            display_verified: Some(display.verified),
+            ..Response::new(status)
+        };
+        let response = match decision {
+            Ok(Decision::Approved) => {
+                self.agents.lock().unwrap().push(AgentSession {
+                    id: id.clone(),
+                    name: name.clone(),
+                    uid: peer.uid,
+                    pinned,
+                    registered_at: std::time::SystemTime::now(),
+                });
+                Response {
+                    session: Some(id.clone()),
+                    ..base(Status::Approved)
+                }
+            }
+            Ok(Decision::Cancelled) => base(Status::Cancelled),
+            Ok(Decision::TimedOut) => base(Status::Timeout),
+            Ok(Decision::AuthFailed) => base(Status::AuthFailed),
+            Ok(Decision::Denied(reason)) => Response {
+                deny_reason: Some(reason),
+                ..base(Status::Denied)
+            },
+            Err(e) => fail(e),
+        };
+        eprintln!(
+            "peekexecd: audit register id={id} uid={} pid={} agent_pid={} agent_exe={exe:?} name={name:?} status={}",
+            peer.uid,
+            peer.process.pid,
+            agent.pid,
+            response.status.as_str()
+        );
+        response
+    }
+
+    fn unregister(&self, peer: &Peer) -> Response {
+        let chain = Self::chain(peer);
+        let mut agents = self.agents.lock().unwrap();
+        let before = agents.len();
+        agents.retain(|s| {
+            !(s.uid == peer.uid
+                && chain
+                    .iter()
+                    .any(|p| p.pid == s.pinned.pid && p.start_time == Some(s.pinned.start_time)))
+        });
+        let removed = before - agents.len();
+        Response {
+            stdout: Some(format!("removed {removed} agent session(s)\n")),
+            ..Response::new(Status::Approved)
+        }
     }
 
     fn display_for(&self, peer: &Peer) -> Option<Display> {
@@ -389,6 +660,7 @@ impl Daemon {
         }
 
         let mut prepared = prepared;
+        self.apply_provenance(peer, &mut prepared.view);
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
             let recent = self
@@ -474,6 +746,11 @@ impl Daemon {
         let outcome = match &prepared.exec {
             Execution::Command(plan) => exec::run(self.platform.sandbox.as_ref(), plan),
             Execution::Install { dest, content } => exec::install(dest, content, id),
+            Execution::Nothing => Ok(exec::Outcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
         };
         match outcome {
             Ok(o) => Response {
@@ -532,6 +809,20 @@ impl Drop for ConnectionSlot<'_> {
             }
         }
     }
+}
+
+/// Local wall-clock time as HH:MM.
+fn hhmm(t: std::time::SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    // SAFETY: localtime_r writes into the zeroed tm we own.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return String::new();
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 fn pending(id: &str) -> Response {

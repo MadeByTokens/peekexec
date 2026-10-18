@@ -1905,6 +1905,7 @@ dependencies = [
  "nix",
  "peekexec-core",
  "peekexec-proto",
+ "serde_json",
  "similar",
  "thiserror 2.0.21",
 ]

@@ -15,14 +15,16 @@ or deny with a written reason that is returned to you.
 Usage: peekexec [OPTIONS] <COMMAND>
 
 Commands:
-  run      Run a command as root
-  script   Run a script file as root (snapshotted: edits after submission have no effect)
-  install  Copy a file as root (the human sees it, and a diff when replacing); writes only DEST
-  preview  Show what the human would see; no root, no prompt
-  submit   Like run/script/install, but return a request id immediately
-  wait     Wait for a submitted request
-  cancel   Withdraw a pending request (the dialog closes)
-  help     More help: `agents` (guide for automated callers) or `schema` (JSON Schema of --json output)
+  run         Run a command as root
+  script      Run a script file as root (snapshotted: edits after submission have no effect)
+  install     Copy a file as root (the human sees it, and a diff when replacing); writes only DEST
+  preview     Show what the human would see; no root, no prompt
+  submit      Like run/script/install, but return a request id immediately
+  wait        Wait for a submitted request
+  cancel      Withdraw a pending request (the dialog closes)
+  register    Register your agent session (one dialog), so later requests are labelled as yours, direct or via a program you started
+  unregister  End your agent session's registration
+  help        More help: `agents` (guide for automated callers) or `schema` (JSON Schema of --json output)
 
 Options:
       --json
@@ -52,6 +54,12 @@ Run `peekexec help agents` before your first request.
 
 ```
 GUIDE FOR AUTOMATED CALLERS
+
+0. Once per session, register:  peekexec register --json --name "Claude Code" \
+     --why "so you can tell my requests apart from other programs"
+   The human approves once. Afterwards each dialog says whether a request is
+   your own command (direct) or came from a program you started (flagged).
+   It ends when your process exits, or with `peekexec unregister`.
 
 1. Preview first:  peekexec preview run --write /etc/foo -- sh -c '...'
    It shows what the human will see, without root and without a prompt.

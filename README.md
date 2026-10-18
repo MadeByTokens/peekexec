@@ -19,6 +19,8 @@ pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
 - who connected (uid from the kernel; the process chain, with processes whose
   executable root does not own marked as such) and the reason they give
   (labelled unverified);
+- for a registered agent session (`peekexec register`, approved once): whether
+  the request is the agent's own command or came from a program it started;
 - what it declares it will touch, and how much of that is actually enforced.
 
 You approve with your password, cancel, or deny with a written reason that the
@@ -28,6 +30,7 @@ requester receives.
 peekexec run --json --why "reload udev rules for the ST-LINK probe" -- udevadm control --reload-rules
 peekexec install --json --why "add the vendor's udev rule" 49-stlink.rules /etc/udev/rules.d/
 peekexec script --json --why "set up the toolchain" ./setup.sh
+peekexec register --json --name "Claude Code" --why "label my requests"   # once per session
 peekexec help agents     # the guide for automated callers
 ```
 
