@@ -54,11 +54,12 @@ something harmful; peekexec makes sure they could see it first.
    could run a nested server (Xephyr, nested weston) on the real screen, show
    the genuine dialog inside it, and capture the password. So the display is
    never taken from the requester's environment when it can be verified: on
-   Linux the daemon picks the X server running inside the cgroup scope of the
-   user's active local logind session (root-owned; user processes cannot move
-   into it), requires a root-owned `Xorg`/`Xwayland` binary, reads the display
-   number from the socket that process listens on, and the cookie path from
-   its own `-auth` argument. When that is impossible (Wayland compositors,
+   Linux the daemon accepts only an X server that is inside the cgroup scope of
+   the user's active local X11 logind session (root-owned; processes cannot
+   move into it), descends from that session's leader, runs a root-owned
+   `Xorg` started for the session's VT, and is the only process meeting all of
+   that. The display number comes from the socket that process listens on,
+   the cookie path from its own `-auth` argument. When that is impossible (Wayland compositors,
    systems without logind), the dialog falls back to the user's environment
    and says, in the dialog and as `display_verified: false`, that the display
    is unverified. See also the tiers below.

@@ -3,11 +3,19 @@
 //! of its own (e.g. a nested Xephyr shown on the real screen) and read the
 //! password as it is typed.
 //!
-//! The X server must be: inside the cgroup scope of the user's active local
-//! graphical logind session (scopes are root-owned; user processes cannot
-//! move into them), running a root-owned `Xorg`/`Xwayland` binary, and the
-//! display number is read from the socket that very process listens on. The
-//! cookie path comes from its own `-auth` argument.
+//! The X server must be, all at once:
+//! - inside the cgroup scope of the user's active local X11 logind session
+//!   (scopes are root-owned; processes cannot move into them),
+//! - a descendant of that session's leader process (as logind records it),
+//! - a root-owned `Xorg` binary started for the session's VT (`vtN`; a second
+//!   Xorg cannot take a VT that is in use),
+//! - the only process meeting all of the above.
+//!
+//! The display number is read from the socket that very process listens on,
+//! the cookie path from its own `-auth` argument. Anything less returns
+//! `None`, and the dialog reports the display as unverified. Wayland
+//! sessions are never verified here: there the compositor is the display
+//! server, and checking Xwayland would verify the wrong thing.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,11 +25,19 @@ use crate::trust;
 
 const SESSIONS: &str = "/run/systemd/sessions";
 
+#[derive(Debug, PartialEq, Eq)]
+struct Session {
+    scope: String,
+    leader: u32,
+    vt: Option<u32>,
+}
+
 pub fn verified_x_server(uid: u32) -> Option<XServer> {
-    let scopes = active_graphical_scopes(uid);
-    if scopes.is_empty() {
+    let sessions = active_x11_sessions(uid);
+    if sessions.is_empty() {
         return None;
     }
+    let mut found = Vec::new();
     for entry in std::fs::read_dir("/proc").ok()?.filter_map(Result::ok) {
         let Some(pid) = entry
             .file_name()
@@ -33,43 +49,57 @@ pub fn verified_x_server(uid: u32) -> Option<XServer> {
         let Ok(cgroup) = std::fs::read_to_string(format!("/proc/{pid}/cgroup")) else {
             continue;
         };
-        if !scopes.iter().any(|s| in_scope(&cgroup, s)) {
+        let Some(session) = sessions.iter().find(|s| in_scope(&cgroup, &s.scope)) else {
             continue;
-        }
+        };
         let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
             continue;
         };
-        let name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !matches!(name, "Xorg" | "Xwayland") || trust::check(&exe, &[0]).is_err() {
+        if exe.file_name().and_then(|n| n.to_str()) != Some("Xorg")
+            || trust::check(&exe, &[0]).is_err()
+        {
+            continue;
+        }
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        if let Some(vt) = session.vt {
+            if !has_arg(&cmdline, &format!("vt{vt}")) {
+                continue;
+            }
+        }
+        if !descends_from(pid, session.leader) {
             continue;
         }
         let Some(display) = listening_display(pid) else {
             continue;
         };
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        return Some(XServer {
+        found.push(XServer {
             display: format!(":{display}"),
             xauthority: auth_arg(&cmdline),
         });
     }
-    None
+    // Ambiguity is not verification.
+    if found.len() == 1 {
+        found.pop()
+    } else {
+        None
+    }
 }
 
-/// Scopes of the user's active, local, graphical sessions.
-fn active_graphical_scopes(uid: u32) -> Vec<String> {
+/// The user's active, local X11 sessions.
+fn active_x11_sessions(uid: u32) -> Vec<Session> {
     let Ok(dir) = std::fs::read_dir(SESSIONS) else {
         return Vec::new();
     };
     dir.filter_map(Result::ok)
         .filter(|e| !e.file_name().to_string_lossy().contains('.'))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .filter_map(|text| graphical_scope(&text, uid))
+        .filter_map(|text| parse_session(&text, uid))
         .collect()
 }
 
-/// The SCOPE of a logind session record, if it is this user's active,
-/// local, graphical session.
-fn graphical_scope(record: &str, uid: u32) -> Option<String> {
+/// A logind session record, if it is this user's active, local X11 session
+/// with a known scope and leader.
+fn parse_session(record: &str, uid: u32) -> Option<Session> {
     let get = |key: &str| {
         record
             .lines()
@@ -78,8 +108,42 @@ fn graphical_scope(record: &str, uid: u32) -> Option<String> {
     let ok = get("UID") == Some(uid.to_string().as_str())
         && get("ACTIVE") == Some("1")
         && get("REMOTE") != Some("1")
-        && matches!(get("TYPE"), Some("x11" | "wayland"));
-    ok.then(|| get("SCOPE").map(str::to_string)).flatten()
+        && get("TYPE") == Some("x11");
+    if !ok {
+        return None;
+    }
+    Some(Session {
+        scope: get("SCOPE")?.to_string(),
+        leader: get("LEADER")?.parse().ok()?,
+        vt: get("VTNR").and_then(|v| v.parse().ok()),
+    })
+}
+
+fn descends_from(mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        if pid == ancestor {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(ppid) = stat
+            .rfind(')')
+            .and_then(|i| stat[i + 1..].split_whitespace().nth(1))
+            .and_then(|p| p.parse().ok())
+        else {
+            return false;
+        };
+        pid = ppid;
+    }
+    false
+}
+
+fn has_arg(cmdline: &[u8], want: &str) -> bool {
+    cmdline.split(|&b| b == 0).any(|a| a == want.as_bytes())
 }
 
 fn in_scope(cgroup: &str, scope: &str) -> bool {
@@ -143,31 +207,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn picks_active_local_graphical_session() {
-        let rec =
-            "UID=1000\nUSER=u\nACTIVE=1\nSTATE=active\nREMOTE=0\nTYPE=x11\nSCOPE=session-2.scope\n";
+    fn picks_active_local_x11_session() {
+        let rec = "UID=1000\nUSER=u\nACTIVE=1\nSTATE=active\nREMOTE=0\nTYPE=x11\nSCOPE=session-2.scope\nLEADER=3795\nVTNR=2\n";
         assert_eq!(
-            graphical_scope(rec, 1000).as_deref(),
-            Some("session-2.scope")
+            parse_session(rec, 1000),
+            Some(Session {
+                scope: "session-2.scope".into(),
+                leader: 3795,
+                vt: Some(2)
+            })
         );
-        assert_eq!(graphical_scope(rec, 1001), None);
+        assert_eq!(parse_session(rec, 1001), None);
         assert_eq!(
-            graphical_scope(&rec.replace("ACTIVE=1", "ACTIVE=0"), 1000),
+            parse_session(&rec.replace("ACTIVE=1", "ACTIVE=0"), 1000),
             None
         );
         assert_eq!(
-            graphical_scope(&rec.replace("REMOTE=0", "REMOTE=1"), 1000),
+            parse_session(&rec.replace("REMOTE=0", "REMOTE=1"), 1000),
             None
         );
         assert_eq!(
-            graphical_scope(&rec.replace("TYPE=x11", "TYPE=tty"), 1000),
+            parse_session(&rec.replace("TYPE=x11", "TYPE=wayland"), 1000),
             None
         );
+        assert_eq!(parse_session(&rec.replace("LEADER=3795\n", ""), 1000), None);
         // UID=10000 must not match uid 1000 by prefix.
         assert_eq!(
-            graphical_scope(&rec.replace("UID=1000", "UID=10000"), 1000),
+            parse_session(&rec.replace("UID=1000", "UID=10000"), 1000),
             None
         );
+    }
+
+    #[test]
+    fn ancestry_and_args() {
+        let me = std::process::id();
+        assert!(descends_from(me, me));
+        assert!(!descends_from(1, me));
+        assert!(has_arg(b"Xorg\0vt2\0-auth\0x\0", "vt2"));
+        assert!(!has_arg(b"Xorg\0vt22\0", "vt2"));
     }
 
     #[test]
