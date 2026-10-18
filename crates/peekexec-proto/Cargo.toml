@@ -1,0 +1,15 @@
+[package]
+name = "peekexec-proto"
+description = "Messages and result types shared by the peekexec client, daemon and dialog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+peekexec-core.workspace = true
+schemars.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "peekexecd"
+description = "Root daemon for peekexec: snapshots, prompts, authenticates, runs sandboxed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+nix.workspace = true
+peekexec-core.workspace = true
+peekexec-proto.workspace = true
+thiserror.workspace = true

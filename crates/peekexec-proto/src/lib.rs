@@ -1,0 +1,186 @@
+//! Wire types shared by the client, the daemon and the dialog.
+//!
+//! [`Status`] and [`Response`] are the public contract with automated
+//! callers: `peekexec help agents` and `peekexec help schema` are generated
+//! from them, so changing them changes the documented interface.
+
+use peekexec_core::Request;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Status {
+    /// The human approved and the command ran. `exit_code` is its own exit code.
+    Approved,
+    /// The request is waiting for the human (from `submit`, or `wait --timeout` expired).
+    Pending,
+    /// The human pressed Cancel / Esc / closed the dialog, or the caller withdrew it.
+    Cancelled,
+    /// The human denied it and wrote `deny_reason` for you.
+    Denied,
+    /// Three wrong passwords.
+    AuthFailed,
+    /// The human did not respond in time.
+    Timeout,
+    /// Invalid request or daemon unavailable; see `error`.
+    Error,
+}
+
+impl Status {
+    pub const ALL: [Status; 7] = [
+        Status::Approved,
+        Status::Pending,
+        Status::Cancelled,
+        Status::Denied,
+        Status::AuthFailed,
+        Status::Timeout,
+        Status::Error,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Status::Approved => "approved",
+            Status::Pending => "pending",
+            Status::Cancelled => "cancelled",
+            Status::Denied => "denied",
+            Status::AuthFailed => "auth_failed",
+            Status::Timeout => "timeout",
+            Status::Error => "error",
+        }
+    }
+
+    /// peekexec's own process exit code. `None` for [`Status::Approved`],
+    /// where the command's exit code is passed through instead.
+    pub fn exit_code(self) -> Option<u8> {
+        match self {
+            Status::Approved => None,
+            Status::Cancelled => Some(130),
+            Status::Denied => Some(131),
+            Status::AuthFailed => Some(132),
+            Status::Timeout => Some(133),
+            Status::Error => Some(134),
+            Status::Pending => Some(135),
+        }
+    }
+
+    pub fn meaning(self) -> &'static str {
+        match self {
+            Status::Approved => "approved; the command's own exit code",
+            Status::Pending => "still waiting for the human (wait --timeout expired)",
+            Status::Cancelled => "cancelled by the human, or withdrawn by you: stop, don't retry",
+            Status::Denied => "denied with a reason: read deny_reason, change your approach",
+            Status::AuthFailed => "authentication failed (3 wrong passwords)",
+            Status::Timeout => "timed out, no response from the human",
+            Status::Error => "invalid request or daemon unavailable: see error",
+        }
+    }
+}
+
+/// How a limit on the command was applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    /// Enforced by the kernel; the command cannot exceed it.
+    Kernel,
+    /// Requested and shown to the human, but this platform cannot enforce it.
+    DeclaredOnly,
+    /// No limit was requested.
+    NotRequested,
+}
+
+/// What was actually enforced for this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Enforced {
+    /// Paths the command could write. `None`: writes were not restricted.
+    pub write: Option<Vec<String>>,
+    pub write_level: Level,
+    /// Whether the command had network access.
+    pub network: bool,
+    pub network_level: Level,
+}
+
+/// The single JSON object printed by `--json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Response {
+    pub status: Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// SHA-256 of exactly what was (or would have been) executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Command output, decoded as UTF-8 with invalid bytes replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr: Option<String>,
+    /// The human's message to you. Delivered by the root daemon; it cannot
+    /// be forged by other processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deny_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforced: Option<Enforced>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl Response {
+    pub fn error(message: impl Into<String>) -> Self {
+        Response {
+            status: Status::Error,
+            request_id: None,
+            sha256: None,
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            deny_reason: None,
+            enforced: None,
+            error: Some(message.into()),
+        }
+    }
+}
+
+/// Client → daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ClientMsg {
+    /// Submit and block until the human answers and the command finishes.
+    Run {
+        request: Request,
+    },
+    /// Submit and return a `pending` response with a request id at once.
+    Submit {
+        request: Request,
+    },
+    Wait {
+        id: String,
+        timeout_secs: Option<u32>,
+    },
+    Cancel {
+        id: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_are_unique_and_outside_command_range() {
+        let mut codes: Vec<u8> = Status::ALL.iter().filter_map(|s| s.exit_code()).collect();
+        assert!(codes.iter().all(|&c| c > 125));
+        codes.sort();
+        codes.dedup();
+        assert_eq!(codes.len(), Status::ALL.len() - 1);
+    }
+
+    #[test]
+    fn as_str_matches_serde() {
+        for s in Status::ALL {
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(json, format!("\"{}\"", s.as_str()));
+        }
+    }
+}
