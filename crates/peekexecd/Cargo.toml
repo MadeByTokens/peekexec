@@ -25,4 +25,5 @@ thiserror.workspace = true
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "async-io"] }
 
 [dev-dependencies]
+proptest.workspace = true
 serde_json.workspace = true

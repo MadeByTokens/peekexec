@@ -29,6 +29,24 @@ pub struct AgentSession {
     pub registered_at: SystemTime,
 }
 
+impl AgentSession {
+    /// A session not backed by a real pinned process, for tests.
+    #[doc(hidden)]
+    pub fn for_tests(name: &str, pid: u32) -> Self {
+        AgentSession {
+            id: "s-test".into(),
+            name: name.into(),
+            uid: 1000,
+            pinned: Pinned {
+                pid,
+                start_time: pid as u64,
+                handle: None,
+            },
+            registered_at: SystemTime::now(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Provenance {
     /// No registered agent among the requester's ancestors.
