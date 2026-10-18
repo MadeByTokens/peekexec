@@ -112,7 +112,8 @@ It does not promise:
 Accepted for a single-seat desktop: an administrator's own processes can
 queue requests (at most 3 pending, 16 connections) and occupy the single
 dialog. Other users are rejected before sending a request. Any local user can
-crash polkitd on affected versions (a polkit bug, Launchpad #1562721); this
+crash polkitd on affected versions (a polkit bug, Launchpad #1562721; see
+[docs/notes/polkit-unix-session-crash.md](docs/notes/polkit-unix-session-crash.md)); this
 does not affect peekexec's X11 path.
 
 ## Audit
