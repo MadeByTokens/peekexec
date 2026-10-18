@@ -13,5 +13,6 @@ cd -; dev/wayland-vm/create.sh
 dev/wayland-vm/start.sh &        # first boot installs the desktop, then reboots
 dev/wayland-vm/ssh.sh            # user tester / password tester
 dev/wayland-vm/screenshot.sh /tmp/vm.png
+dev/wayland-vm/type.sh tester     # type into the VM (e.g. a password prompt), then Enter
 remote-viewer vnc://127.0.0.1:5905
 ```
