@@ -58,6 +58,14 @@ pub struct Peer {
     pub pinned: bool,
 }
 
+/// An X server verified to belong to the user's active local session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XServer {
+    /// `:N`
+    pub display: String,
+    pub xauthority: Option<String>,
+}
+
 pub trait PeerInfo: Send + Sync {
     fn identify(&self, conn: &UnixStream) -> Result<Peer, PlatformError>;
     /// Environment of a process the daemon may read (to find the user's
@@ -65,6 +73,10 @@ pub trait PeerInfo: Send + Sync {
     fn environ(&self, pid: u32) -> Option<Vec<(String, String)>>;
     /// Processes owned by `uid` (fallback when looking for a display).
     fn processes_of(&self, uid: u32) -> Vec<u32>;
+    /// The X server of `uid`'s active local graphical session, identified
+    /// from sources the requester cannot control. `None` if it cannot be
+    /// verified (the dialog then says so).
+    fn verified_x_server(&self, uid: u32) -> Option<XServer>;
 }
 
 /// Checks the human's credentials. The approval itself (the Approve click)

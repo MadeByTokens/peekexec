@@ -1,10 +1,13 @@
-//! Finding the requester's graphical session so the dialog appears on the
-//! human's screen. Agents often run without DISPLAY set, so after the
-//! requester's own chain we fall back to any process of the same user.
+//! Choosing the display the dialog appears on.
 //!
-//! The values come from processes the requester may control. That is only a
-//! denial-of-service risk: a dialog sent to the wrong display is simply never
-//! answered. Remote displays are refused outright.
+//! Whoever controls the display server sees every key typed into the dialog.
+//! A requester that could pick the display (DISPLAY / WAYLAND_DISPLAY in its
+//! own environment) could run a nested server (Xephyr, nested weston) shown
+//! on the real screen and capture the password. So the display comes from
+//! the platform's verified lookup (logind session + the X server process in
+//! it) whenever possible. Only when that fails do we fall back to the
+//! environment of the user's processes, and then the dialog and the response
+//! say the display is unverified. Remote displays are refused outright.
 
 use peekexec_proto::DisplayTier;
 
@@ -14,9 +17,20 @@ use crate::platform::{Peer, PeerInfo};
 pub struct Display {
     pub vars: Vec<(String, String)>,
     pub tier: DisplayTier,
+    /// Found from sources the requester cannot control.
+    pub verified: bool,
 }
 
 pub fn find(info: &dyn PeerInfo, peer: &Peer) -> Option<Display> {
+    if let Some(x) = info.verified_x_server(peer.uid) {
+        let mut vars = vec![("DISPLAY".to_string(), x.display)];
+        vars.extend(x.xauthority.map(|a| ("XAUTHORITY".to_string(), a)));
+        return Some(Display {
+            vars,
+            tier: DisplayTier::X11,
+            verified: true,
+        });
+    }
     let chain = std::iter::once(peer.process.pid).chain(peer.ancestry.iter().map(|p| p.pid));
     let rest = info.processes_of(peer.uid);
     chain
@@ -39,6 +53,7 @@ pub fn from_environ(env: &[(String, String)], uid: u32) -> Option<Display> {
                     ("XDG_RUNTIME_DIR".into(), rt.into()),
                 ],
                 tier: DisplayTier::Wayland,
+                verified: false,
             });
         }
     }
@@ -53,6 +68,7 @@ pub fn from_environ(env: &[(String, String)], uid: u32) -> Option<Display> {
     Some(Display {
         vars,
         tier: DisplayTier::X11,
+        verified: false,
     })
 }
 

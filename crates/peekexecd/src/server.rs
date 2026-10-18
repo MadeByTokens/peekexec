@@ -229,8 +229,21 @@ impl Daemon {
         request: &Request,
     ) -> Result<peekexec_proto::view::PromptView, String> {
         let user = user_of(peer.uid)?;
-        let tier = self.display_for(peer).map_or(DisplayTier::X11, |d| d.tier);
-        prepare::prepare(&self.ctx(), peer, &user, request, "preview", tier, false).map(|p| p.view)
+        let display = self.display_for(peer).unwrap_or(Display {
+            vars: Vec::new(),
+            tier: DisplayTier::X11,
+            verified: false,
+        });
+        prepare::prepare(
+            &self.ctx(),
+            peer,
+            &user,
+            request,
+            "preview",
+            &display,
+            false,
+        )
+        .map(|p| p.view)
     }
 
     fn display_for(&self, peer: &Peer) -> Option<Display> {
@@ -268,6 +281,7 @@ impl Daemon {
             Some(Display {
                 vars: Vec::new(),
                 tier: DisplayTier::X11,
+                verified: false,
             })
         } else {
             self.display_for(peer)
@@ -278,11 +292,11 @@ impl Daemon {
                 user.name
             ));
         };
-        let prepared =
-            match prepare::prepare(&self.ctx(), peer, &user, request, id, display.tier, true) {
-                Ok(p) => p,
-                Err(e) => return fail(e),
-            };
+        let prepared = match prepare::prepare(&self.ctx(), peer, &user, request, id, &display, true)
+        {
+            Ok(p) => p,
+            Err(e) => return fail(e),
+        };
 
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
@@ -312,6 +326,7 @@ impl Daemon {
         };
         response.enforced = Some(prepared.enforced.clone());
         response.display_tier = Some(display.tier);
+        response.display_verified = Some(display.verified);
         if let Some(dir) = &prepared.snapshot_dir {
             let _ = std::fs::remove_dir_all(dir);
         }

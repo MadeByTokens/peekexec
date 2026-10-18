@@ -10,7 +10,7 @@ use peekexec_proto::Enforced;
 
 use super::{
     declared_only, Authenticator, ExecPlan, Listener, Peer, PeerInfo, Platform, PlatformError,
-    Sandbox,
+    Sandbox, XServer,
 };
 
 pub fn platform() -> Platform {
@@ -37,6 +37,10 @@ impl PeerInfo for Unported {
 
     fn processes_of(&self, _uid: u32) -> Vec<u32> {
         Vec::new()
+    }
+
+    fn verified_x_server(&self, _uid: u32) -> Option<XServer> {
+        None
     }
 }
 

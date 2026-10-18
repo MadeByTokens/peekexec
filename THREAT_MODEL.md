@@ -49,7 +49,19 @@ something harmful; peekexec makes sure they could see it first.
    dialog → daemon → requester over pipes the requester cannot reach. An Approve
    click is always required before PAM runs, so a PAM stack that succeeds
    without a password still cannot skip the human.
-4. **Dialog ↔ human (the display).** See tiers.
+4. **Dialog ↔ human (the display).** Whoever runs the display server sees
+   every key typed into the dialog. A requester that could choose the display
+   could run a nested server (Xephyr, nested weston) on the real screen, show
+   the genuine dialog inside it, and capture the password. So the display is
+   never taken from the requester's environment when it can be verified: on
+   Linux the daemon picks the X server running inside the cgroup scope of the
+   user's active local logind session (root-owned; user processes cannot move
+   into it), requires a root-owned `Xorg`/`Xwayland` binary, reads the display
+   number from the socket that process listens on, and the cookie path from
+   its own `-auth` argument. When that is impossible (Wayland compositors,
+   systems without logind), the dialog falls back to the user's environment
+   and says, in the dialog and as `display_verified: false`, that the display
+   is unverified. See also the tiers below.
 5. **Executed command → system.** Limited by the `Sandbox` backend and reported
    per run. Only `kernel` (and `builtin` for installs) count as guarantees.
 
@@ -58,10 +70,11 @@ something harmful; peekexec makes sure they could see it first.
 | Tier | Setup | Holds against |
 |---|---|---|
 | 1 | X11 dialog + keyboard grab | Buggy or overeager requesters. **Not** a malicious same-user process: X11 lets any client draw fake windows, poll the keyboard state and synthesize input. The keyboard grab stops ordinary key snooping only. sudo and pkexec share this limit. |
-| 2 | Wayland | Adds isolation: other clients cannot read the dialog's input or inject events. |
+| 2 | Wayland, compositor verified | Adds isolation: other clients cannot read the dialog's input or inject events. Compositor verification is not implemented yet, so Wayland is currently reported as unverified. |
 | 3 | Dedicated VT and/or FIDO2 touch (`pam_u2f`) | A compromised user session: the prompt is outside it, and physical presence cannot be faked in software. (planned) |
 
-The dialog and `--json` output (`display_tier`) always state the tier in effect.
+The dialog and `--json` output (`display_tier`, `display_verified`) always
+state the tier in effect.
 
 ## Things the human might assume that are not true
 

@@ -10,9 +10,10 @@ use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
 use peekexec_core::{Action, Request};
 use peekexec_proto::view::{ProcLine, PromptView, Section, Syntax};
-use peekexec_proto::{DisplayTier, Enforced, Level};
+use peekexec_proto::{Enforced, Level};
 
 use crate::platform::{ExecPlan, Peer, ProcessInfo, Sandbox};
+use crate::session::Display;
 use crate::trust::{self, SAFE_PATH};
 
 pub enum Execution {
@@ -78,7 +79,7 @@ pub fn prepare(
     user: &User,
     req: &Request,
     id: &str,
-    tier: DisplayTier,
+    display: &Display,
     materialize: bool,
 ) -> Result<Prepared, String> {
     validate(req)?;
@@ -192,6 +193,9 @@ pub fn prepare(
             user.name
         ));
     }
+    if !display.verified {
+        notes.push("Could not verify which display server shows this dialog: a program of yours could be relaying it and reading what you type. Approve only a request you expected.".into());
+    }
     if !peer.pinned {
         notes.push("Requester identity could not be pinned (needs Linux 6.5+): the process details below are best effort.".into());
     }
@@ -221,7 +225,8 @@ pub fn prepare(
         dev_mode: ctx.dev,
         why: req.why.clone(),
         enforced: enforced.clone(),
-        display_tier: tier,
+        display_tier: display.tier,
+        display_verified: display.verified,
         env: req
             .env
             .iter()

@@ -1,6 +1,7 @@
 //! Linux backends: kernel peer credentials + /proc, PAM, network namespace
 //! for `--no-net`, systemd socket activation. Landlock write limits: M2.
 
+mod display;
 mod pam;
 mod peer;
 mod sandbox;

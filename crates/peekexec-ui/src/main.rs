@@ -464,12 +464,17 @@ impl Dialog {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let remaining = (self.view.timeout_secs as f64 - (now - opened)).max(0.0) as u64;
-            let tier = match (self.view.display_tier, self.grab.grabbed) {
-                (DisplayTier::X11, true) => {
+            let tier = match (
+                self.view.display_verified,
+                self.view.display_tier,
+                self.grab.grabbed,
+            ) {
+                (false, _, _) => "display server NOT verified",
+                (true, DisplayTier::X11, true) => {
                     "X11, keyboard grabbed (X11 cannot fully isolate windows)"
                 }
-                (DisplayTier::X11, false) => "X11: other apps of yours can see this window",
-                (DisplayTier::Wayland, _) => "Wayland: isolated from other apps",
+                (true, DisplayTier::X11, false) => "X11: other apps of yours can see this window",
+                (true, DisplayTier::Wayland, _) => "Wayland: isolated from other apps",
             };
             ui.label(
                 RichText::new(format!(

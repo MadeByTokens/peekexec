@@ -61,6 +61,9 @@ pub struct PromptView {
     pub why: Option<String>,
     pub enforced: Enforced,
     pub display_tier: DisplayTier,
+    /// Whether the display was found from sources the requester cannot
+    /// control (see THREAT_MODEL.md).
+    pub display_verified: bool,
     pub env: Vec<(String, String)>,
     pub sections: Vec<Section>,
     /// Warnings the human should see (unpinned identity, dev mode, ...).

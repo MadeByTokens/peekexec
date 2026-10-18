@@ -141,6 +141,10 @@ pub struct Response {
     pub enforced: Option<Enforced>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_tier: Option<DisplayTier>,
+    /// False when the display could not be verified: a program of the
+    /// user's could have been relaying the dialog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_verified: Option<bool>,
     /// True when the daemon runs in development mode: the command ran as
     /// the requesting user, not as root.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -168,6 +172,7 @@ impl Response {
             deny_reason: None,
             enforced: None,
             display_tier: None,
+            display_verified: None,
             dev_mode: false,
             error: None,
         }

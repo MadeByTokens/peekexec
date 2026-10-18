@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 
-use crate::platform::{Peer, PeerInfo, PlatformError, ProcessInfo};
+use crate::platform::{Peer, PeerInfo, PlatformError, ProcessInfo, XServer};
 
 /// SO_PEERCRED for the identity, /proc for the description, and a pidfd
 /// (SO_PEERPIDFD, Linux 6.5+) to prove the description is of that process.
@@ -45,6 +45,10 @@ impl PeerInfo for ProcPeerInfo {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         )
+    }
+
+    fn verified_x_server(&self, uid: u32) -> Option<XServer> {
+        super::display::verified_x_server(uid)
     }
 
     fn processes_of(&self, uid: u32) -> Vec<u32> {
