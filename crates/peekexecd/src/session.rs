@@ -1,0 +1,124 @@
+//! Finding the requester's graphical session so the dialog appears on the
+//! human's screen. Agents often run without DISPLAY set, so after the
+//! requester's own chain we fall back to any process of the same user.
+//!
+//! The values come from processes the requester may control. That is only a
+//! denial-of-service risk: a dialog sent to the wrong display is simply never
+//! answered. Remote displays are refused outright.
+
+use peekexec_proto::DisplayTier;
+
+use crate::platform::{Peer, PeerInfo};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Display {
+    pub vars: Vec<(String, String)>,
+    pub tier: DisplayTier,
+}
+
+pub fn find(info: &dyn PeerInfo, peer: &Peer) -> Option<Display> {
+    let chain = std::iter::once(peer.process.pid).chain(peer.ancestry.iter().map(|p| p.pid));
+    let rest = info.processes_of(peer.uid);
+    chain
+        .chain(rest)
+        .filter_map(|pid| info.environ(pid))
+        .find_map(|env| from_environ(&env, peer.uid))
+}
+
+fn get<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+pub fn from_environ(env: &[(String, String)], uid: u32) -> Option<Display> {
+    let runtime = get(env, "XDG_RUNTIME_DIR").filter(|d| *d == format!("/run/user/{uid}"));
+    if let (Some(wl), Some(rt)) = (get(env, "WAYLAND_DISPLAY"), runtime) {
+        if !wl.is_empty() && !wl.contains('/') {
+            return Some(Display {
+                vars: vec![
+                    ("WAYLAND_DISPLAY".into(), wl.into()),
+                    ("XDG_RUNTIME_DIR".into(), rt.into()),
+                ],
+                tier: DisplayTier::Wayland,
+            });
+        }
+    }
+    let display = get(env, "DISPLAY").filter(|d| is_local_display(d))?;
+    let mut vars = vec![("DISPLAY".to_string(), display.to_string())];
+    if let Some(xa) = get(env, "XAUTHORITY").filter(|p| p.starts_with('/')) {
+        vars.push(("XAUTHORITY".into(), xa.into()));
+    }
+    if let Some(rt) = runtime {
+        vars.push(("XDG_RUNTIME_DIR".into(), rt.into()));
+    }
+    Some(Display {
+        vars,
+        tier: DisplayTier::X11,
+    })
+}
+
+/// `:N` or `:N.S` only: no host part, so never a remote X server.
+fn is_local_display(d: &str) -> bool {
+    let Some(rest) = d.strip_prefix(':') else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, '.');
+    let num_ok =
+        |s: Option<&str>| s.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()));
+    num_ok(parts.next()) && parts.next().map_or(true, |s| num_ok(Some(s)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn prefers_wayland() {
+        let d = from_environ(
+            &env(&[
+                ("DISPLAY", ":0"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ]),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(d.tier, DisplayTier::Wayland);
+    }
+
+    #[test]
+    fn x11_with_cookie() {
+        let d = from_environ(
+            &env(&[
+                ("DISPLAY", ":1"),
+                ("XAUTHORITY", "/run/user/1000/gdm/Xauthority"),
+            ]),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(d.tier, DisplayTier::X11);
+        assert_eq!(d.vars.len(), 2);
+    }
+
+    #[test]
+    fn refuses_remote_and_foreign_displays() {
+        assert!(from_environ(&env(&[("DISPLAY", "evil.example:0")]), 1000).is_none());
+        assert!(from_environ(&env(&[("DISPLAY", ":0x")]), 1000).is_none());
+        // Wayland socket in another user's runtime dir: ignored, no X fallback here.
+        assert!(from_environ(
+            &env(&[
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XDG_RUNTIME_DIR", "/run/user/0")
+            ]),
+            1000
+        )
+        .is_none());
+        assert!(is_local_display(":1.0"));
+    }
+}

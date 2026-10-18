@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::process::Child;
 
 use peekexec_proto::{Enforced, Level};
@@ -26,6 +27,15 @@ pub enum PlatformError {
     Other(String),
 }
 
+impl PlatformError {
+    pub fn io(what: impl Into<String>, source: std::io::Error) -> Self {
+        PlatformError::Io {
+            what: what.into(),
+            source,
+        }
+    }
+}
+
 /// One process in the requester's chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInfo {
@@ -43,45 +53,35 @@ pub struct Peer {
     pub cwd: Option<String>,
     /// Parent, grandparent, ... up to (not including) pid 1.
     pub ancestry: Vec<ProcessInfo>,
+    /// Whether the process was pinned (pidfd) while being described, so a
+    /// reused pid cannot have been described instead.
+    pub pinned: bool,
 }
 
-pub trait PeerInfo {
+pub trait PeerInfo: Send + Sync {
     fn identify(&self, conn: &UnixStream) -> Result<Peer, PlatformError>;
+    /// Environment of a process the daemon may read (to find the user's
+    /// display). `None` if it is gone or unreadable.
+    fn environ(&self, pid: u32) -> Option<Vec<(String, String)>>;
+    /// Processes owned by `uid` (fallback when looking for a display).
+    fn processes_of(&self, uid: u32) -> Vec<u32>;
 }
 
-/// What the dialog answered when asked for a secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Answer {
-    Secret(String),
-    Cancelled,
-    Denied(String),
-}
-
-/// The dialog, as seen by an authenticator. Backends with their own UI
-/// (Touch ID) may never call it.
-pub trait Challenger {
-    fn ask(&mut self, attempts_left: u8) -> Answer;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthOutcome {
-    Authenticated,
-    Failed,
-    Cancelled,
-    Denied(String),
-}
-
-pub trait Authenticator {
-    fn authenticate(
-        &self,
-        user: &str,
-        ui: &mut dyn Challenger,
-    ) -> Result<AuthOutcome, PlatformError>;
+/// Checks the human's credentials. The approval itself (the Approve click)
+/// is collected by the dialog before this is called, so a PAM stack that
+/// succeeds without a password still cannot skip the human.
+pub trait Authenticator: Send + Sync {
+    /// Whether the dialog should ask for a password (false for Touch ID).
+    fn wants_password(&self) -> bool;
+    fn verify(&self, user: &str, password: Option<&str>) -> Result<bool, PlatformError>;
 }
 
 /// Everything needed to start the approved command, taken from the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecPlan {
+    /// Absolute, resolved path of the program to execute.
+    pub program: String,
+    /// argv, including argv[0] as the human saw it.
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
@@ -89,11 +89,12 @@ pub struct ExecPlan {
     pub no_net: bool,
 }
 
-pub trait Sandbox {
-    /// What [`Sandbox::spawn`] would enforce for this plan. Shown in the
+pub trait Sandbox: Send + Sync {
+    /// What [`Sandbox::spawn`] will enforce for this plan. Shown in the
     /// dialog before approval and returned to the caller afterwards, so it
     /// must never overstate.
     fn enforcement(&self, plan: &ExecPlan) -> Enforced;
+    /// Start the plan with stdin closed and stdout/stderr piped.
     fn spawn(&self, plan: &ExecPlan) -> Result<Child, PlatformError>;
 }
 
@@ -115,9 +116,11 @@ pub fn declared_only(plan: &ExecPlan) -> Enforced {
     }
 }
 
-/// Obtains the daemon's listening socket (systemd/launchd activation or bind).
-pub trait Listener {
-    fn listen(&self) -> Result<UnixListener, PlatformError>;
+/// Obtains the daemon's listening socket: inherited from the service
+/// manager (systemd/launchd) if it passed one, else bound at `path`.
+pub trait Listener: Send + Sync {
+    /// `world`: let every local user connect (root mode); else owner only.
+    fn listen(&self, path: &Path, world: bool) -> Result<UnixListener, PlatformError>;
 }
 
 pub struct Platform {
@@ -128,11 +131,11 @@ pub struct Platform {
 }
 
 #[cfg(target_os = "linux")]
-pub fn current() -> Platform {
-    linux::platform()
+pub fn current(pam_service: &str) -> Platform {
+    linux::platform(pam_service)
 }
 
 #[cfg(target_os = "macos")]
-pub fn current() -> Platform {
+pub fn current(_pam_service: &str) -> Platform {
     macos::platform()
 }

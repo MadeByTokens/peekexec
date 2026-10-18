@@ -6,7 +6,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use peekexec_core::display::shell_join;
 use peekexec_core::textcheck::{scan, scan_bytes, Finding};
 use peekexec_core::{Action, Request};
-use peekexec_proto::{Response, Status};
+use peekexec_proto::{wire, ClientMsg, PreviewReply, Response, Status};
 
 mod help;
 
@@ -197,16 +197,64 @@ fn findings(req: &Request) -> Vec<Finding> {
     }
 }
 
-/// Plain-text stand-in for the dialog until the egui UI lands (M1).
-fn print_preview(req: &Request) {
-    println!("peekexec preview: what the human will be asked to approve\n");
-    println!("requester : pid {} in {}", std::process::id(), req.cwd);
+fn socket() -> PathBuf {
+    std::env::var_os("PEEKEXEC_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(wire::SOCKET))
+}
+
+fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<A, String> {
+    let path = socket();
+    wire::call(&path, msg).map_err(|e| {
+        format!(
+            "cannot reach peekexecd at {}: {e}. Is peekexec installed and peekexecd.socket enabled?",
+            path.display()
+        )
+    })
+}
+
+fn preview(req: Request, json: bool) -> ExitCode {
+    match call::<PreviewReply>(&ClientMsg::Preview {
+        request: req.clone(),
+    }) {
+        Ok(PreviewReply::Ok { view }) => {
+            let found: Vec<Finding> = view.sections.iter().flat_map(|s| scan(&s.raw)).collect();
+            if json {
+                let out = serde_json::json!({ "view": view, "findings": found });
+                println!("{out}");
+            } else {
+                print!("{}", view.to_text(found.len()));
+            }
+            ExitCode::SUCCESS
+        }
+        // The daemon would reject this request: say why, as `run` would.
+        Ok(PreviewReply::Error { error }) => emit(&Response::error(error), json),
+        Err(unreachable) => {
+            if json {
+                let out = serde_json::json!({
+                    "request": req,
+                    "sha256": req.digest(),
+                    "findings": findings(&req),
+                    "warning": unreachable,
+                });
+                println!("{out}");
+            } else {
+                println!("({unreachable}\n Showing a local approximation instead.)\n");
+                print_local_preview(&req);
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+/// Used only when the daemon is unreachable; the real view comes from it.
+fn print_local_preview(req: &Request) {
     if let Some(why) = &req.why {
         println!("says      : {why:?}  (unverified)");
     }
     match &req.write {
         Some(paths) => println!("writes    : {}", paths.join(", ")),
-        None => println!("writes    : UNRESTRICTED  (flagged)"),
+        None => println!("writes    : ANYWHERE"),
     }
     println!(
         "network   : {}",
@@ -259,8 +307,8 @@ fn emit(resp: &Response, json: bool) -> ExitCode {
             "{}",
             serde_json::to_string(resp).expect("response serializes")
         );
-    } else if let Some(err) = &resp.error {
-        eprintln!("peekexec: {err}");
+    } else {
+        print_human(resp);
     }
     let code = match resp.status {
         Status::Approved => resp.exit_code.unwrap_or(0).clamp(0, 255) as u8,
@@ -271,8 +319,39 @@ fn emit(resp: &Response, json: bool) -> ExitCode {
     ExitCode::from(code)
 }
 
-const NOT_YET: &str =
-    "peekexecd is not implemented yet (milestone M1); only `preview` and `help` work";
+fn print_human(resp: &Response) {
+    use std::io::Write;
+    let id = resp.request_id.as_deref().unwrap_or("?");
+    match resp.status {
+        Status::Approved => {
+            let _ = std::io::stdout().write_all(resp.stdout.as_deref().unwrap_or("").as_bytes());
+            let _ = std::io::stderr().write_all(resp.stderr.as_deref().unwrap_or("").as_bytes());
+        }
+        Status::Pending => {
+            eprintln!("peekexec: waiting for the human; check with `peekexec wait {id}`")
+        }
+        Status::Denied => eprintln!(
+            "peekexec: denied by the human: {}",
+            resp.deny_reason.as_deref().unwrap_or("(no reason given)")
+        ),
+        Status::Cancelled => eprintln!("peekexec: cancelled"),
+        Status::AuthFailed => eprintln!("peekexec: authentication failed"),
+        Status::Timeout => eprintln!("peekexec: no answer before the timeout"),
+        Status::Error => eprintln!(
+            "peekexec: {}",
+            resp.error.as_deref().unwrap_or("unknown error")
+        ),
+    }
+}
+
+fn request_or_exit(action: &ActionCmd, json: bool) -> Result<Request, ExitCode> {
+    build_request(action).map_err(|e| emit(&Response::error(e), json))
+}
+
+fn send(msg: ClientMsg, json: bool) -> ExitCode {
+    let resp = call::<Response>(&msg).unwrap_or_else(Response::error);
+    emit(&resp, json)
+}
 
 fn main() -> ExitCode {
     let matches = Cli::command().after_help(help::after_help()).get_matches();
@@ -280,6 +359,7 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
+    let json = cli.json;
     match cli.command {
         Cmd::Help { topic: None } => {
             Cli::command()
@@ -304,26 +384,36 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Cmd::Preview { action } => match build_request(&action) {
-            Ok(req) if cli.json => {
-                let out = serde_json::json!({
-                    "request": req,
-                    "sha256": req.digest(),
-                    "findings": findings(&req),
-                });
-                println!("{out}");
-                ExitCode::SUCCESS
-            }
-            Ok(req) => {
-                print_preview(&req);
-                ExitCode::SUCCESS
-            }
-            Err(e) => emit(&Response::error(e), cli.json),
+        Cmd::Preview { action } => match request_or_exit(&action, json) {
+            Ok(request) => preview(request, json),
+            Err(code) => code,
         },
-        Cmd::Action(action) | Cmd::Submit { action } => match build_request(&action) {
-            Ok(_) => emit(&Response::error(NOT_YET), cli.json),
-            Err(e) => emit(&Response::error(e), cli.json),
+        Cmd::Action(action) => match request_or_exit(&action, json) {
+            Ok(request) => send(ClientMsg::Run { request }, json),
+            Err(code) => code,
         },
-        Cmd::Wait { .. } | Cmd::Cancel { .. } => emit(&Response::error(NOT_YET), cli.json),
+        Cmd::Submit { action } => match request_or_exit(&action, json) {
+            Ok(request) => {
+                let resp = call::<Response>(&ClientMsg::Submit { request })
+                    .unwrap_or_else(Response::error);
+                let code = emit(&resp, json);
+                // Submitting successfully is a success, even though the
+                // request itself is still pending.
+                if resp.status == Status::Pending {
+                    ExitCode::SUCCESS
+                } else {
+                    code
+                }
+            }
+            Err(code) => code,
+        },
+        Cmd::Wait { id, timeout } => send(
+            ClientMsg::Wait {
+                id,
+                timeout_secs: timeout,
+            },
+            json,
+        ),
+        Cmd::Cancel { id } => send(ClientMsg::Cancel { id }, json),
     }
 }

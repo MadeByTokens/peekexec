@@ -5,6 +5,7 @@
 //! a matter of adding platform backends in `peekexecd`.
 
 pub mod display;
+pub mod format;
 pub mod request;
 pub mod textcheck;
 

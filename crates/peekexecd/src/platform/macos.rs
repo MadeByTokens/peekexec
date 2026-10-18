@@ -3,13 +3,14 @@
 //! declared_only where it cannot guarantee), launchd socket.
 
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::process::Child;
 
 use peekexec_proto::Enforced;
 
 use super::{
-    declared_only, AuthOutcome, Authenticator, Challenger, ExecPlan, Listener, Peer, PeerInfo,
-    Platform, PlatformError, Sandbox,
+    declared_only, Authenticator, ExecPlan, Listener, Peer, PeerInfo, Platform, PlatformError,
+    Sandbox,
 };
 
 pub fn platform() -> Platform {
@@ -29,14 +30,22 @@ impl PeerInfo for Unported {
             "peer identification on macOS (M4)",
         ))
     }
+
+    fn environ(&self, _pid: u32) -> Option<Vec<(String, String)>> {
+        None
+    }
+
+    fn processes_of(&self, _uid: u32) -> Vec<u32> {
+        Vec::new()
+    }
 }
 
 impl Authenticator for Unported {
-    fn authenticate(
-        &self,
-        _user: &str,
-        _ui: &mut dyn Challenger,
-    ) -> Result<AuthOutcome, PlatformError> {
+    fn wants_password(&self) -> bool {
+        false
+    }
+
+    fn verify(&self, _user: &str, _password: Option<&str>) -> Result<bool, PlatformError> {
         Err(PlatformError::Unsupported("authentication on macOS (M4)"))
     }
 }
@@ -53,7 +62,7 @@ impl Sandbox for Unported {
 }
 
 impl Listener for Unported {
-    fn listen(&self) -> Result<UnixListener, PlatformError> {
+    fn listen(&self, _path: &Path, _world: bool) -> Result<UnixListener, PlatformError> {
         Err(PlatformError::Unsupported("launchd socket (M4)"))
     }
 }

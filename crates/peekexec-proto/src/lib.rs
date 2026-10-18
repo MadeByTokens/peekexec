@@ -8,6 +8,10 @@ use peekexec_core::Request;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod ui;
+pub mod view;
+pub mod wire;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -87,6 +91,19 @@ pub enum Level {
     DeclaredOnly,
     /// No limit was requested.
     NotRequested,
+    /// No command ran: peekexec performed the action itself (e.g. `install`
+    /// writes only the one destination file).
+    Builtin,
+}
+
+/// How far the dialog itself can be trusted on this display (THREAT_MODEL.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayTier {
+    /// Other programs of the same user can see and drive the dialog.
+    X11,
+    /// The compositor isolates the dialog from other programs.
+    Wayland,
 }
 
 /// What was actually enforced for this run.
@@ -123,13 +140,26 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforced: Option<Enforced>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_tier: Option<DisplayTier>,
+    /// True when the daemon runs in development mode: the command ran as
+    /// the requesting user, not as root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dev_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl Response {
     pub fn error(message: impl Into<String>) -> Self {
         Response {
-            status: Status::Error,
+            error: Some(message.into()),
+            ..Response::new(Status::Error)
+        }
+    }
+
+    pub fn new(status: Status) -> Self {
+        Response {
+            status,
             request_id: None,
             sha256: None,
             exit_code: None,
@@ -137,7 +167,9 @@ impl Response {
             stderr: None,
             deny_reason: None,
             enforced: None,
-            error: Some(message.into()),
+            display_tier: None,
+            dev_mode: false,
+            error: None,
         }
     }
 }
@@ -161,6 +193,18 @@ pub enum ClientMsg {
     Cancel {
         id: String,
     },
+    /// Build the exact view the human would get, without prompting.
+    Preview {
+        request: Request,
+    },
+}
+
+/// Daemon → client reply to [`ClientMsg::Preview`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum PreviewReply {
+    Ok { view: Box<view::PromptView> },
+    Error { error: String },
 }
 
 #[cfg(test)]

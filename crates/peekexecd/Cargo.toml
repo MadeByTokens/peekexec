@@ -6,7 +6,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Replaces the dialog and PAM with PEEKEXEC_TEST_APPROVER for automated
+# tests. Never enabled in release builds; refuses to run as root.
+test-approver = []
+
 [dependencies]
+clap.workspace = true
+libc.workspace = true
 nix.workspace = true
 peekexec-core.workspace = true
 peekexec-proto.workspace = true
