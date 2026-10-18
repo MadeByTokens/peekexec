@@ -28,6 +28,7 @@ bin=/usr/local/bin/peekexec
 units=/etc/systemd/system
 pam=/etc/pam.d/peekexec
 policy=/usr/share/polkit-1/actions/org.peekexec.approve.policy
+dropin=/etc/systemd/system/peekexecd.socket.d
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "install.sh: run as root (e.g. pkexec \"$repo/packaging/install.sh\")" >&2
@@ -47,6 +48,7 @@ later() {
 
 if [ "$action" = uninstall ]; then
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
+    rm -rf "$dropin"
     rm -rf "$libexec"
     if in_service; then
         later disable --now peekexecd.socket peekexecd.service
@@ -96,6 +98,21 @@ install -o root -g root -m 0755 "$stage/peekexec-ui" "$libexec/peekexec-ui"
 install -o root -g root -m 0755 "$stage/peekexec" "$bin"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
+# Only the administrators may connect to the socket.
+admin_group=""
+for g in sudo wheel admin; do
+    if getent group "$g" >/dev/null; then
+        admin_group=$g
+        break
+    fi
+done
+if [ -z "$admin_group" ]; then
+    echo "install.sh: no administrator group (sudo, wheel, admin) found; refusing" >&2
+    exit 1
+fi
+install -d -o root -g root -m 0755 "$dropin"
+printf '[Socket]\nSocketGroup=%s\n' "$admin_group" > "$dropin/admin-group.conf"
+chmod 0644 "$dropin/admin-group.conf"
 if [ -d "$(dirname "$policy")" ]; then
     install -o root -g root -m 0644 "$stage/polkit/org.peekexec.approve.policy" "$policy"
 fi

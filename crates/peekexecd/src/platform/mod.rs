@@ -183,8 +183,9 @@ pub trait SystemPrompt: Send + Sync {
 /// Obtains the daemon's listening socket: inherited from the service
 /// manager (systemd/launchd) if it passed one, else bound at `path`.
 pub trait Listener: Send + Sync {
-    /// `world`: let every local user connect (root mode); else owner only.
-    fn listen(&self, path: &Path, world: bool) -> Result<UnixListener, PlatformError>;
+    /// `group`: also let members of this group connect (the administrators,
+    /// in root mode); `None`: the owner only.
+    fn listen(&self, path: &Path, group: Option<u32>) -> Result<UnixListener, PlatformError>;
 }
 
 pub struct Platform {

@@ -108,10 +108,20 @@ impl Daemon {
     }
 
     pub fn serve(self: Arc<Self>) -> Result<(), String> {
+        let group = if self.opts.dev {
+            None
+        } else {
+            Some(admin_gid().ok_or_else(|| {
+                format!(
+                    "no administrator group ({}) on this system",
+                    ADMIN_GROUPS.join(", ")
+                )
+            })?)
+        };
         let listener = self
             .platform
             .listener
-            .listen(&self.opts.socket, !self.opts.dev)
+            .listen(&self.opts.socket, group)
             .map_err(|e| e.to_string())?;
         eprintln!(
             "peekexecd: listening on {}{}",
@@ -875,6 +885,16 @@ fn user_of(uid: u32) -> Result<User, String> {
     Ok(User {
         name: u.name,
         home: u.dir.to_string_lossy().into_owned(),
+    })
+}
+
+/// The first administrator group that exists here.
+fn admin_gid() -> Option<u32> {
+    ADMIN_GROUPS.iter().find_map(|name| {
+        nix::unistd::Group::from_name(name)
+            .ok()
+            .flatten()
+            .map(|g| g.gid.as_raw())
     })
 }
 

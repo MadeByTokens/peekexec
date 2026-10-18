@@ -94,8 +94,8 @@ refuses a test build, then installs `/usr/local/bin/peekexec`,
 `/etc/pam.d/peekexec`. It still runs as root from your checkout, so build and
 install from a tree only you can write. Packages are planned.
 
-Only members of `sudo`, `wheel` or `admin` can approve, with their own
-password, the same model as sudo.
+Only members of `sudo`, `wheel` or `admin` can connect to the daemon at all,
+and they approve with their own password, the same model as sudo.
 
 ## Develop
 

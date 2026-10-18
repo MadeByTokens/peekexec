@@ -75,7 +75,7 @@ impl Sandbox for Unported {
 }
 
 impl Listener for Unported {
-    fn listen(&self, _path: &Path, _world: bool) -> Result<UnixListener, PlatformError> {
+    fn listen(&self, _path: &Path, _group: Option<u32>) -> Result<UnixListener, PlatformError> {
         Err(PlatformError::Unsupported("launchd socket (M4)"))
     }
 }

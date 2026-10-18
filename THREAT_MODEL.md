@@ -26,16 +26,18 @@ It does not promise:
 |---|---|
 | Human approver | Trusted. An administrator (member of `sudo`, `wheel` or `admin`) typing **their own** password; usually the same account as the requester, as with sudo. |
 | Requester (agent, script) | **Untrusted.** Controls argv, file contents, env (within an allowlist), working directory, `--why`, and its own process names. May be buggy, overeager or prompt-injected; on X11 a malicious one is out of reach (see tiers). |
-| Other local users | Untrusted. Turned away before their request is read. |
+| Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group (`sudo`, `wheel` or `admin`). The daemon checks membership again. |
 | `peekexecd` (root) | Trusted computing base. |
 | `peekexec-ui` (the dialog) | Started by the daemon from a root-owned path with a clean environment, as the approving user with no supplementary groups; non-dumpable. Trusted to render honestly, but it runs as the user, so on X11 other programs of that user can drive it. |
 | Kernel, PAM, display server | Trusted, with the display caveats below. |
 
 ## Boundaries and how each is held
 
-1. **Who is asking.** Authorization uses only the uid from `SO_PEERCRED`,
-   captured when the connection is made. Non-administrators get an error
-   before the daemon reads their request. The process description in the
+1. **Who is asking.** Only members of the administrator group can open the
+   socket at all. Authorization uses only the uid from `SO_PEERCRED`,
+   captured when the connection is made; non-administrators (should one get
+   through, e.g. via a stale group membership) get an error before the
+   daemon reads their request. The process description in the
    dialog comes from `/proc`: the executable path is reported by the kernel,
    while names and command lines are set by the process itself and can be
    anything. The connecting process is pinned with a pidfd (Linux 6.5+), which
@@ -154,7 +156,7 @@ It does not promise:
 
 Accepted for a single-seat desktop: an administrator's own processes can
 queue requests (at most 3 pending, 16 connections) and occupy the single
-dialog. Other users are rejected before sending a request. Any local user can
+dialog. Other users cannot connect. Any local user can
 crash polkitd on affected versions (a polkit bug, Launchpad #1562721; see
 [docs/notes/polkit-unix-session-crash.md](docs/notes/polkit-unix-session-crash.md)); this
 does not affect peekexec's X11 path.

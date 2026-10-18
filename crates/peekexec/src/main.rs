@@ -234,6 +234,13 @@ fn socket() -> PathBuf {
 fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<A, String> {
     let path = socket();
     wire::call(&path, msg).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            return format!(
+                "cannot connect to {}: only members of the administrator group (sudo, wheel \
+                 or admin) may use peekexec. If you were just added to it, log out and back in.",
+                path.display()
+            );
+        }
         format!(
             "cannot reach peekexecd at {}: {e}. Is peekexec installed and peekexecd.socket enabled?",
             path.display()

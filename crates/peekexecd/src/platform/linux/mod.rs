@@ -34,7 +34,7 @@ pub struct SystemdSocket;
 const SD_LISTEN_FDS_START: i32 = 3;
 
 impl Listener for SystemdSocket {
-    fn listen(&self, path: &Path, world: bool) -> Result<UnixListener, PlatformError> {
+    fn listen(&self, path: &Path, group: Option<u32>) -> Result<UnixListener, PlatformError> {
         let ours = std::env::var("LISTEN_PID")
             .ok()
             .and_then(|p| p.parse::<u32>().ok())
@@ -77,7 +77,15 @@ impl Listener for SystemdSocket {
         }
         let listener = UnixListener::bind(path)
             .map_err(|e| PlatformError::io(format!("bind {}", path.display()), e))?;
-        let mode = if world { 0o666 } else { 0o600 };
+        // Only the administrators can connect at all; the daemon checks again.
+        let mode = match group {
+            Some(gid) => {
+                std::os::unix::fs::chown(path, None, Some(gid))
+                    .map_err(|e| PlatformError::io(format!("chown {}", path.display()), e))?;
+                0o660
+            }
+            None => 0o600,
+        };
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
             .map_err(|e| PlatformError::io(format!("chmod {}", path.display()), e))?;
         Ok(listener)
