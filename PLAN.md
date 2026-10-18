@@ -139,7 +139,31 @@ pkexec's PwnKit). Crates: `nix`, `pam-client`, `landlock`, `egui`/`eframe` +
 |---|---|
 | **M0** ✅ | Plan, threat model, CLI spec; workspace with platform traits; `preview` and `help` work; Linux peer identification |
 | **M1** ✅ | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason, X11 keyboard grab), PAM, snapshot execution, trusted-program rule, env allowlist, `--json`, pidfd-pinned peer, `--no-net` via netns, `--dev` mode, systemd units + install script |
-| **M2** | Landlock + netns scopes, real `enforced`, `install` diffs, risk flags, refusing resubmitted denied requests |
+| **M2** | **Wayland display verification first** (the user's other machines run Wayland; see below), then Landlock write limits, `install` diffs, risk flags (runtime-read user files, udev/systemd/cron/sudoers targets) |
 | **M3** | Packaging + CI matrix → **first public release** |
 | **M4** | macOS backends + Homebrew |
 | **M5** | MCP server + Claude Code skill, dedicated-VT approver, FIDO2 |
+
+### M2 detail: verified display on Wayland
+
+On X11 the daemon verifies the X server through logind (session scope, leader,
+VT). On Wayland the compositor *is* the display server and, on GNOME, runs as a
+systemd **user** service, so the same check cannot tell it from an impostor;
+the requester also owns `/run/user/$UID` and could replace the socket. Today
+such displays are reported as unverified. Work, in a Ubuntu 24.04 desktop VM:
+
+1. **Check polkit**: can a root mechanism set the message (`polkit.message`
+   detail) that GNOME Shell's built-in agent shows? If yes, option B below
+   becomes viable.
+2. **Option B: password through the desktop's polkit agent.** The agent is
+   registered with polkitd at login (in GNOME it is drawn by the shell itself),
+   so a requester cannot reroute it. The peekexec window shows the code and
+   Approve/Deny; the agent's prompt must carry the summary (who, what, writes),
+   not only a hash.
+3. **Option C: dedicated VT (tier 3)**, opt-in high-assurance mode and the
+   fallback whenever the display is unverified: the daemon switches to its
+   own console, shows the request (colours, scrolling), takes the password
+   there, switches back. Works for every display server.
+4. Option A, identifying the compositor as the DRM master of the seat, is
+   kept as a fallback idea (debugfs-dependent, fragile).
+
