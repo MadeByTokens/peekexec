@@ -193,9 +193,10 @@ itself "claude"). Plan:
 
 1. **Registered agent sessions** ✅ (`peekexec register`). The human approves once, at agent start:
    "register Claude Code (pid N) in ~/proj". The daemon pins that process
-   (pidfd) and checks every later request's ancestry against it, showing
-   *direct* requests (agent → shell → peekexec) differently from requests by
-   something the agent ran (agent → shell → make → build.sh → peekexec).
+   (pidfd) and checks every later request's ancestry against it: "from this
+   agent's session", with scripts and programs in between flagged. It cannot
+   tell the agent's own commands from a program that exec'd into a shell;
+   that needs step 2.
 2. **MCP channel.** Requests arrive over a private pipe between the agent and
    a root-installed `peekexec mcp` process; scripts the agent runs cannot
    reach it, so "the agent's own tool call" becomes something the system can

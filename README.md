@@ -20,7 +20,8 @@ pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
   executable root does not own marked as such) and the reason they give
   (labelled unverified);
 - for a registered agent session (`peekexec register`, approved once): whether
-  the request is the agent's own command or came from a program it started;
+  the request comes from inside that agent's process tree, and which scripts
+  or programs sit in between;
 - what it declares it will touch, and how much of that is actually enforced.
 
 You approve with your password, cancel, or deny with a written reason that the

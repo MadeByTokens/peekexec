@@ -361,52 +361,38 @@ impl Dialog {
     }
 
     /// Which registered agent session this request comes from, if any.
+    /// Deliberately neutral: being inside the agent's process tree does not
+    /// prove the agent itself decided to ask.
     fn provenance_badge(&self, ui: &mut egui::Ui) {
         if self.view.kind == ViewKind::Register {
             return;
         }
-        let ok = Color32::from_rgb(46, 160, 67);
+        let forward = if self.glyphs.arrow.contains('←') {
+            " → "
+        } else {
+            " > "
+        };
         match &self.view.provenance {
-            Provenance::Direct {
+            Provenance::InSession {
                 agent,
                 since,
+                path,
                 command,
+                ..
             } => {
                 ui.label(
-                    RichText::new(format!(
-                        "{} {agent} (session registered {since}): its own command",
-                        self.glyphs.ok
-                    ))
-                    .color(ok)
-                    .strong(),
+                    RichText::new(format!("From {agent}'s session (registered {since})"))
+                        .color(Color32::from_rgb(70, 140, 220))
+                        .strong(),
                 );
+                let chain = std::iter::once(agent.as_str())
+                    .chain(path.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(forward);
+                let shown = ui.label(RichText::new(chain).monospace().small());
                 if let Some(cmd) = command {
-                    let short: String = cmd.chars().take(140).collect();
-                    let more = if cmd.chars().count() > 140 { "…" } else { "" };
-                    ui.label(
-                        RichText::new(format!("agent's command: {short}{more}"))
-                            .monospace()
-                            .weak()
-                            .small(),
-                    )
-                    .on_hover_text(cmd);
+                    shown.on_hover_text(format!("{agent}'s shell ran:\n{cmd}"));
                 }
-            }
-            Provenance::Indirect { agent, since, via } => {
-                let forward = if self.glyphs.arrow.contains('←') {
-                    " → "
-                } else {
-                    " > "
-                };
-                ui.label(
-                    RichText::new(format!(
-                        "{} {agent} (session registered {since}), but via a program it started: {}",
-                        self.glyphs.warn,
-                        via.join(forward)
-                    ))
-                    .color(WARN)
-                    .strong(),
-                );
             }
             Provenance::Unregistered => {
                 ui.label(RichText::new("Not from a registered agent session").weak());

@@ -1,13 +1,19 @@
-//! Registered agent sessions: which process is "the agent", and whether a
-//! request came from the agent's own command or from something it started.
+//! Registered agent sessions: is a request coming from inside the agent
+//! process tree the human registered?
 //!
 //! The uid of a request is certain (kernel). Process names are not: any
 //! program of the user can call itself "claude". A registration, approved
 //! once by the human, pins one specific process (pidfd + start time); later
-//! requests are matched against the kernel's process ancestry, which a
-//! process cannot fake to *gain* a registered agent as its ancestor.
+//! requests are matched against the kernel's process ancestry. A process
+//! cannot make a registered agent its ancestor, so "from inside this agent's
+//! session" is something unrelated programs cannot fake.
+//!
+//! What ancestry cannot tell is whether the agent itself, or a program it
+//! started, decided to ask: a program keeps its pid across `exec`, so it can
+//! turn itself into a `bash -c '…'` that looks like the agent's own shell.
+//! Programs other than shells in the chain are therefore *flagged* (they
+//! show a script or tool is involved), but their absence proves nothing.
 
-use std::path::Path;
 use std::time::SystemTime;
 
 use crate::platform::{Pinned, ProcessInfo};
@@ -27,21 +33,34 @@ pub struct AgentSession {
 pub enum Provenance {
     /// No registered agent among the requester's ancestors.
     Unregistered,
-    /// The installed peekexec, called from the agent's own shell command
-    /// (`sh -c '...'`), or by the agent process itself.
-    Direct {
+    /// Inside a registered agent's process tree.
+    InSession {
         session: String,
+        /// Short labels from the agent's child down to the client.
+        path: Vec<String>,
+        /// The entries of `path` that are neither the installed peekexec
+        /// client nor a shell running a `-c` command: scripts and programs.
+        others: Vec<String>,
+        /// The `-c` command of the shell right below the agent, if any.
         command: Option<String>,
     },
-    /// A program the agent started made the request.
-    Indirect { session: String, via: Vec<String> },
 }
 
 fn basename(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
-/// A shell started with a command string (`-c`), not running a script file.
+/// A short-option cluster containing `c` (`-c`, `-lc`), never a long option
+/// such as `--rcfile`.
+fn is_c_flag(a: &str) -> bool {
+    a.len() > 1
+        && a.starts_with('-')
+        && !a.starts_with("--")
+        && a[1..].chars().all(|c| c.is_ascii_alphabetic())
+        && a.contains('c')
+}
+
+/// For a trusted shell started with `-c`, the command string.
 fn shell_command(p: &ProcessInfo, trusted: &dyn Fn(&str) -> bool) -> Option<Option<String>> {
     let exe = p.exe.as_deref()?;
     if !SHELLS.contains(&basename(exe)) || !trusted(exe) {
@@ -50,13 +69,30 @@ fn shell_command(p: &ProcessInfo, trusted: &dyn Fn(&str) -> bool) -> Option<Opti
     let mut args = p.cmdline.iter().skip(1);
     for a in args.by_ref() {
         if !a.starts_with('-') {
-            return None; // a script file: not the agent's own command
+            return None; // a script file
         }
-        if a.contains('c') {
+        if is_c_flag(a) {
             return Some(args.find(|a| !a.starts_with('-')).cloned());
         }
     }
     None
+}
+
+/// A short, readable label: `bash -c`, `sh build.sh`, `make install`.
+fn label(p: &ProcessInfo, trusted: &dyn Fn(&str) -> bool) -> String {
+    let name = basename(p.exe.as_deref().unwrap_or("?")).to_string();
+    if shell_command(p, trusted).is_some() {
+        return format!("{name} -c");
+    }
+    let first = p.cmdline.iter().skip(1).find(|a| !a.starts_with('-'));
+    let mut l = match first {
+        Some(arg) => format!("{name} {}", basename(arg)),
+        None => name,
+    };
+    if l.chars().count() > 40 {
+        l = l.chars().take(39).collect::<String>() + "…";
+    }
+    l
 }
 
 /// Where a request came from, given its process chain (the connecting
@@ -78,43 +114,29 @@ pub fn classify(
     let Some((k, session)) = found else {
         return Provenance::Unregistered;
     };
-    let name = session.name.clone();
-    if k == 0 {
-        return Provenance::Direct {
-            session: name,
-            command: None,
-        };
-    }
-    let client = &chain[0];
-    let client_ok = client
-        .exe
-        .as_deref()
-        .is_some_and(|e| basename(e) == "peekexec" && trusted(e));
-    let middle = &chain[1..k];
-    let commands: Vec<Option<Option<String>>> =
-        middle.iter().map(|p| shell_command(p, trusted)).collect();
-    if client_ok && !middle.is_empty() && commands.iter().all(Option::is_some) {
-        return Provenance::Direct {
-            session: name,
-            command: commands.last().cloned().flatten().flatten(),
-        };
-    }
-    let via = chain[..k]
+    let below = &chain[..k]; // client first
+    let is_client = |i: usize, p: &ProcessInfo| {
+        i == 0
+            && p.exe
+                .as_deref()
+                .is_some_and(|e| basename(e) == "peekexec" && trusted(e))
+    };
+    let others = below
         .iter()
+        .enumerate()
         .rev()
-        .map(|p| {
-            let exe = p.exe.as_deref().unwrap_or("?");
-            let label = Path::new(exe)
-                .file_name()
-                .map_or(exe.to_string(), |n| n.to_string_lossy().into_owned());
-            if p.cmdline.len() > 1 && SHELLS.contains(&label.as_str()) {
-                format!("{label} {}", p.cmdline[1..].join(" "))
-            } else {
-                label
-            }
-        })
+        .filter(|&(i, p)| !is_client(i, p) && shell_command(p, trusted).is_none())
+        .map(|(_, p)| label(p, trusted))
         .collect();
-    Provenance::Indirect { session: name, via }
+    Provenance::InSession {
+        session: session.name.clone(),
+        path: below.iter().rev().map(|p| label(p, trusted)).collect(),
+        others,
+        command: below
+            .last()
+            .and_then(|p| shell_command(p, trusted))
+            .flatten(),
+    }
 }
 
 /// The process to register when the caller does not name one: the nearest
@@ -169,11 +191,18 @@ mod tests {
         classify(chain, &[&s], &live, &trusted)
     }
 
+    fn others(chain: &[ProcessInfo]) -> Vec<String> {
+        match run(chain) {
+            Provenance::InSession { others, .. } => others,
+            p => panic!("{p:?}"),
+        }
+    }
+
     const CLI: &str = "/usr/local/bin/peekexec";
     const AGENT: &str = "/home/u/.local/bin/claude";
 
     #[test]
-    fn agent_tool_call_is_direct() {
+    fn agent_shell_only() {
         let chain = [
             proc(300, CLI, &["run", "--", "id"]),
             proc(200, "/usr/bin/bash", &["-c", "-l", "peekexec run -- id"]),
@@ -181,57 +210,47 @@ mod tests {
         ];
         assert_eq!(
             run(&chain),
-            Provenance::Direct {
+            Provenance::InSession {
                 session: "Claude Code".into(),
-                command: Some("peekexec run -- id".into())
+                path: vec!["bash -c".into(), "peekexec run".into()],
+                others: vec![],
+                command: Some("peekexec run -- id".into()),
             }
         );
     }
 
     #[test]
-    fn script_started_by_the_agent_is_indirect() {
-        // The agent ran ./build.sh, whose interpreter is bash (no -c).
+    fn scripts_and_programs_in_between_are_listed() {
         let chain = [
             proc(400, CLI, &["run", "--", "id"]),
-            proc(300, "/usr/bin/bash", &["./build.sh"]),
-            proc(200, "/usr/bin/bash", &["-c", "./build.sh"]),
+            proc(350, "/usr/bin/make", &["install"]),
+            proc(300, "/usr/bin/dash", &["/tmp/x/build.sh"]),
+            proc(200, "/usr/bin/bash", &["-c", "sh /tmp/x/build.sh"]),
             proc(100, AGENT, &[]),
         ];
-        let Provenance::Indirect { via, .. } = run(&chain) else {
-            panic!()
-        };
-        assert_eq!(via, ["bash -c ./build.sh", "bash ./build.sh", "peekexec"]);
+        assert_eq!(others(&chain), ["dash build.sh", "make install"]);
     }
 
     #[test]
-    fn other_programs_in_between_are_indirect() {
-        let chain = [
-            proc(400, CLI, &[]),
-            proc(300, "/usr/bin/make", &["install"]),
-            proc(200, "/usr/bin/bash", &["-c", "make install"]),
-            proc(100, AGENT, &[]),
-        ];
-        assert!(matches!(run(&chain), Provenance::Indirect { .. }));
-    }
-
-    #[test]
-    fn a_client_that_is_not_the_installed_cli_is_indirect() {
+    fn a_client_that_is_not_the_installed_cli_is_listed() {
         let chain = [
             proc(300, "/home/u/fake-peekexec", &[]),
             proc(200, "/usr/bin/bash", &["-c", "x"]),
             proc(100, AGENT, &[]),
         ];
-        assert!(matches!(run(&chain), Provenance::Indirect { .. }));
+        assert_eq!(others(&chain), ["fake-peekexec"]);
     }
 
     #[test]
-    fn untrusted_shell_binary_is_indirect() {
+    fn untrusted_shells_and_long_options_are_not_agent_shells() {
         let chain = [
             proc(300, CLI, &[]),
-            proc(200, "/home/u/bin/bash", &["-c", "x"]),
+            proc(250, "/home/u/bin/bash", &["-c", "x"]),
+            proc(200, "/usr/bin/bash", &["--rcfile", "/home/u/rc"]),
             proc(100, AGENT, &[]),
         ];
-        assert!(matches!(run(&chain), Provenance::Indirect { .. }));
+        assert_eq!(others(&chain), ["bash rc", "bash x"]);
+        assert!(!is_c_flag("--rcfile") && is_c_flag("-lc") && !is_c_flag("-1c"));
     }
 
     #[test]

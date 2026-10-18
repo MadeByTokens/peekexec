@@ -372,30 +372,34 @@ impl Daemon {
         };
         match sessions::classify(&chain, &mine, &is_live, &trusted) {
             sessions::Provenance::Unregistered => Provenance::Unregistered,
-            sessions::Provenance::Direct { session, command } => Provenance::Direct {
+            sessions::Provenance::InSession {
+                session,
+                path,
+                others,
+                command,
+            } => Provenance::InSession {
                 since: since(&session),
                 agent: session,
+                path: path.iter().map(|p| display_line(p, 60)).collect(),
+                others: others.iter().map(|p| display_line(p, 60)).collect(),
                 command: command.map(|c| display_line(&c, 600)),
-            },
-            sessions::Provenance::Indirect { session, via } => Provenance::Indirect {
-                since: since(&session),
-                agent: session,
-                via: via.iter().map(|v| display_line(v, 120)).collect(),
             },
         }
     }
 
     fn apply_provenance(&self, peer: &Peer, view: &mut PromptView) {
         let provenance = self.provenance(peer);
-        if let Provenance::Indirect { agent, via, .. } = &provenance {
-            view.notes.insert(
-                0,
-                format!(
-                    "Not {agent}'s own command: a program it started is asking ({}).",
-                    via.join(" → ")
-                ),
-            );
-            view.enter_approves = false;
+        if let Provenance::InSession { agent, others, .. } = &provenance {
+            if !others.is_empty() {
+                view.notes.insert(
+                    0,
+                    format!(
+                        "A script or program that {agent} started may be asking: {}.",
+                        others.join(", ")
+                    ),
+                );
+                view.enter_approves = false;
+            }
         }
         view.provenance = provenance;
     }

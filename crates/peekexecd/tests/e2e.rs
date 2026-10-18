@@ -431,15 +431,17 @@ fn registered_agent_requests_are_labelled() {
         "idempotent"
     );
 
-    // The agent process itself asks: direct.
+    // The agent process itself asks: in its session, nothing in between.
     let v = preview_view(&d, sh("true"));
     assert!(
-        matches!(&v.provenance, Provenance::Direct { agent, .. } if agent == "Test Agent"),
+        matches!(&v.provenance, Provenance::InSession { agent, others, .. }
+            if agent == "Test Agent" && others.is_empty()),
         "{:?}",
         v.provenance
     );
+    assert!(!v.notes.iter().any(|n| n.contains("may be asking")));
 
-    // A program the agent started asks (not the peekexec CLI): indirect.
+    // A program the agent started asks (not the peekexec CLI): flagged.
     let script = format!(
         "import json,socket;s=socket.socket(socket.AF_UNIX);s.connect({:?});\
          s.sendall((json.dumps({{'op':'preview','request':json.loads({:?})}})+'\\n').encode());\
@@ -456,14 +458,14 @@ fn registered_agent_requests_are_labelled() {
     let PreviewReply::Ok { view } = reply else {
         panic!("{reply:?}")
     };
-    let Provenance::Indirect { via, .. } = &view.provenance else {
+    let Provenance::InSession { others, .. } = &view.provenance else {
         panic!("{:?}", view.provenance)
     };
-    assert!(via.iter().any(|p| p.starts_with("python3")), "{via:?}");
-    assert!(view
-        .notes
-        .iter()
-        .any(|n| n.contains("a program it started")));
+    assert!(
+        others.iter().any(|p| p.starts_with("python3")),
+        "{others:?}"
+    );
+    assert!(view.notes.iter().any(|n| n.contains("may be asking")));
     assert!(!view.enter_approves);
 
     let r = d.send(&ClientMsg::Unregister);

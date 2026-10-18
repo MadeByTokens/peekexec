@@ -50,7 +50,7 @@ enum Cmd {
     /// Withdraw a pending request (the dialog closes)
     Cancel { id: String },
     /// Register your agent session (one dialog), so later requests are
-    /// labelled as yours, direct or via a program you started
+    /// labelled as coming from your session
     Register {
         /// Name shown on your requests, e.g. "Claude Code"
         #[arg(long, default_value = "agent")]

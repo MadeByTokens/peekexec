@@ -43,17 +43,17 @@ pub enum ViewKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Provenance {
     Unregistered,
-    /// From the agent's own command (shown), or the agent process itself.
-    Direct {
+    /// From inside a registered agent's process tree. This does not prove
+    /// the agent itself decided to ask: a program it started could have.
+    InSession {
         agent: String,
         since: String,
+        /// Short labels from the agent's child down to the client.
+        path: Vec<String>,
+        /// Scripts and programs in `path` other than shells and peekexec.
+        others: Vec<String>,
+        /// The command of the agent's shell, if it ran one.
         command: Option<String>,
-    },
-    /// From a program the agent started.
-    Indirect {
-        agent: String,
-        since: String,
-        via: Vec<String>,
     },
 }
 
@@ -184,11 +184,11 @@ impl PromptView {
             "  origin  : {}",
             match &self.provenance {
                 Provenance::Unregistered => "not from a registered agent session".to_string(),
-                Provenance::Direct { agent, since, .. } =>
-                    format!("{agent} (registered {since}), its own command"),
-                Provenance::Indirect { agent, since, via } => format!(
-                    "{agent} (registered {since}), via a program it started: {}",
-                    via.join(" → ")
+                Provenance::InSession {
+                    agent, since, path, ..
+                } => format!(
+                    "{agent}'s session (registered {since}): {agent} → {}",
+                    path.join(" → ")
                 ),
             }
         ));
