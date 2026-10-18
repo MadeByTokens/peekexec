@@ -59,7 +59,7 @@ enum ActionCmd {
     Run(RunArgs),
     /// Run a script file as root (snapshotted: edits after submission have no effect)
     Script(ScriptArgs),
-    /// Copy a file as root (the human sees a diff); may write only DEST
+    /// Copy a file as root (the human sees it, and a diff when replacing); writes only DEST
     Install(InstallArgs),
 }
 
@@ -84,6 +84,10 @@ struct Scope {
     /// variables are accepted: DEBIAN_FRONTEND, LANG, LC_*, TZ, TERM, NO_COLOR, ...
     #[arg(long = "env", value_name = "K=V", value_parser = parse_env)]
     env: Vec<(String, String)>,
+    /// Run in DIR instead of /. Flagged to the human when you own DIR: programs
+    /// may load code or settings from their working directory
+    #[arg(long, value_name = "DIR")]
+    cwd: Option<PathBuf>,
     /// Seconds the human has to respond
     #[arg(long, default_value_t = 120)]
     timeout: u32,
@@ -179,7 +183,12 @@ fn build_request(action: &ActionCmd) -> Result<Request, String> {
                 .collect::<Result<_, _>>()?,
         )
     };
-    let cwd = std::env::current_dir().map_err(|e| format!("no current directory: {e}"))?;
+    // Root runs in / unless asked otherwise: a directory the requester owns
+    // can feed code to the program (git hooks, Python modules, Makefiles).
+    let cwd = match &scope.cwd {
+        Some(dir) => PathBuf::from(absolute(dir)?),
+        None => PathBuf::from("/"),
+    };
     Ok(Request {
         action,
         why: scope.why.clone(),

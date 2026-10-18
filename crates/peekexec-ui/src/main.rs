@@ -22,10 +22,6 @@ use peekexec_proto::DisplayTier;
 
 use code::{DisplayLine, Highlighter, DANGER, WARN};
 
-/// Keystrokes are ignored for this long after the dialog appears, so typing
-/// aimed at another window cannot land in it.
-const INPUT_GUARD_SECS: f64 = 0.4;
-
 /// No core dumps, and no ptrace or /proc/<pid>/mem access by other
 /// processes of the same user: the password lives in this process.
 #[cfg(target_os = "linux")]
@@ -217,7 +213,8 @@ impl eframe::App for Dialog {
         let opened = *self.opened_at.get_or_insert(now);
         self.poll_daemon(&ctx, now);
 
-        if now - opened < INPUT_GUARD_SECS {
+        // Keystrokes aimed at another window must not land in the dialog.
+        if now - opened < self.view.input_guard_ms as f64 / 1000.0 {
             ctx.input_mut(|i| {
                 i.events
                     .retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Paste(_)))
@@ -273,19 +270,41 @@ impl Dialog {
             .spacing([12.0, 3.0])
             .show(ui, |ui| {
                 ui.label(RichText::new("From").weak());
-                ui.label(format!(
-                    "{}   [user {}]",
-                    self.view.requester_chain(self.glyphs.arrow, 5),
-                    self.view.requester_user
-                ))
-                .on_hover_text(
-                    self.view
-                        .requester
-                        .iter()
-                        .map(|p| format!("pid {}: {}", p.pid, p.cmdline.join(" ")))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (i, p) in self.view.requester.iter().take(12).enumerate() {
+                        if i > 0 {
+                            ui.label(RichText::new(self.glyphs.arrow).weak());
+                        }
+                        let name = if i == 0 {
+                            format!("{} (pid {})", p.name(), p.pid)
+                        } else {
+                            p.name()
+                        };
+                        let text = if p.trusted {
+                            RichText::new(name)
+                        } else {
+                            RichText::new(format!("{name} {}", self.glyphs.warn)).color(WARN)
+                        };
+                        let exe = p.exe.as_deref().unwrap_or("?");
+                        let origin = if p.trusted {
+                            "a root-owned program"
+                        } else {
+                            "a program anyone running as this user could have put there \
+                             (names in this chain may be chosen by the process itself)"
+                        };
+                        ui.label(text).on_hover_text(format!(
+                            "pid {}\nexecutable (reported by the kernel): {exe}\n  {origin}\n\
+                             command line (set by the process): {}",
+                            p.pid,
+                            p.cmdline.join(" ")
+                        ));
+                    }
+                    if self.view.requester.len() > 12 {
+                        ui.label(RichText::new(format!("{}…", self.glyphs.arrow)).weak());
+                    }
+                    ui.label(format!("   [user {}]", self.view.requester_user));
+                });
                 ui.end_row();
                 ui.label(RichText::new("In").weak());
                 ui.label(&self.view.cwd);
@@ -293,18 +312,6 @@ impl Dialog {
                 ui.label(RichText::new("Runs as").weak());
                 ui.label(RichText::new(&self.view.run_as).strong());
                 ui.end_row();
-                if let Some(why) = &self.view.why {
-                    ui.label(RichText::new("Says").weak());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(format!("“{why}”")).italics());
-                        ui.label(
-                            RichText::new("(unverified: written by the requester)")
-                                .weak()
-                                .small(),
-                        );
-                    });
-                    ui.end_row();
-                }
                 for (k, v) in &self.view.env {
                     ui.label(RichText::new("Env").weak());
                     ui.monospace(format!("{k}={v}"));
@@ -334,13 +341,23 @@ impl Dialog {
                     .small(),
             );
         }
+        // The requester's own words come after everything the daemon checked.
+        if let Some(why) = &self.view.why {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("The requester says:").weak().small());
+                ui.label(RichText::new(format!("“{why}”")).italics());
+                ui.label(RichText::new("(unverified)").weak().small());
+            });
+        }
         ui.add_space(6.0);
     }
 
     fn code(&mut self, ui: &mut egui::Ui, dark: bool, page: f32) {
         ui.horizontal(|ui| {
             for (i, s) in self.view.sections.iter().enumerate() {
-                if ui.selectable_label(self.tab == i, &s.title).clicked() {
+                let n = s.raw.lines().count();
+                let label = format!("{} ({n} line{})", s.title, if n == 1 { "" } else { "s" });
+                if ui.selectable_label(self.tab == i, label).clicked() {
                     self.tab = i;
                 }
             }
@@ -363,10 +380,17 @@ impl Dialog {
             self.cache = Some((key, lines));
         }
         let lines = &self.cache.as_ref().expect("just filled").1;
-        let digits = lines.len().to_string().len();
+        let digits = lines
+            .iter()
+            .map(|l| l.number)
+            .max()
+            .unwrap_or(1)
+            .to_string()
+            .len();
         let height = ui.available_height();
         egui::Frame::group(ui.style()).show(ui, |ui| {
-            ScrollArea::both()
+            // Vertical only: long lines wrap, so nothing hides off to the right.
+            ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .max_height(height - 12.0)
                 .show(ui, |ui| {
@@ -374,17 +398,9 @@ impl Dialog {
                         ui.scroll_with_delta(Vec2::new(0.0, page * (height - 60.0).max(40.0)));
                     }
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    for (i, line) in lines.iter().enumerate() {
-                        ui.add(
-                            egui::Label::new(code::layout(
-                                line,
-                                i + 1,
-                                digits,
-                                dark,
-                                self.glyphs.cont,
-                            ))
-                            .extend(),
-                        );
+                    for line in lines {
+                        let job = code::layout(line, digits, dark, self.glyphs.cont);
+                        ui.add(egui::Label::new(job).wrap());
                     }
                 });
         });
@@ -434,15 +450,21 @@ impl Dialog {
                         .desired_width(260.0)
                         .hint_text(if self.busy {
                             "checking…"
-                        } else {
+                        } else if self.view.enter_approves {
                             "type it and press Enter"
+                        } else {
+                            "type it, then click Approve"
                         }),
                 );
                 if self.want_focus && !self.busy {
                     field.request_focus();
                     self.want_focus = false;
                 }
-                if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                // With warnings on screen, approving takes a deliberate click.
+                if self.view.enter_approves
+                    && field.lost_focus()
+                    && ui.input(|i| i.key_pressed(Key::Enter))
+                {
                     self.approve(ctx);
                 }
             }

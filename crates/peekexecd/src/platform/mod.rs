@@ -89,16 +89,21 @@ pub trait Authenticator: Send + Sync {
 }
 
 /// Everything needed to start the approved command, taken from the snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ExecPlan {
     /// Absolute, resolved path of the program to execute.
     pub program: String,
     /// argv, including argv[0] as the human saw it.
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// The working directory as shown to the human...
     pub cwd: String,
+    /// ...and opened when it was shown; the command starts in this one.
+    pub cwd_fd: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
     pub write: Option<Vec<String>>,
     pub no_net: bool,
+    /// The requesting user, recorded as the command's audit login uid.
+    pub audit_uid: Option<u32>,
 }
 
 pub trait Sandbox: Send + Sync {

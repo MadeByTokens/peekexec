@@ -3,12 +3,14 @@
 //! from the same resolved values, in one place, so they cannot disagree.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
-use peekexec_core::textcheck::{classify, FindingKind};
+use peekexec_core::textcheck::{classify, scan, FindingKind};
 use peekexec_core::{Action, Request};
 use peekexec_proto::view::{ProcLine, PromptView, Section, Syntax};
 use peekexec_proto::{Enforced, Level};
@@ -87,18 +89,25 @@ pub fn prepare(
     let owners = trust::trusted_owners();
     let env = command_env(user, &req.env, ctx.dev);
     let mut snapshot_dir = None;
+    let mut notes = Vec::new();
+    let workdir = WorkDir::open(&req.cwd, &owners)?;
+    if let Some(w) = &workdir.warning {
+        notes.push(w.clone());
+    }
 
     let (sections, exec, enforced) = match &req.action {
         Action::Run { argv } => {
-            let program = trust::resolve_program(&argv[0], &req.cwd, &owners)?;
+            let program = trust::resolve_program(&argv[0], &workdir.path, &owners)?;
             let program = path_str(&program)?;
             let plan = ExecPlan {
                 program: program.clone(),
                 argv: argv.clone(),
                 env,
-                cwd: req.cwd.clone(),
+                cwd: workdir.path.clone(),
+                cwd_fd: Some(Arc::clone(&workdir.fd)),
                 write: req.write.clone(),
                 no_net: req.no_net,
+                audit_uid: Some(peer.uid),
             };
             let enforced = ctx.sandbox.enforcement(&plan);
             (
@@ -133,15 +142,23 @@ pub fn prepare(
                 program: interp.clone(),
                 argv: argv.clone(),
                 env,
-                cwd: req.cwd.clone(),
+                cwd: workdir.path.clone(),
+                cwd_fd: Some(Arc::clone(&workdir.fd)),
                 write: req.write.clone(),
                 no_net: req.no_net,
+                audit_uid: Some(peer.uid),
             };
             let text = String::from_utf8_lossy(content).into_owned();
             let is_shell = SHELLS.contains(&basename(&interp));
             let section = Section {
-                title: name,
-                header: Some(format!("snapshot of {path}, run as: {}", shell_join(&argv))),
+                title: display_line(&name, 80),
+                header: Some(display_line(
+                    &format!(
+                        "snapshot of the file the requester calls {path}; runs as: {}",
+                        shell_join(&argv)
+                    ),
+                    400,
+                )),
                 syntax: if is_shell {
                     Syntax::Shell
                 } else {
@@ -156,23 +173,28 @@ pub fn prepare(
         Action::Install { src, content, dest } => {
             let dest = install_target(dest, src, &owners)?;
             let dest_s = path_str(&dest)?;
-            let header = match std::fs::metadata(&dest) {
-                Ok(m) => format!(
-                    "replaces existing file ({} bytes, mode {:o}) with {} bytes from {src}",
+            let existing = std::fs::metadata(&dest).ok();
+            let header = match &existing {
+                Some(m) => format!(
+                    "replaces an existing file ({} bytes) with {} bytes the requester calls {src}; \
+                     mode stays {:o} (setuid/setgid/sticky bits are always cleared)",
                     m.len(),
-                    m.permissions().mode() & 0o7777,
+                    content.len(),
+                    m.permissions().mode() & 0o777
+                ),
+                None => format!(
+                    "new file, mode 644, {} bytes the requester calls {src}",
                     content.len()
                 ),
-                Err(_) => format!("new file, mode 644, {} bytes from {src}", content.len()),
             };
-            let text = String::from_utf8_lossy(content).into_owned();
-            let section = Section {
-                title: format!("→ {dest_s}"),
-                header: Some(header),
-                syntax: Syntax::Plain,
-                formatted: verbatim(&text),
-                raw: text,
-            };
+            let mut sections = vec![install_section(&dest_s, &header, content, &mut notes)];
+            if let Some(diff) = existing
+                .is_some()
+                .then(|| install_diff(&dest, content))
+                .flatten()
+            {
+                sections.insert(0, diff);
+            }
             let enforced = Enforced {
                 write: Some(vec![dest_s]),
                 write_level: Level::Builtin,
@@ -183,11 +205,11 @@ pub fn prepare(
                 dest,
                 content: content.clone(),
             };
-            (vec![section], exec, enforced)
+            (sections, exec, enforced)
         }
     };
 
-    let mut notes = Vec::new();
+    notes.extend(sensitive_targets(&sections, &enforced));
     if ctx.dev {
         notes.push(format!(
             "DEVELOPMENT MODE: this runs as {}, not as root.",
@@ -217,7 +239,7 @@ pub fn prepare(
         requester,
         requester_user: user.name.clone(),
         pinned: peer.pinned,
-        cwd: display_line(&req.cwd, 300),
+        cwd: display_line(&workdir.path, 300),
         run_as: if ctx.dev {
             format!("{} (development mode, NOT root)", user.name)
         } else {
@@ -237,7 +259,12 @@ pub fn prepare(
         notes,
         timeout_secs: req.timeout_secs.clamp(5, MAX_TIMEOUT_SECS),
         wants_password: ctx.wants_password,
+        input_guard_ms: 400,
+        enter_approves: false,
     };
+    let findings: usize = view.sections.iter().map(|s| scan(&s.raw).len()).sum();
+    let mut view = view;
+    view.enter_approves = view.notes.is_empty() && findings == 0;
     Ok(Prepared {
         view,
         exec,
@@ -414,8 +441,170 @@ fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<String>
         let resolved = trust::resolve_program(&name, "/", owners)?;
         return Ok((path_str(&resolved)?, None));
     }
+    if let Some(a) = &arg {
+        if !shebang_flag_ok(a) {
+            return Err(format!(
+                "the #! line passes {a:?} to the interpreter. Only simple flags such as \
+                 -e, -eu or -x are allowed: anything else could make it run code the human \
+                 never sees"
+            ));
+        }
+    }
     let resolved = trust::resolve_program(prog, "/", owners)?;
     Ok((path_str(&resolved)?, arg))
+}
+
+/// `#!` arguments are passed to the interpreter before the script, so they
+/// must not name files, modules or code. Single-letter flags from this set
+/// cover `sh -e`, `bash -eux`, `python3 -I -s`, `perl -w`...
+fn shebang_flag_ok(arg: &str) -> bool {
+    let Some(flags) = arg.strip_prefix('-') else {
+        return false;
+    };
+    !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| "eEuxvwlIsSBO".contains(c))
+}
+
+/// A directory descriptor usable with fchdir (O_PATH is Linux-only).
+#[cfg(target_os = "linux")]
+const DIR_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const DIR_FLAGS: i32 = libc::O_DIRECTORY | libc::O_CLOEXEC;
+
+/// The directory the command runs in, opened once: the process changes into
+/// this very directory (by descriptor), not whatever the path names later.
+struct WorkDir {
+    path: String,
+    fd: Arc<OwnedFd>,
+    warning: Option<String>,
+}
+
+impl WorkDir {
+    fn open(requested: &str, owners: &[u32]) -> Result<WorkDir, String> {
+        let canon = Path::new(requested)
+            .canonicalize()
+            .map_err(|e| format!("working directory {requested}: {e}"))?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(DIR_FLAGS)
+            .open(&canon)
+            .map_err(|e| format!("working directory {}: {e}", canon.display()))?;
+        let path = path_str(&canon)?;
+        // Programs load code and settings from the directory they run in
+        // (git hooks and config, Python modules, Makefiles, ...).
+        let warning = trust::check(&canon, owners).err().map(|why| {
+            format!(
+                "Runs inside {path}, which root does not control ({why}). Programs may load \
+                 code or settings from it (git, python, make, npm...)."
+            )
+        });
+        Ok(WorkDir {
+            path,
+            fd: Arc::new(OwnedFd::from(file)),
+            warning,
+        })
+    }
+}
+
+/// Places where a file makes root run commands later, or controls logins.
+const SENSITIVE: &[&str] = &[
+    "/etc/sudoers",
+    "/etc/cron",
+    "/var/spool/cron",
+    "/etc/systemd",
+    "/lib/systemd",
+    "/usr/lib/systemd",
+    "/etc/udev",
+    "/lib/udev",
+    "/etc/profile",
+    "/etc/bash.bashrc",
+    "/etc/environment",
+    "/etc/ld.so.preload",
+    "/etc/ld.so.conf",
+    "/etc/pam.d",
+    "/etc/security",
+    "/etc/ssh",
+    "/root/.ssh",
+    "/etc/polkit-1",
+    "/etc/apt/sources.list",
+    "/etc/apt/apt.conf",
+    "/etc/passwd",
+    "/etc/shadow",
+    "/etc/group",
+];
+
+fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Vec<String> {
+    let mut hits: Vec<&str> = Vec::new();
+    let texts = sections
+        .iter()
+        .map(|s| s.raw.as_str())
+        .chain(enforced.write.iter().flatten().map(String::as_str));
+    for text in texts {
+        for &p in SENSITIVE {
+            if text.contains(p) && !hits.contains(&p) {
+                hits.push(p);
+            }
+        }
+    }
+    hits.into_iter()
+        .map(|p| {
+            format!("Touches {p}*: files there can run commands as root later or control logins.")
+        })
+        .collect()
+}
+
+fn install_section(dest: &str, header: &str, content: &[u8], notes: &mut Vec<String>) -> Section {
+    let binary = content.contains(&0) || std::str::from_utf8(content).is_err();
+    let (raw, syntax) = if binary {
+        let kind = if content.starts_with(b"\x7fELF") {
+            notes.push(format!("Installs an executable program into {dest}."));
+            "an executable program (ELF)"
+        } else {
+            "binary data"
+        };
+        (
+            format!(
+                "Not text: {kind}, {} bytes, sha256 {}.\nIts content cannot be shown here.\n",
+                content.len(),
+                peekexec_core::request::sha256_hex(content)
+            ),
+            Syntax::Plain,
+        )
+    } else {
+        (String::from_utf8_lossy(content).into_owned(), Syntax::Plain)
+    };
+    Section {
+        title: display_line(&format!("new {dest}"), 120),
+        header: Some(display_line(header, 400)),
+        syntax,
+        formatted: verbatim(&raw),
+        raw,
+    }
+}
+
+/// What changes in an existing text file, as a unified diff.
+fn install_diff(dest: &Path, content: &[u8]) -> Option<Section> {
+    let old = std::fs::read(dest).ok()?;
+    let (old, new) = (
+        std::str::from_utf8(&old).ok()?,
+        std::str::from_utf8(content).ok()?,
+    );
+    let diff = similar::TextDiff::from_lines(old, new)
+        .unified_diff()
+        .context_radius(3)
+        .header("current", "new")
+        .to_string();
+    let raw = if diff.is_empty() {
+        "No changes: the new content is identical to the current file.\n".to_string()
+    } else {
+        diff
+    };
+    Some(Section {
+        title: "changes".into(),
+        header: Some("unified diff: lines starting with - are removed, + are added".into()),
+        syntax: Syntax::Diff,
+        formatted: verbatim(&raw),
+        raw,
+    })
 }
 
 fn write_snapshot(dir: &Path, file: &Path, content: &[u8]) -> Result<(), String> {
@@ -472,11 +661,19 @@ fn install_target(dest: &str, src: &str, owners: &[u32]) -> Result<PathBuf, Stri
     Ok(target)
 }
 
+/// Process details are under the control of whoever runs the process, so
+/// they are escaped, and `trusted` says whether the executable is a
+/// root-owned file that only root could have put there.
 fn proc_line(p: &ProcessInfo) -> ProcLine {
+    let trusted = p
+        .exe
+        .as_deref()
+        .is_some_and(|e| trust::check(Path::new(e), &[0]).is_ok());
     ProcLine {
         pid: p.pid,
-        exe: p.exe.clone(),
-        cmdline: p.cmdline.clone(),
+        exe: p.exe.as_deref().map(|e| display_line(e, 200)),
+        cmdline: p.cmdline.iter().map(|a| display_line(a, 200)).collect(),
+        trusted,
     }
 }
 
@@ -543,6 +740,53 @@ mod tests {
         assert_eq!(s.raw, "a && b");
         assert_eq!(s.formatted.len(), 2);
         assert!(s.header.unwrap().contains("sh → /usr/bin/dash"));
+    }
+
+    #[test]
+    fn shebang_flags_are_allowlisted() {
+        for ok in ["-e", "-eu", "-eux", "-I", "-w"] {
+            assert!(shebang_flag_ok(ok), "{ok}");
+        }
+        for bad in [
+            "-mfoo",
+            "-c",
+            "-r/home/u/x",
+            "--rcfile",
+            "-e /tmp/x",
+            "x",
+            "-",
+            "-Mstrict",
+        ] {
+            assert!(!shebang_flag_ok(bad), "{bad}");
+        }
+        let owners = trust::trusted_owners();
+        assert!(interpreter(b"#!/bin/sh -c\n", &owners).is_err());
+    }
+
+    #[test]
+    fn flags_sensitive_targets() {
+        let e = Enforced {
+            write: Some(vec!["/etc/sudoers.d/x".into()]),
+            write_level: Level::Builtin,
+            network: false,
+            network_level: Level::Builtin,
+        };
+        let notes = sensitive_targets(&[], &e);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("/etc/sudoers"));
+    }
+
+    #[test]
+    fn binary_install_is_described_not_shown() {
+        let mut notes = Vec::new();
+        let s = install_section(
+            "/usr/local/bin/x",
+            "h",
+            b"\x7fELF\x02\x01\x00junk",
+            &mut notes,
+        );
+        assert!(s.raw.starts_with("Not text: an executable program"));
+        assert_eq!(notes.len(), 1);
     }
 
     #[test]

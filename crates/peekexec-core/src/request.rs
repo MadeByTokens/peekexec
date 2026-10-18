@@ -64,11 +64,16 @@ impl Request {
         };
         // Only strings, byte vectors, bools and BTreeMaps: serialization cannot fail.
         let bytes = serde_json::to_vec(&executed).expect("plain data always serializes");
-        Sha256::digest(bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        sha256_hex(&bytes)
     }
+}
+
+/// SHA-256 of `data`, as lowercase hex.
+pub fn sha256_hex(data: &[u8]) -> String {
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

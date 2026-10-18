@@ -12,6 +12,9 @@ pub struct ProcLine {
     pub pid: u32,
     pub exe: Option<String>,
     pub cmdline: Vec<String>,
+    /// The executable is root-owned and only root could have placed it.
+    /// Names of untrusted processes may be chosen by whoever runs them.
+    pub trusted: bool,
 }
 
 impl ProcLine {
@@ -30,6 +33,7 @@ impl ProcLine {
 pub enum Syntax {
     Shell,
     Plain,
+    Diff,
 }
 
 /// One tab in the dialog.
@@ -71,6 +75,12 @@ pub struct PromptView {
     pub timeout_secs: u32,
     /// False when the platform authenticates without a password (Touch ID).
     pub wants_password: bool,
+    /// Keystrokes are ignored this long after the dialog appears (longer
+    /// when it follows another request closely).
+    pub input_guard_ms: u32,
+    /// Whether Enter may approve. False whenever there is anything to warn
+    /// about (notes, suspicious characters): then only a click approves.
+    pub enter_approves: bool,
 }
 
 impl PromptView {
@@ -102,6 +112,7 @@ impl PromptView {
         let mut out = Vec::new();
         let how = |l: Level| match l {
             Level::Kernel => "",
+            Level::BestEffort => " (best effort)",
             Level::DeclaredOnly => " (declared, not enforced)",
             Level::NotRequested => "",
             Level::Builtin => "",

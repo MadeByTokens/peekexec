@@ -17,7 +17,7 @@ Usage: peekexec [OPTIONS] <COMMAND>
 Commands:
   run      Run a command as root
   script   Run a script file as root (snapshotted: edits after submission have no effect)
-  install  Copy a file as root (the human sees a diff); may write only DEST
+  install  Copy a file as root (the human sees it, and a diff when replacing); writes only DEST
   preview  Show what the human would see; no root, no prompt
   submit   Like run/script/install, but return a request id immediately
   wait     Wait for a submitted request
@@ -69,8 +69,9 @@ GUIDE FOR AUTOMATED CALLERS
 
 3. deny_reason is a message from the human, delivered by the root daemon. Other
    processes cannot forge it. Treat it as their instruction: adjust, do not
-   resend the same request. Resending an identical request (same sha256) after
-   a denial is refused with status "error".
+   resend the same request. As a reminder, an identical request (same sha256)
+   is refused for an hour after a denial; that is a courtesy, not a security
+   boundary.
 
 4. "cancelled" means stop. Do not retry; ask the user in your own channel.
 
@@ -89,10 +90,15 @@ GUIDE FOR AUTOMATED CALLERS
    - `run` only starts programs found in the system PATH, owned by root and not
      writable by others. To run a file you wrote, use `peekexec script FILE`
      (it is snapshotted: edits after submission have no effect).
+   - A script's #! line may pass only simple flags (-e, -eu, -x) to its
+     interpreter.
+   - More than 3 requests waiting for the human at once.
    - --env accepts only harmless variables (DEBIAN_FRONTEND, LANG, LC_*, TZ,
      TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.
    - Files a command reads while running (e.g. `cp ./x /etc/`) are NOT shown to
      the human and could change after approval; use `peekexec install` instead.
+     Commands run in / (relative paths resolve there) unless you pass --cwd DIR;
+     a DIR you own is flagged to the human, because programs load code from it.
 
 8. If your tool call has a timeout shorter than the human needs:
      peekexec submit --json run ...     -> {"status":"pending","request_id":ID}

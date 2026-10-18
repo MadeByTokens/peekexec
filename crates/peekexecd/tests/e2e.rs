@@ -272,3 +272,123 @@ fn preview_matches_what_would_be_shown() {
     assert!(view.notes.iter().any(|n| n.contains("DEVELOPMENT MODE")));
     assert_eq!(view.requester[0].pid, std::process::id());
 }
+
+#[test]
+fn runs_in_root_by_default_and_pins_an_explicit_cwd() {
+    let d = Daemon::start("delay:500");
+    let r = d.run(sh("pwd -P"));
+    assert_eq!(r.stdout.as_deref(), Some("/\n"));
+
+    // Ask to run in `work`, then swap `work` for a symlink while the
+    // "human" is still looking: the command must still start in the
+    // directory that was shown.
+    let work = d.dir.join("work");
+    let other = d.dir.join("other");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let mut req = sh("pwd -P");
+    req.cwd = work.to_str().unwrap().into();
+    let id = d
+        .send(&ClientMsg::Submit { request: req })
+        .request_id
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let moved = d.dir.join("work-moved");
+    std::fs::rename(&work, &moved).unwrap();
+    std::os::unix::fs::symlink(&other, &work).unwrap();
+    let r = d.send(&ClientMsg::Wait {
+        id,
+        timeout_secs: Some(10),
+    });
+    assert_eq!(r.status, Status::Approved, "{r:?}");
+    assert_eq!(r.stdout.as_deref().map(str::trim), moved.to_str());
+}
+
+#[test]
+fn writable_cwd_is_flagged_and_disables_enter() {
+    let d = Daemon::start("approve");
+    let open_dir = d.dir.join("open");
+    std::fs::create_dir(&open_dir).unwrap();
+    std::fs::set_permissions(&open_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let mut req = sh("true");
+    req.cwd = open_dir.to_str().unwrap().into();
+    let reply: PreviewReply = call(&d.socket, &ClientMsg::Preview { request: req }).unwrap();
+    let PreviewReply::Ok { view } = reply else {
+        panic!("{reply:?}")
+    };
+    assert!(
+        view.notes.iter().any(|n| n.contains("Runs inside")),
+        "{:?}",
+        view.notes
+    );
+    assert!(!view.enter_approves);
+}
+
+#[test]
+fn shebang_arguments_are_restricted() {
+    let d = Daemon::start("approve");
+    let r = d.run(request(Action::Script {
+        path: "/x/job.pl".into(),
+        content: b"#!/usr/bin/perl -Mevil\nprint 1\n".to_vec(),
+        args: vec![],
+    }));
+    assert_eq!(r.status, Status::Error);
+    assert!(r.error.unwrap().contains("Only simple flags"));
+}
+
+#[test]
+fn leftover_processes_are_killed() {
+    let d = Daemon::start("approve");
+    let started = Instant::now();
+    let r = d.run(sh("sleep 30 & echo started"));
+    assert_eq!(r.stdout.as_deref(), Some("started\n"));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "waited for the background job"
+    );
+}
+
+#[test]
+fn too_many_pending_requests_are_refused() {
+    let d = Daemon::start("hold");
+    let ids: Vec<_> = (0..3)
+        .map(|i| {
+            d.send(&ClientMsg::Submit {
+                request: sh(&format!("echo {i}")),
+            })
+        })
+        .collect();
+    assert!(ids.iter().all(|r| r.status == Status::Pending));
+    let r = d.send(&ClientMsg::Submit {
+        request: sh("echo 4"),
+    });
+    let r = if r.status == Status::Pending {
+        d.send(&ClientMsg::Wait {
+            id: r.request_id.unwrap(),
+            timeout_secs: Some(2),
+        })
+    } else {
+        r
+    };
+    assert_eq!(r.status, Status::Error);
+    assert!(r.error.unwrap().contains("already waiting"));
+}
+
+#[test]
+fn install_clears_setuid_bits() {
+    let d = Daemon::start("approve");
+    let target_dir = d.dir.join("bin");
+    std::fs::create_dir(&target_dir).unwrap();
+    std::fs::set_permissions(&target_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let target = target_dir.join("tool");
+    std::fs::write(&target, b"old\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    let r = d.run(request(Action::Install {
+        src: "/src/tool".into(),
+        content: b"new\n".to_vec(),
+        dest: target.to_str().unwrap().into(),
+    }));
+    assert_eq!(r.status, Status::Approved, "{r:?}");
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o755);
+}

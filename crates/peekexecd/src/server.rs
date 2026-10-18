@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use peekexec_core::Request;
+use peekexec_core::{Action, Request};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::{ClientMsg, DisplayTier, PreviewReply, Response, Status};
 
@@ -33,6 +33,13 @@ pub struct Options {
 const DENIAL_TTL: Duration = Duration::from_secs(3600);
 const RESULT_TTL: Duration = Duration::from_secs(900);
 const ADMIN_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
+/// Requests a user may have waiting at once; more are refused.
+const MAX_PENDING_PER_USER: usize = 3;
+/// A dialog appearing this soon after the previous one closed gets a longer
+/// keystroke guard and a note, against reflexive approval.
+const BACK_TO_BACK: Duration = Duration::from_secs(10);
+/// Open connections a user may hold at once.
+const MAX_CONNECTIONS_PER_USER: usize = 16;
 
 pub struct Daemon {
     opts: Options,
@@ -41,6 +48,10 @@ pub struct Daemon {
     denials: Mutex<HashMap<(u32, String), (Instant, String)>>,
     /// One dialog on screen at a time.
     prompt_lock: Mutex<()>,
+    /// When the last dialog closed.
+    last_prompt: Mutex<Option<Instant>>,
+    /// Open connections per uid.
+    connections: Mutex<HashMap<u32, usize>>,
 }
 
 struct Entry {
@@ -81,6 +92,8 @@ impl Daemon {
             requests: Mutex::default(),
             denials: Mutex::default(),
             prompt_lock: Mutex::new(()),
+            last_prompt: Mutex::new(None),
+            connections: Mutex::default(),
         }
     }
 
@@ -128,6 +141,29 @@ impl Daemon {
                 );
                 return;
             }
+        };
+        // Only administrators can ever be asked, so nobody else gets to send
+        // (and make the daemon buffer) a request at all.
+        if !self.opts.dev {
+            let admin = user_of(peer.uid).is_ok_and(|u| is_admin(&u.name, peer.gid));
+            if !admin {
+                let _ = write_msg(
+                    &mut conn,
+                    &Response::error(format!(
+                        "uid {} is not in an administrator group ({})",
+                        peer.uid,
+                        ADMIN_GROUPS.join(", ")
+                    )),
+                );
+                return;
+            }
+        }
+        let Some(_slot) = ConnectionSlot::take(&self.connections, peer.uid) else {
+            let _ = write_msg(
+                &mut conn,
+                &Response::error("too many open connections; close some and retry"),
+            );
+            return;
         };
         let Ok(read_half) = conn.try_clone() else {
             return;
@@ -212,7 +248,21 @@ impl Daemon {
             requests.retain(|_, e| {
                 e.created.elapsed() < RESULT_TTL || e.result.lock().unwrap().is_none()
             });
+            let pending = requests
+                .values()
+                .filter(|e| e.owner == peer.uid && e.result.lock().unwrap().is_none())
+                .count();
             requests.insert(id.clone(), Arc::clone(&entry));
+            if pending >= MAX_PENDING_PER_USER {
+                entry.finish(Response {
+                    request_id: Some(id.clone()),
+                    ..Response::error(format!(
+                        "refused: {pending} requests are already waiting for the human; \
+                         wait for them before sending more"
+                    ))
+                });
+                return (id, entry);
+            }
         }
         let d = Arc::clone(self);
         let worker_entry = Arc::clone(&entry);
@@ -332,13 +382,30 @@ impl Daemon {
             ));
         }
 
+        let mut prepared = prepared;
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
-            if cancel.load(Ordering::SeqCst) {
+            let recent = self
+                .last_prompt
+                .lock()
+                .unwrap()
+                .is_some_and(|t| t.elapsed() < BACK_TO_BACK);
+            if recent {
+                prepared.view.input_guard_ms = 1500;
+                prepared.view.enter_approves = false;
+                prepared.view.notes.insert(
+                    0,
+                    "This request arrived right after the previous one. Read it before approving."
+                        .into(),
+                );
+            }
+            let d = if cancel.load(Ordering::SeqCst) {
                 Ok(Decision::Cancelled)
             } else {
                 self.decide(&prepared, &display, &user, peer, cancel)
-            }
+            };
+            *self.last_prompt.lock().unwrap() = Some(Instant::now());
+            d
         };
 
         let mut response = match decision {
@@ -431,6 +498,36 @@ impl Daemon {
     }
 }
 
+/// One counted connection of a user; released when dropped.
+struct ConnectionSlot<'a> {
+    table: &'a Mutex<HashMap<u32, usize>>,
+    uid: u32,
+}
+
+impl<'a> ConnectionSlot<'a> {
+    fn take(table: &'a Mutex<HashMap<u32, usize>>, uid: u32) -> Option<Self> {
+        let mut t = table.lock().unwrap();
+        let n = t.entry(uid).or_insert(0);
+        if *n >= MAX_CONNECTIONS_PER_USER {
+            return None;
+        }
+        *n += 1;
+        Some(ConnectionSlot { table, uid })
+    }
+}
+
+impl Drop for ConnectionSlot<'_> {
+    fn drop(&mut self) {
+        let mut t = self.table.lock().unwrap();
+        if let Some(n) = t.get_mut(&self.uid) {
+            *n -= 1;
+            if *n == 0 {
+                t.remove(&self.uid);
+            }
+        }
+    }
+}
+
 fn pending(id: &str) -> Response {
     Response {
         request_id: Some(id.to_string()),
@@ -483,18 +580,46 @@ fn new_id() -> String {
     )
 }
 
-/// One line per request in the daemon log (the journal under systemd).
+/// One line per request in the daemon log (the journal under systemd):
+/// who asked, what exactly, where, why, and the outcome. Strings are
+/// Debug-quoted so control characters cannot forge log lines.
 fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
+    use peekexec_core::request::sha256_hex;
+    let what = match &request.action {
+        Action::Run { argv } => format!("run argv={argv:?}"),
+        Action::Script {
+            path,
+            content,
+            args,
+        } => format!(
+            "script path={path:?} bytes={} content_sha256={} args={args:?}",
+            content.len(),
+            sha256_hex(content)
+        ),
+        Action::Install { src, content, dest } => format!(
+            "install dest={dest:?} src={src:?} bytes={} content_sha256={}",
+            content.len(),
+            sha256_hex(content)
+        ),
+    };
     eprintln!(
-        "peekexecd: audit id={id} uid={} pid={} exe={} sha256={} status={}{}{}",
+        "peekexecd: audit id={id} uid={} pid={} exe={:?} {what} cwd={:?} why={:?} \
+         sha256={} status={}{}{}{}",
         peer.uid,
         peer.process.pid,
         peer.process.exe.as_deref().unwrap_or("?"),
+        request.cwd,
+        request.why.as_deref().unwrap_or(""),
         request.digest(),
         response.status.as_str(),
         response
             .exit_code
             .map(|c| format!(" exit={c}"))
+            .unwrap_or_default(),
+        response
+            .deny_reason
+            .as_deref()
+            .map(|r| format!(" deny_reason={r:?}"))
             .unwrap_or_default(),
         response
             .error

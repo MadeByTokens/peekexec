@@ -22,6 +22,13 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
     let err = child.stderr.take().expect("piped");
     let out = std::thread::spawn(move || capture(out));
     let err = std::thread::spawn(move || capture(err));
+    // When the command exits, end everything it left behind in its process
+    // group (no root processes outlive the request). Waiting with WNOWAIT
+    // keeps the exited child's pid, and so its group id, from being reused
+    // before the kill.
+    wait_exited(child.id());
+    // SAFETY: plain signal to the command's own process group.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
     let status = child.wait().map_err(|e| format!("wait: {e}"))?;
     let exit_code = status
         .code()
@@ -32,6 +39,25 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
         stdout: out.join().unwrap_or_default(),
         stderr: err.join().unwrap_or_default(),
     })
+}
+
+/// Block until `pid` has exited, without reaping it.
+fn wait_exited(pid: u32) {
+    loop {
+        // SAFETY: zeroed siginfo is a valid out-parameter for waitid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 fn capture(mut r: impl Read) -> String {
@@ -49,8 +75,9 @@ fn capture(mut r: impl Read) -> String {
 /// file next to it, fsync, rename. An existing file keeps its mode.
 pub fn install(dest: &Path, content: &[u8], id: &str) -> Result<Outcome, String> {
     let dir = dest.parent().ok_or("destination has no parent")?;
+    // Setuid, setgid and sticky bits are never carried over to new content.
     let mode = std::fs::metadata(dest)
-        .map(|m| m.permissions().mode() & 0o7777)
+        .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0o644);
     let tmp = dir.join(format!(".peekexec-{id}.tmp"));
     let err = |what: &str, e: io::Error| format!("{what} {}: {e}", tmp.display());

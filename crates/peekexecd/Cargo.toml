@@ -17,4 +17,5 @@ libc.workspace = true
 nix.workspace = true
 peekexec-core.workspace = true
 peekexec-proto.workspace = true
+similar = "2"
 thiserror.workspace = true

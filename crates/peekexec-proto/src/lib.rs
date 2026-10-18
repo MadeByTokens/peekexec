@@ -87,6 +87,9 @@ impl Status {
 pub enum Level {
     /// Enforced by the kernel; the command cannot exceed it.
     Kernel,
+    /// Applied, but not containment: a root process can undo it (e.g. rejoin
+    /// the host network namespace, or ask a system service to act for it).
+    BestEffort,
     /// Requested and shown to the human, but this platform cannot enforce it.
     DeclaredOnly,
     /// No limit was requested.

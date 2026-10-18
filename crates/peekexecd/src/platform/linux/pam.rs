@@ -94,8 +94,9 @@ extern "C" fn conversation(
                 answers.password_used = true;
                 answers.password.as_deref()
             }
-            PAM_PROMPT_ECHO_ON => Some(answers.user.as_c_str()),
-            PAM_PROMPT_ECHO_OFF => None,
+            // A visible prompt (username, OTP code...) cannot be answered
+            // from the dialog: fail closed rather than guess.
+            PAM_PROMPT_ECHO_ON | PAM_PROMPT_ECHO_OFF => None,
             // Error and info messages need no reply.
             _ => continue,
         };

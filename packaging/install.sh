@@ -42,23 +42,33 @@ for f in peekexec peekexecd peekexec-ui; do
         exit 1
     fi
 done
+# target/release is writable by the user who built it. Copy it once into a
+# root-only directory, then check and install from that copy, so nothing
+# can be swapped between the check and the install.
+stage=$(mktemp -d /tmp/peekexec-install.XXXXXX)
+trap 'rm -rf "$stage"' EXIT
+chmod 700 "$stage"
+for f in peekexec peekexecd peekexec-ui; do
+    cp "$rel/$f" "$stage/$f"
+done
+cp -r "$repo/packaging/systemd" "$repo/packaging/pam" "$stage/"
 # The test approver answers without a human; it must never be installed.
-if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$rel/peekexecd"; then
+if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$stage/peekexecd"; then
     echo "install.sh: $rel/peekexecd was built with the test-approver feature; refusing" >&2
     exit 1
 fi
 
 install -d -o root -g root -m 0755 "$libexec"
-install -o root -g root -m 0755 "$rel/peekexecd" "$libexec/peekexecd"
-install -o root -g root -m 0755 "$rel/peekexec-ui" "$libexec/peekexec-ui"
-install -o root -g root -m 0755 "$rel/peekexec" "$bin"
-install -o root -g root -m 0644 "$repo/packaging/systemd/peekexecd.socket" "$units/"
-install -o root -g root -m 0644 "$repo/packaging/systemd/peekexecd.service" "$units/"
+install -o root -g root -m 0755 "$stage/peekexecd" "$libexec/peekexecd"
+install -o root -g root -m 0755 "$stage/peekexec-ui" "$libexec/peekexec-ui"
+install -o root -g root -m 0755 "$stage/peekexec" "$bin"
+install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
+install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
 if [ ! -e "$pam" ]; then
     if [ -e /etc/pam.d/common-auth ]; then
-        install -o root -g root -m 0644 "$repo/packaging/pam/peekexec.debian" "$pam"
+        install -o root -g root -m 0644 "$stage/pam/peekexec.debian" "$pam"
     else
-        install -o root -g root -m 0644 "$repo/packaging/pam/peekexec.redhat" "$pam"
+        install -o root -g root -m 0644 "$stage/pam/peekexec.redhat" "$pam"
     fi
 fi
 
