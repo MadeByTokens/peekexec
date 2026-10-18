@@ -4,6 +4,7 @@
 mod display;
 mod pam;
 mod peer;
+mod polkit;
 mod sandbox;
 
 use std::os::fd::FromRawFd;
@@ -23,6 +24,7 @@ pub fn platform(pam_service: &str) -> Platform {
         auth: Box::new(Pam::new(pam_service)),
         sandbox: Box::new(Namespaces),
         listener: Box::new(SystemdSocket),
+        system_prompt: Some(Box::new(polkit::Polkit)),
     }
 }
 

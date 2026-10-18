@@ -27,6 +27,7 @@ libexec=/usr/libexec/peekexec
 bin=/usr/local/bin/peekexec
 units=/etc/systemd/system
 pam=/etc/pam.d/peekexec
+policy=/usr/share/polkit-1/actions/org.peekexec.approve.policy
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "install.sh: run as root (e.g. pkexec \"$repo/packaging/install.sh\")" >&2
@@ -45,7 +46,7 @@ later() {
 }
 
 if [ "$action" = uninstall ]; then
-    rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin"
+    rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
     rm -rf "$libexec"
     if in_service; then
         later disable --now peekexecd.socket peekexecd.service
@@ -82,7 +83,7 @@ chmod 700 "$stage"
 for f in peekexec peekexecd peekexec-ui; do
     cp "$rel/$f" "$stage/$f"
 done
-cp -r "$repo/packaging/systemd" "$repo/packaging/pam" "$stage/"
+cp -r "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" "$stage/"
 # The test approver answers without a human; it must never be installed.
 if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$stage/peekexecd"; then
     echo "install.sh: $rel/peekexecd was built with the test-approver feature; refusing" >&2
@@ -95,6 +96,9 @@ install -o root -g root -m 0755 "$stage/peekexec-ui" "$libexec/peekexec-ui"
 install -o root -g root -m 0755 "$stage/peekexec" "$bin"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
+if [ -d "$(dirname "$policy")" ]; then
+    install -o root -g root -m 0644 "$stage/polkit/org.peekexec.approve.policy" "$policy"
+fi
 if [ ! -e "$pam" ]; then
     if [ -e /etc/pam.d/common-auth ]; then
         install -o root -g root -m 0644 "$stage/pam/peekexec.debian" "$pam"

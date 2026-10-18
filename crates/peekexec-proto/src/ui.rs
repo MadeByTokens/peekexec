@@ -8,8 +8,14 @@ use crate::view::PromptView;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "msg", rename_all = "snake_case")]
 pub enum ToUi {
-    Show { view: Box<PromptView> },
-    WrongPassword { attempts_left: u8 },
+    Show {
+        view: Box<PromptView>,
+    },
+    WrongPassword {
+        attempts_left: u8,
+    },
+    /// The desktop's own approval prompt is up; the dialog waits.
+    SystemPromptOpen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

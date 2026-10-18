@@ -150,6 +150,36 @@ pub fn declared_only(plan: &ExecPlan) -> Enforced {
     }
 }
 
+/// How a system-drawn approval prompt ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptOutcome {
+    Authorized,
+    /// Closed or cancelled by the human, or withdrawn because the request was.
+    Dismissed,
+    /// The human failed to authenticate.
+    NotAuthorized,
+    /// Nobody could be asked: no authentication agent for the requester.
+    NoAgent,
+    TimedOut,
+}
+
+/// The desktop's own approval prompt (polkit agent on Linux). Used when the
+/// daemon cannot verify the display its own dialog would appear on.
+pub trait SystemPrompt: Send + Sync {
+    /// Whether it is installed and usable.
+    fn available(&self) -> bool;
+    /// Ask about `subject` (the requesting process) with `message` shown in
+    /// the prompt; blocks until answered, `deadline`, or `cancel`.
+    fn approve(
+        &self,
+        subject: &ProcessInfo,
+        uid: u32,
+        message: &str,
+        deadline: std::time::Instant,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<PromptOutcome, PlatformError>;
+}
+
 /// Obtains the daemon's listening socket: inherited from the service
 /// manager (systemd/launchd) if it passed one, else bound at `path`.
 pub trait Listener: Send + Sync {
@@ -162,6 +192,7 @@ pub struct Platform {
     pub auth: Box<dyn Authenticator>,
     pub sandbox: Box<dyn Sandbox>,
     pub listener: Box<dyn Listener>,
+    pub system_prompt: Option<Box<dyn SystemPrompt>>,
 }
 
 #[cfg(target_os = "linux")]

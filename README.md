@@ -7,9 +7,10 @@ can ask for root with a reason the human can read, and get a structured
 answer back.
 
 > **Pre-alpha. Not audited. Do not use it on machines you care about yet.**
-> Linux only. On Wayland desktops (the default on current Ubuntu, Fedora and
-> KDE) the dialog cannot yet verify which display server shows it, and says
-> so on every request; see [THREAT_MODEL.md](THREAT_MODEL.md).
+> Linux only. On X11 the password goes into peekexec's dialog. On Wayland
+> (where peekexec cannot verify its own window) you read the request in
+> peekexec's window and type the password into your desktop's own polkit
+> prompt, which repeats the key facts; see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
 

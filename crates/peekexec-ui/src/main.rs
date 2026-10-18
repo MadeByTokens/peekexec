@@ -16,7 +16,7 @@ use eframe::egui::{
 };
 use peekexec_core::textcheck::scan;
 use peekexec_proto::ui::{FromUi, ToUi};
-use peekexec_proto::view::{PromptView, Provenance, ViewKind};
+use peekexec_proto::view::{Approval, PromptView, Provenance, ViewKind};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::DisplayTier;
 
@@ -132,6 +132,8 @@ struct Dialog {
     tab: usize,
     opened_at: Option<f64>,
     want_focus: bool,
+    /// The desktop's own prompt is up (system-prompt approval).
+    system_prompt_open: bool,
 }
 
 impl Dialog {
@@ -155,6 +157,7 @@ impl Dialog {
             tab: 0,
             opened_at: None,
             want_focus: true,
+            system_prompt_open: false,
         }
     }
 
@@ -190,6 +193,10 @@ impl Dialog {
                     ));
                     self.shake_until = now + 0.45;
                     self.want_focus = true;
+                }
+                Some(ToUi::SystemPromptOpen) => {
+                    self.error = None;
+                    self.system_prompt_open = true;
                 }
                 Some(ToUi::Show { .. }) => {}
                 None => {
@@ -435,7 +442,7 @@ impl Dialog {
     fn code(&mut self, ui: &mut egui::Ui, dark: bool, page: f32) {
         ui.horizontal(|ui| {
             for (i, s) in self.view.sections.iter().enumerate() {
-                let n = s.raw.lines().count();
+                let n = s.formatted.len();
                 let label = format!("{} ({n} line{})", s.title, if n == 1 { "" } else { "s" });
                 if ui.selectable_label(self.tab == i, label).clicked() {
                     self.tab = i;
@@ -521,6 +528,14 @@ impl Dialog {
         };
         ui.horizontal(|ui| {
             ui.add_space(8.0 + shake.max(0.0));
+            if self.view.approval == Approval::SystemPrompt {
+                let text = if self.system_prompt_open {
+                    "Waiting for your desktop's password dialog…"
+                } else {
+                    "Read the request, then continue: your desktop will ask for your password."
+                };
+                ui.label(RichText::new(text).strong());
+            }
             if self.view.wants_password {
                 ui.label("Password:");
                 let field = ui.add_enabled(
@@ -554,11 +569,15 @@ impl Dialog {
                 let ready = wait <= 0.0
                     && !self.busy
                     && (!self.view.wants_password || !self.password.is_empty());
+                let verb = match self.view.approval {
+                    Approval::Password => "Approve",
+                    Approval::SystemPrompt => "Continue",
+                };
                 let label = if wait > 0.0 {
                     ctx.request_repaint_after(Duration::from_millis(100));
-                    format!("Approve ({})", wait.ceil() as u32)
+                    format!("{verb} ({})", wait.ceil() as u32)
                 } else {
-                    "Approve".to_string()
+                    verb.to_string()
                 };
                 let approve = egui::Button::new(RichText::new(label).strong());
                 if ui.add_enabled(ready, approve).clicked() {

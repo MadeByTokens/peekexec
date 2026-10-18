@@ -174,7 +174,9 @@ such displays are reported as unverified. Work, in a Ubuntu 24.04 desktop VM:
    even for unprivileged callers (Launchpad #1562721). Any caller can set
    `polkit.message` for its own request, so the prompt itself must carry the
    decisive facts; a decoy viewer next to it is the remaining risk.
-2. **Option B: password through the desktop's polkit agent.** The agent is
+2. **Option B: password through the desktop's polkit agent** ✅ (verified in the
+   VM: read-only peekexec window, Continue, GNOME's prompt with the daemon's
+   summary, approve / dismiss / no-agent paths). The agent is
    registered with polkitd at login (in GNOME it is drawn by the shell itself),
    so a requester cannot reroute it. The peekexec window shows the code and
    Approve/Deny; the agent's prompt must carry the summary (who, what, writes),

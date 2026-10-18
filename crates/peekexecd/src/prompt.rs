@@ -12,7 +12,7 @@ use peekexec_proto::ui::{FromUi, ToUi};
 use peekexec_proto::view::PromptView;
 use peekexec_proto::wire::{read_msg, write_msg};
 
-use crate::platform::Authenticator;
+use crate::platform::{Authenticator, ProcessInfo, PromptOutcome, SystemPrompt};
 use crate::session::Display;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub enum Decision {
     Denied(String),
     AuthFailed,
     TimedOut,
+    /// Nobody could be asked; the message says why and what to do.
+    Failed(String),
 }
 
 pub const ATTEMPTS: u8 = 3;
@@ -34,12 +36,27 @@ pub struct Dialog {
 
 /// Show `view`, collect the answer, verify the password. Blocks until the
 /// human answers, the deadline passes, or `cancel` is set.
+/// How an Approve click is confirmed.
+pub enum Approver<'a> {
+    /// The password typed into the dialog, checked by PAM.
+    Password {
+        auth: &'a dyn Authenticator,
+        user: &'a str,
+    },
+    /// The desktop's own prompt, showing `message`, about `subject`.
+    System {
+        prompt: &'a dyn SystemPrompt,
+        subject: &'a ProcessInfo,
+        uid: u32,
+        message: String,
+    },
+}
+
 pub fn ask(
     dialog: &Dialog,
     display: &Display,
     view: &PromptView,
-    auth: &dyn Authenticator,
-    user: &str,
+    approver: &Approver,
     cancel: &AtomicBool,
 ) -> Result<Decision, String> {
     let mut cmd = Command::new(&dialog.program);
@@ -89,7 +106,7 @@ pub fn ask(
         view: Box::new(view.clone()),
     };
     let answer = write_msg(&mut stdin, &show)
-        .map(|()| wait_for_answer(&rx, &mut stdin, view, auth, user, cancel))
+        .map(|()| wait_for_answer(&rx, &mut stdin, view, approver, cancel))
         .map_err(|e| format!("dialog did not accept the request: {e}"));
     drop(stdin); // the dialog exits when its stdin closes
     let _ = child.kill();
@@ -111,8 +128,7 @@ fn wait_for_answer(
     rx: &mpsc::Receiver<FromUi>,
     stdin: &mut std::process::ChildStdin,
     view: &PromptView,
-    auth: &dyn Authenticator,
-    user: &str,
+    approver: &Approver,
     cancel: &AtomicBool,
 ) -> Option<Decision> {
     let deadline = Instant::now() + Duration::from_secs(view.timeout_secs.into());
@@ -127,7 +143,34 @@ fn wait_for_answer(
         }
         let tick = (deadline - now).min(Duration::from_millis(200));
         match rx.recv_timeout(tick) {
-            Ok(FromUi::Approve { password }) => match auth.verify(user, password.as_deref()) {
+            Ok(FromUi::Approve { .. }) if matches!(approver, Approver::System { .. }) => {
+                let Approver::System {
+                    prompt,
+                    subject,
+                    uid,
+                    message,
+                } = approver
+                else {
+                    unreachable!()
+                };
+                let _ = write_msg(stdin, &ToUi::SystemPromptOpen);
+                return Some(
+                    match prompt.approve(subject, *uid, message, deadline, cancel) {
+                        Ok(PromptOutcome::Authorized) => Decision::Approved,
+                        Ok(PromptOutcome::Dismissed) => Decision::Cancelled,
+                        Ok(PromptOutcome::TimedOut) => Decision::TimedOut,
+                        Ok(PromptOutcome::NotAuthorized) => Decision::AuthFailed,
+                        Ok(PromptOutcome::NoAgent) => Decision::Failed(
+                            "no polkit authentication agent answered for the requester's \
+                             session: run the request from a program inside your desktop \
+                             session (e.g. a terminal there), not over ssh"
+                                .into(),
+                        ),
+                        Err(e) => Decision::Failed(format!("system prompt: {e}")),
+                    },
+                );
+            }
+            Ok(FromUi::Approve { password }) => match approver.verify(password.as_deref()) {
                 Ok(true) => return Some(Decision::Approved),
                 Ok(false) => {
                     attempts -= 1;
@@ -150,6 +193,15 @@ fn wait_for_answer(
             Ok(FromUi::Deny { reason }) => return Some(Decision::Denied(reason)),
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+impl Approver<'_> {
+    fn verify(&self, password: Option<&str>) -> Result<bool, crate::platform::PlatformError> {
+        match self {
+            Approver::Password { auth, user } => auth.verify(user, password),
+            Approver::System { .. } => Ok(false),
         }
     }
 }

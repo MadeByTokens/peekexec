@@ -20,5 +20,9 @@ peekexec-proto.workspace = true
 similar = "2"
 thiserror.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# polkit over D-Bus (the system prompt on unverified displays)
+zbus = { version = "5.19", default-features = false, features = ["blocking-api", "async-io"] }
+
 [dev-dependencies]
 serde_json.workspace = true

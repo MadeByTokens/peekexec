@@ -19,6 +19,7 @@ pub fn platform() -> Platform {
         auth: Box::new(Unported),
         sandbox: Box::new(Unported),
         listener: Box::new(Unported),
+        system_prompt: None,
     }
 }
 

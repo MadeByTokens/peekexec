@@ -12,7 +12,7 @@ use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
 use peekexec_core::textcheck::{classify, scan, FindingKind};
 use peekexec_core::{Action, Request};
-use peekexec_proto::view::{ProcLine, PromptView, Provenance, Section, Syntax, ViewKind};
+use peekexec_proto::view::{Approval, ProcLine, PromptView, Provenance, Section, Syntax, ViewKind};
 use peekexec_proto::{Enforced, Level};
 
 use crate::platform::{ExecPlan, Peer, ProcessInfo, Sandbox};
@@ -237,6 +237,7 @@ pub fn prepare(
         .collect();
     let view = PromptView {
         kind: ViewKind::Root,
+        approval: Approval::Password,
         provenance: Provenance::Unregistered,
         request_id: id.to_string(),
         sha256: req.digest(),
@@ -296,6 +297,88 @@ pub fn display_line(s: &str, max_chars: usize) -> String {
         }
     }
     out
+}
+
+/// Prefix of the note added when the display cannot be verified.
+pub const UNVERIFIED_NOTE: &str = "Could not verify which display server shows this dialog";
+const SYSTEM_PROMPT_NOTE: &str = "You will confirm in your desktop's own password dialog";
+
+/// Switch a view to approval through the desktop's own prompt.
+pub fn use_system_prompt(view: &mut PromptView) {
+    view.approval = Approval::SystemPrompt;
+    view.wants_password = false;
+    view.notes.retain(|n| !n.starts_with(UNVERIFIED_NOTE));
+    view.notes.insert(
+        0,
+        format!(
+            "{SYSTEM_PROMPT_NOTE} next; it repeats the key facts. This window cannot be \
+             verified: if the two disagree, cancel."
+        ),
+    );
+}
+
+/// The text the desktop's prompt shows: the decisive facts on their own,
+/// since a decoy window could sit next to it.
+pub fn system_prompt_message(view: &PromptView) -> String {
+    const LINES: usize = 4;
+    let mut m = String::new();
+    m.push_str(match view.kind {
+        ViewKind::Root => "peekexec: run this as root?\n",
+        ViewKind::Register => "peekexec: register an agent session?\n",
+    });
+    for s in &view.sections {
+        let lines: Vec<String> = s
+            .formatted
+            .iter()
+            .map(|l| display_line(l.text.trim(), 100))
+            .filter(|l| !l.is_empty())
+            .collect();
+        m.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
+        for l in lines.iter().take(LINES) {
+            m.push_str(&format!("    {l}\n"));
+        }
+        if lines.len() > LINES {
+            m.push_str(&format!(
+                "    … {} lines in total, see the peekexec window\n",
+                lines.len()
+            ));
+        }
+    }
+    let from = match &view.provenance {
+        Provenance::InSession { agent, since, .. } => {
+            format!("{agent}'s session (registered {since})")
+        }
+        Provenance::Unregistered => view
+            .requester
+            .first()
+            .map(|p| format!("{} (pid {}), not a registered agent", p.name(), p.pid))
+            .unwrap_or_default(),
+    };
+    m.push_str(&format!("\nfrom: {from}\nin: {}\n", view.cwd));
+    if view.kind == ViewKind::Root {
+        let facts: Vec<String> = view.summary(0).into_iter().map(|(_, t)| t).collect();
+        m.push_str(&format!("{}\n", facts.join(" · ")));
+    }
+    if let Provenance::InSession { others, .. } = &view.provenance {
+        if !others.is_empty() {
+            m.push_str(&format!(
+                "⚠ a script or program it started may be asking: {}\n",
+                others.join(", ")
+            ));
+        }
+    }
+    let warnings = view
+        .notes
+        .iter()
+        .filter(|n| !n.starts_with(SYSTEM_PROMPT_NOTE));
+    for n in warnings.take(3) {
+        m.push_str(&format!("⚠ {}\n", display_line(n, 120)));
+    }
+    m.push_str(&format!(
+        "sha256 {}… (as in the peekexec window)",
+        &view.sha256[..12.min(view.sha256.len())]
+    ));
+    m
 }
 
 pub struct User {
@@ -766,6 +849,61 @@ mod tests {
         }
         let owners = trust::trusted_owners();
         assert!(interpreter(b"#!/bin/sh -c\n", &owners).is_err());
+    }
+
+    #[test]
+    fn system_prompt_message_carries_the_facts() {
+        let mut v = PromptView {
+            kind: ViewKind::Root,
+            approval: Approval::Password,
+            provenance: Provenance::Unregistered,
+            request_id: "r-1".into(),
+            sha256: "3f9a1c0000000000000000000000000000000000000000000000000000c21e".into(),
+            requester: vec![],
+            requester_user: "u".into(),
+            pinned: true,
+            cwd: "/".into(),
+            run_as: "root".into(),
+            dev_mode: false,
+            why: Some("ignored: only daemon facts go in".into()),
+            enforced: Enforced {
+                write: Some(vec!["/etc/udev/rules.d".into()]),
+                write_level: Level::DeclaredOnly,
+                network: false,
+                network_level: Level::BestEffort,
+            },
+            display_tier: peekexec_proto::DisplayTier::Wayland,
+            display_verified: false,
+            env: vec![],
+            sections: vec![run_section(
+                &["sh", "-c", "a && b; c; d; e; f $("].map(String::from),
+                "/usr/bin/dash",
+            )],
+            notes: vec![
+                format!("{UNVERIFIED_NOTE}: x"),
+                "Touches /etc/sudoers*".into(),
+            ],
+            timeout_secs: 60,
+            wants_password: true,
+            input_guard_ms: 400,
+            enter_approves: false,
+            approve_delay_ms: 0,
+        };
+        use_system_prompt(&mut v);
+        assert_eq!(v.approval, Approval::SystemPrompt);
+        assert!(!v.wants_password);
+        let m = system_prompt_message(&v);
+        assert!(m.starts_with("peekexec: run this as root?"));
+        assert!(m.contains("    a &&"), "{m}");
+        assert!(m.contains("6 lines in total"), "{m}");
+        assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
+        assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
+        assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
+        assert!(!m.contains("ignored"), "why must not be in the prompt: {m}");
+        assert!(
+            m.ends_with("sha256 3f9a1c000000… (as in the peekexec window)"),
+            "{m}"
+        );
     }
 
     #[test]

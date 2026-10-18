@@ -28,6 +28,17 @@ impl ProcLine {
     }
 }
 
+/// Where the human proves they approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    /// Password typed into this dialog (verified display).
+    Password,
+    /// "Continue" here, then the desktop's own prompt (polkit agent), which
+    /// repeats the key facts; for displays the daemon cannot verify.
+    SystemPrompt,
+}
+
 /// What the human is asked to approve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,6 +92,7 @@ pub struct Section {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptView {
     pub kind: ViewKind,
+    pub approval: Approval,
     pub provenance: Provenance,
     pub request_id: String,
     pub sha256: String,

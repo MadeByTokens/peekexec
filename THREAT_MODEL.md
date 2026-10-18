@@ -93,9 +93,20 @@ It does not promise:
    only an X server that is inside the cgroup scope of the user's active local
    logind session, descends from that session's leader, runs a root-owned
    `Xorg` started for the session's VT, and is the only process meeting all
-   that. Otherwise (Wayland today, or no logind) the dialog falls back to the
-   user's environment and says, in the dialog and as `display_verified: false`,
-   that the display is unverified.
+   that. Otherwise (Wayland, or no logind) peekexec's window is found through
+   the user's environment and cannot be trusted (`display_verified: false`),
+   so it becomes read-only: the human clicks Continue there, and the password
+   goes into the desktop's own polkit prompt for the `org.peekexec.approve`
+   action (admin authentication, never remembered). That prompt is drawn by
+   the authentication agent registered at login (GNOME Shell itself), which a
+   requester cannot reroute, and it shows a summary written by the daemon: the
+   command (or each section's first lines and length), where it came from,
+   the working directory, the limits, warnings and the hash. The summary is
+   passed so that polkit inserts it verbatim (no `$(...)` expansion). The
+   subject is the requesting process (`unix-process`: pid, start time, uid). A
+   requester with no agent in its session (e.g. over ssh) gets an error.
+   Without the polkit action installed, the password falls back to the
+   unverified window, flagged on every request.
 5. **Executed command → system.** It runs as full root. The process group is
    killed when the command exits, the umask is 022, and the audit login uid is
    set to the requester. Programs that detach into their own session can
@@ -107,8 +118,8 @@ It does not promise:
 | Tier | Setup | Holds against |
 |---|---|---|
 | 1 | X11, verified X server | Buggy, overeager or prompt-injected requesters. **Not** a malicious same-user program: X11 lets any client draw fake windows, read keys, and synthesize input (including clicking Approve after reading a typed password, or forging a Deny reason). sudo and pkexec share this limit. |
-| 1- | Unverified display (Wayland today) | As tier 1, and the dialog may be relayed through another display server. Flagged on every request. |
-| 2 | Wayland with the password entered in the desktop's own polkit dialog | Planned (M2): the compositor-drawn prompt carries the decisive facts. |
+| 1- | Unverified display, polkit action not installed | As tier 1, and the dialog may be relayed through another display server. Flagged on every request. |
+| 2 | Wayland: password in the desktop's own polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts. |
 | 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. |
 
 ## Things a hurried human might assume

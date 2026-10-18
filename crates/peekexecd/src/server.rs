@@ -21,7 +21,7 @@ use crate::session::{self, Display};
 use crate::sessions::{self, AgentSession};
 use crate::trust;
 use peekexec_core::format::verbatim;
-use peekexec_proto::view::{PromptView, Provenance, Section, Syntax, ViewKind};
+use peekexec_proto::view::{Approval, PromptView, Provenance, Section, Syntax, ViewKind};
 use peekexec_proto::{Enforced, Level};
 
 pub struct Options {
@@ -343,6 +343,9 @@ impl Daemon {
         .map(|p| {
             let mut view = p.view;
             self.apply_provenance(peer, &mut view);
+            if self.system_prompt_for(&display).is_some() {
+                prepare::use_system_prompt(&mut view);
+            }
             view
         })
     }
@@ -488,7 +491,7 @@ impl Daemon {
             notes.push("DEVELOPMENT MODE.".to_string());
         }
         if !display.verified {
-            notes.push("Could not verify which display server shows this dialog.".into());
+            notes.push(format!("{}.", prepare::UNVERIFIED_NOTE));
         }
         if !line.trusted {
             notes.push(format!(
@@ -503,6 +506,7 @@ impl Daemon {
         };
         let view = PromptView {
             kind: ViewKind::Register,
+            approval: Approval::Password,
             provenance: Provenance::Unregistered,
             request_id: id.clone(),
             sha256: peekexec_core::request::sha256_hex(description.as_bytes()),
@@ -532,6 +536,10 @@ impl Daemon {
             enter_approves: false,
             approve_delay_ms: 0,
         };
+        let mut view = view;
+        if self.system_prompt_for(&display).is_some() {
+            prepare::use_system_prompt(&mut view);
+        }
         let prepared = Prepared {
             view,
             exec: Execution::Nothing,
@@ -569,6 +577,7 @@ impl Daemon {
             Ok(Decision::Cancelled) => base(Status::Cancelled),
             Ok(Decision::TimedOut) => base(Status::Timeout),
             Ok(Decision::AuthFailed) => base(Status::AuthFailed),
+            Ok(Decision::Failed(msg)) => fail(msg),
             Ok(Decision::Denied(reason)) => Response {
                 deny_reason: Some(reason),
                 ..base(Status::Denied)
@@ -666,6 +675,9 @@ impl Daemon {
 
         let mut prepared = prepared;
         self.apply_provenance(peer, &mut prepared.view);
+        if self.system_prompt_for(&display).is_some() {
+            prepare::use_system_prompt(&mut prepared.view);
+        }
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
             let recent = self
@@ -696,6 +708,7 @@ impl Daemon {
             Ok(Decision::Cancelled) => base(Status::Cancelled),
             Ok(Decision::TimedOut) => base(Status::Timeout),
             Ok(Decision::AuthFailed) => base(Status::AuthFailed),
+            Ok(Decision::Failed(msg)) => fail(msg),
             Ok(Decision::Denied(reason)) => {
                 self.denials
                     .lock()
@@ -737,14 +750,32 @@ impl Daemon {
             program: self.opts.dialog.clone(),
             run_as: (!self.opts.dev).then_some((peer.uid, peer.gid)),
         };
-        prompt::ask(
-            &dialog,
-            display,
-            &prepared.view,
-            self.platform.auth.as_ref(),
-            &user.name,
-            cancel,
-        )
+        let approver = match self.system_prompt_for(display) {
+            Some(prompt) if prepared.view.approval == Approval::SystemPrompt => {
+                prompt::Approver::System {
+                    prompt,
+                    subject: &peer.process,
+                    uid: peer.uid,
+                    message: prepare::system_prompt_message(&prepared.view),
+                }
+            }
+            _ => prompt::Approver::Password {
+                auth: self.platform.auth.as_ref(),
+                user: &user.name,
+            },
+        };
+        prompt::ask(&dialog, display, &prepared.view, &approver, cancel)
+    }
+
+    /// The desktop's own prompt, used when this display cannot be verified.
+    fn system_prompt_for(&self, display: &Display) -> Option<&dyn crate::platform::SystemPrompt> {
+        if display.verified || self.opts.test_approver.is_some() {
+            return None;
+        }
+        self.platform
+            .system_prompt
+            .as_deref()
+            .filter(|p| p.available())
     }
 
     fn execute(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
