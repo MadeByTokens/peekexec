@@ -439,7 +439,7 @@ fn registered_agent_requests_are_labelled() {
         "{:?}",
         v.provenance
     );
-    assert!(!v.notes.iter().any(|n| n.contains("may be asking")));
+    assert_eq!(v.approve_delay_ms, 0);
 
     // A program the agent started asks (not the peekexec CLI): flagged.
     let script = format!(
@@ -465,7 +465,7 @@ fn registered_agent_requests_are_labelled() {
         others.iter().any(|p| p.starts_with("python3")),
         "{others:?}"
     );
-    assert!(view.notes.iter().any(|n| n.contains("may be asking")));
+    assert_eq!(view.approve_delay_ms, 2000);
     assert!(!view.enter_approves);
 
     let r = d.send(&ClientMsg::Unregister);
@@ -488,5 +488,8 @@ fn denied_registration_creates_no_session() {
         why: None,
         timeout_secs: 30,
     });
-    assert!(r.error.unwrap().contains("ancestors"));
+    assert!(
+        r.error.unwrap().contains("ancestors"),
+        "neither the caller nor one of its ancestors"
+    );
 }

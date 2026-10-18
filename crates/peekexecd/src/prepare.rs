@@ -265,6 +265,7 @@ pub fn prepare(
         wants_password: ctx.wants_password,
         input_guard_ms: 400,
         enter_approves: false,
+        approve_delay_ms: 0,
     };
     let findings: usize = view.sections.iter().map(|s| scan(&s.raw).len()).sum();
     let mut view = view;

@@ -112,6 +112,9 @@ pub struct PromptView {
     /// Whether Enter may approve. False whenever there is anything to warn
     /// about (notes, suspicious characters): then only a click approves.
     pub enter_approves: bool,
+    /// Approve stays disabled this long after the dialog appears (set when a
+    /// script or program may be asking instead of the agent).
+    pub approve_delay_ms: u32,
 }
 
 impl PromptView {
@@ -192,6 +195,14 @@ impl PromptView {
                 ),
             }
         ));
+        if let Provenance::InSession { agent, others, .. } = &self.provenance {
+            if !others.is_empty() {
+                line(format!(
+                    "  WARNING : a script or program that {agent} started may be asking: {}",
+                    others.join(", ")
+                ));
+            }
+        }
         line(format!(
             "  from    : {}  [user {}]",
             self.requester_chain(" ← ", 6),

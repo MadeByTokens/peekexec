@@ -14,5 +14,6 @@ dev/wayland-vm/start.sh &        # first boot installs the desktop, then reboots
 dev/wayland-vm/ssh.sh            # user tester / password tester
 dev/wayland-vm/screenshot.sh /tmp/vm.png
 dev/wayland-vm/type.sh tester     # type into the VM (e.g. a password prompt), then Enter
+dev/wayland-vm/click.sh 971 718   # left-click at a screen pixel (1024x768)
 remote-viewer vnc://127.0.0.1:5905
 ```

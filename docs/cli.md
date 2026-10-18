@@ -57,10 +57,11 @@ GUIDE FOR AUTOMATED CALLERS
 
 0. Once per session, register:  peekexec register --json --name "Claude Code" \
      --why "so you can tell my requests apart from other programs"
-   The human approves once. Afterwards each dialog says the request comes
-   from your session and shows the chain from you to it; scripts or programs
-   you started that sit in between are flagged. It ends when your process
-   exits, or with `peekexec unregister`.
+   The human approves once (always with a click: a registration labels your
+   whole session). Afterwards each dialog says the request comes from your
+   session and shows the chain from you to it; scripts or programs you started
+   that sit in between get a warning banner, and Approve is held for 2 s. It
+   ends when your process exits, or with `peekexec unregister`.
 
 1. Preview first:  peekexec preview run --write /etc/foo -- sh -c '...'
    It shows what the human will see, without root and without a prompt.

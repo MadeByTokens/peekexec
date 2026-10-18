@@ -389,16 +389,12 @@ impl Daemon {
 
     fn apply_provenance(&self, peer: &Peer, view: &mut PromptView) {
         let provenance = self.provenance(peer);
-        if let Provenance::InSession { agent, others, .. } = &provenance {
+        // Shown by the dialog as a banner (not a note); approving it takes a
+        // click, after a short delay.
+        if let Provenance::InSession { others, .. } = &provenance {
             if !others.is_empty() {
-                view.notes.insert(
-                    0,
-                    format!(
-                        "A script or program that {agent} started may be asking: {}.",
-                        others.join(", ")
-                    ),
-                );
                 view.enter_approves = false;
+                view.approve_delay_ms = 2000;
             }
         }
         view.provenance = provenance;
@@ -431,9 +427,12 @@ impl Daemon {
             None => sessions::default_agent(&chain),
         };
         let Some(agent) = agent else {
-            return fail(
-                "no agent process: --agent-pid must be the caller or one of its ancestors".into(),
-            );
+            return fail(match agent_pid {
+                Some(pid) => format!("pid {pid} is neither the caller nor one of its ancestors"),
+                None => "no agent process among the caller's ancestors (only shells, or the \
+                         caller was orphaned); pass --agent-pid"
+                    .into(),
+            });
         };
         let Some(start_time) = agent.start_time else {
             return fail(format!("cannot read the start time of pid {}", agent.pid));
@@ -477,10 +476,10 @@ impl Daemon {
         let line = proc_line(agent);
         let exe = line.exe.clone().unwrap_or_else(|| "?".into());
         let description = format!(
-            "Register this process as the agent \"{name}\":\n\n  pid {} (started at tick {start_time})\n  executable: {exe}\n  command line: {}\n\nFrom now on, its requests are labelled \"{name}\": the ones it makes \
-             directly (its own shell commands) as direct, the ones made by programs it \
-             starts as such. Nothing runs as root now. The registration ends when this \
-             process exits.\n",
+            "Register this process as the agent \"{name}\":\n\n  pid {} (started at tick {start_time})\n  executable: {exe}\n  command line: {}\n\nFrom now on, requests from inside this process (its own commands and \
+             anything it starts) are labelled \"{name}'s session\", and scripts or programs \
+             it starts that sit in between are flagged. Nothing runs as root now. The \
+             registration ends when this process exits.\n",
             agent.pid,
             line.cmdline.join(" "),
         );
@@ -529,7 +528,9 @@ impl Daemon {
             timeout_secs: timeout_secs.clamp(5, prepare::MAX_TIMEOUT_SECS),
             wants_password: self.platform.auth.wants_password(),
             input_guard_ms: 400,
+            // A registration labels a whole session: always a deliberate click.
             enter_approves: false,
+            approve_delay_ms: 0,
         };
         let prepared = Prepared {
             view,

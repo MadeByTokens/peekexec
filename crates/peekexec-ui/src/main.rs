@@ -393,11 +393,43 @@ impl Dialog {
                 if let Some(cmd) = command {
                     shown.on_hover_text(format!("{agent}'s shell ran:\n{cmd}"));
                 }
+                if let Provenance::InSession { others, .. } = &self.view.provenance {
+                    if !others.is_empty() {
+                        self.script_banner(ui, agent, others);
+                    }
+                }
             }
             Provenance::Unregistered => {
                 ui.label(RichText::new("Not from a registered agent session").weak());
             }
         }
+    }
+
+    /// Full-width warning: something other than the agent's own shell sits
+    /// between the agent and this request.
+    fn script_banner(&self, ui: &mut egui::Ui, agent: &str, others: &[String]) {
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .fill(WARN)
+            .inner_margin(egui::Margin::symmetric(10, 6))
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(format!(
+                        "{} A script or program that {agent} started may be asking, not {agent} itself:",
+                        self.glyphs.warn
+                    ))
+                    .color(Color32::WHITE)
+                    .strong(),
+                );
+                ui.label(
+                    RichText::new(others.join(", "))
+                        .color(Color32::WHITE)
+                        .monospace()
+                        .strong(),
+                );
+            });
     }
 
     fn code(&mut self, ui: &mut egui::Ui, dark: bool, page: f32) {
@@ -518,8 +550,17 @@ impl Dialog {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
-                let ready = !self.busy && (!self.view.wants_password || !self.password.is_empty());
-                let approve = egui::Button::new(RichText::new("Approve").strong());
+                let wait = self.view.approve_delay_ms as f64 / 1000.0 - (now - opened);
+                let ready = wait <= 0.0
+                    && !self.busy
+                    && (!self.view.wants_password || !self.password.is_empty());
+                let label = if wait > 0.0 {
+                    ctx.request_repaint_after(Duration::from_millis(100));
+                    format!("Approve ({})", wait.ceil() as u32)
+                } else {
+                    "Approve".to_string()
+                };
+                let approve = egui::Button::new(RichText::new(label).strong());
                 if ui.add_enabled(ready, approve).clicked() {
                     self.approve(ctx);
                 }
