@@ -44,6 +44,14 @@ impl Listener for SystemdSocket {
         if ours && fds >= 1 {
             // SAFETY: systemd guarantees fd 3 is an open listening socket
             // passed to this pid; nothing else in this process owns it.
+            // Not inherited by the dialog or by approved commands.
+            // SAFETY: fcntl on an fd we own; failure is reported.
+            if unsafe { libc::fcntl(SD_LISTEN_FDS_START, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+                return Err(PlatformError::io(
+                    "set FD_CLOEXEC on the systemd socket",
+                    std::io::Error::last_os_error(),
+                ));
+            }
             return Ok(unsafe { UnixListener::from_raw_fd(SD_LISTEN_FDS_START) });
         }
 

@@ -167,3 +167,13 @@ such displays are reported as unverified. Work, in a Ubuntu 24.04 desktop VM:
 4. Option A, identifying the compositor as the DRM master of the seat, is
    kept as a fallback idea (debugfs-dependent, fragile).
 
+### M2 detail: hardening from the pre-install review
+
+- Per-uid caps on connections and pending requests; smaller message limit
+  for wait/cancel/preview; bounded worker pool; `LimitNOFILE` in the unit.
+- Catch worker panics so a `run` client never blocks forever.
+- Cap script/argv size shown in the dialog and virtualise its scrolling.
+- Root mode: refuse instead of warning when the display is unverified (once
+  the Wayland work gives verified paths there).
+- Expired passwords: report "password expired" instead of a generic failure.
+

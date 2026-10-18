@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
+use peekexec_core::textcheck::{classify, FindingKind};
 use peekexec_core::{Action, Request};
 use peekexec_proto::view::{ProcLine, PromptView, Section, Syntax};
 use peekexec_proto::{Enforced, Level};
@@ -216,14 +217,14 @@ pub fn prepare(
         requester,
         requester_user: user.name.clone(),
         pinned: peer.pinned,
-        cwd: req.cwd.clone(),
+        cwd: display_line(&req.cwd, 300),
         run_as: if ctx.dev {
             format!("{} (development mode, NOT root)", user.name)
         } else {
             "root".into()
         },
         dev_mode: ctx.dev,
-        why: req.why.clone(),
+        why: req.why.as_deref().map(|w| display_line(w, 300)),
         enforced: enforced.clone(),
         display_tier: display.tier,
         display_verified: display.verified,
@@ -243,6 +244,26 @@ pub fn prepare(
         enforced,
         snapshot_dir,
     })
+}
+
+/// Text for a single dialog line: characters that could fake extra lines or
+/// hide text become visible `⟨U+XXXX⟩` tokens, and long text is cut.
+fn display_line(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i == max_chars {
+            out.push('…');
+            break;
+        }
+        // Unlike code, a one-line field must not contain newlines or tabs.
+        let hidden = c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii));
+        if hidden {
+            out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub struct User {
@@ -503,6 +524,16 @@ mod tests {
             "path in value accepted"
         );
         assert!(with("LANG", "/home/u/locale").is_err());
+    }
+
+    #[test]
+    fn why_cannot_fake_lines() {
+        assert_eq!(
+            display_line("ok\nRuns as: nobody", 300),
+            "ok⟨U+000A⟩Runs as: nobody"
+        );
+        assert_eq!(display_line("abcdef", 3), "abc…");
+        assert_eq!(display_line("café", 300), "café");
     }
 
     #[test]

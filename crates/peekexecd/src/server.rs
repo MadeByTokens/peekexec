@@ -103,9 +103,16 @@ impl Daemon {
             match conn {
                 Ok(conn) => {
                     let d = Arc::clone(&self);
-                    std::thread::spawn(move || d.handle(conn));
+                    // On failure the closure, and with it the connection, is dropped.
+                    if let Err(e) = std::thread::Builder::new().spawn(move || d.handle(conn)) {
+                        eprintln!("peekexecd: cannot start a thread: {e}");
+                    }
                 }
-                Err(e) => eprintln!("peekexecd: accept: {e}"),
+                Err(e) => {
+                    eprintln!("peekexecd: accept: {e}");
+                    // e.g. out of file descriptors: back off instead of spinning.
+                    std::thread::sleep(Duration::from_millis(200));
+                }
             }
         }
         Ok(())
@@ -126,6 +133,9 @@ impl Daemon {
             return;
         };
         let mut reader = BufReader::new(read_half);
+        // A client gets this long to send its request; then the timeout is
+        // lifted, since `run` keeps the connection open while it waits.
+        let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
         let msg: ClientMsg = match read_msg(&mut reader) {
             Ok(Some(m)) => m,
             Ok(None) => return,
@@ -134,6 +144,7 @@ impl Daemon {
                 return;
             }
         };
+        let _ = conn.set_read_timeout(None);
         let reply = match msg {
             ClientMsg::Preview { request } => {
                 let reply = match self.preview(&peer, &request) {
@@ -149,7 +160,7 @@ impl Daemon {
                 let (_, entry) = self.start(peer, request);
                 // The client hanging up (Ctrl-C) withdraws the request.
                 let watcher = Arc::clone(&entry);
-                std::thread::spawn(move || {
+                let _ = std::thread::Builder::new().spawn(move || {
                     let _ = reader.read(&mut [0u8; 1]);
                     watcher.cancel.store(true, Ordering::SeqCst);
                 });
@@ -206,11 +217,16 @@ impl Daemon {
         let d = Arc::clone(self);
         let worker_entry = Arc::clone(&entry);
         let worker_id = id.clone();
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().spawn(move || {
             let response = d.process(&peer, &request, &worker_id, &worker_entry.cancel);
             audit(&peer, &request, &worker_id, &response);
             worker_entry.finish(response);
         });
+        if let Err(e) = spawned {
+            entry.finish(Response::error(format!(
+                "daemon overloaded ({e}); try again"
+            )));
+        }
         (id, entry)
     }
 
@@ -229,6 +245,14 @@ impl Daemon {
         request: &Request,
     ) -> Result<peekexec_proto::view::PromptView, String> {
         let user = user_of(peer.uid)?;
+        // Preview runs as root (it inspects install targets): admins only.
+        if !self.opts.dev && !is_admin(&user.name, peer.gid) {
+            return Err(format!(
+                "user {} is not in an administrator group ({})",
+                user.name,
+                ADMIN_GROUPS.join(", ")
+            ));
+        }
         let display = self.display_for(peer).unwrap_or(Display {
             vars: Vec::new(),
             tier: DisplayTier::X11,
