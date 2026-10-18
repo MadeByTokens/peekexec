@@ -9,8 +9,8 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.80"
 
 [workspace.dependencies]
-peekexec-core = { path = "crates/peekexec-core" }
-peekexec-proto = { path = "crates/peekexec-proto" }
+peekexec-core = { path = "crates/peekexec-core", version = "0.0.1" }
+peekexec-proto = { path = "crates/peekexec-proto", version = "0.0.1" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 nix = { version = "0.29", features = ["socket", "user", "signal", "process"] }

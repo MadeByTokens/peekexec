@@ -1,0 +1,44 @@
+# cargo-deny policy (run in CI): known vulnerabilities fail the build,
+# dependencies must be permissively licensed and come from crates.io.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories: vulnerabilities and yanked crates fail.
+yanked = "deny"
+# Acknowledged "unmaintained" notices (no vulnerability). Revisit each one.
+ignore = [
+    # zvariant / zvariant_derive / zbus_names: merged into zbus 6.0 (released
+    # 2026-10-16). Move to zbus 6 once it has had a few weeks of use.
+    { id = "RUSTSEC-2026-0370", reason = "merged into zbus 6; upgrade pending" },
+    { id = "RUSTSEC-2026-0371", reason = "merged into zbus 6; upgrade pending" },
+    { id = "RUSTSEC-2026-0372", reason = "merged into zbus 6; upgrade pending" },
+    # bincode 1.3.3, via syntect: only decodes the syntax definitions built
+    # into peekexec-ui, never requester input. Upstream calls 1.3.3 complete.
+    { id = "RUSTSEC-2025-0141", reason = "via syntect, trusted built-in data only" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

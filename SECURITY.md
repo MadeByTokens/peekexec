@@ -40,5 +40,9 @@ interfaces, each with a `SAFETY:` comment:
 
 ## Release integrity
 
+In place: CI runs `cargo deny check` (known vulnerabilities, yanked crates,
+licences, sources; policy in `deny.toml`, including the acknowledged
+"unmaintained" notices and why) and `cargo audit`.
+
 Planned, not yet in place: reproducible builds, signed releases, an SBOM,
-pinned CI actions, `cargo audit` / `cargo deny`.
+pinned CI actions.
