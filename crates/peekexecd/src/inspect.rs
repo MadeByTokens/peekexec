@@ -535,6 +535,38 @@ pub fn read_as_shown(content: &[u8], zip: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The program's own standard streams, descriptors and status files
+/// (`/dev/stdout`, `/dev/fd/3`, `/proc/self/status`): the helper, running
+/// as the user, would see its own there. Exactly those shapes: not
+/// `/proc/self/root/...`, `/proc/self/cwd/...` or anything else that leads
+/// on to other files.
+fn own_descriptor(path: &Path) -> bool {
+    let Some(p) = path.to_str() else {
+        return false;
+    };
+    let number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if matches!(p, "/dev/stdin" | "/dev/stdout" | "/dev/stderr") {
+        return true;
+    }
+    if let Some(n) = p.strip_prefix("/dev/fd/") {
+        return number(n);
+    }
+    let Some(rest) = p
+        .strip_prefix("/proc/self/")
+        .or_else(|| p.strip_prefix("/proc/thread-self/"))
+    else {
+        return false;
+    };
+    match rest.split_once('/') {
+        Some(("fd", n)) => number(n),
+        Some(_) => false,
+        None => !matches!(
+            rest,
+            "root" | "cwd" | "exe" | "fd" | "map_files" | "task" | "" | ".."
+        ),
+    }
+}
+
 /// The parts of an argument that may name a path: the argument itself,
 /// the value of `-Xvalue`, and every absolute path after a separator
 /// (`--opt=/p`, `-v /a:/b`, `host:/p`, `file:///p`, `@/p`), up to the next
@@ -592,21 +624,7 @@ fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<Str
             continue;
         }
         let path = Path::new(cwd).join(value);
-        // The process's own descriptors and /proc entry: the program's
-        // own, whatever the helper (running as the user) would see there.
-        let own = [
-            "/dev/fd",
-            "/dev/stdin",
-            "/dev/stdout",
-            "/dev/stderr",
-            "/proc/self",
-            "/proc/thread-self",
-        ]
-        .iter()
-        .any(|p| path.starts_with(p))
-            && !path
-                .components()
-                .any(|c| c == std::path::Component::ParentDir);
+        let own = own_descriptor(&path);
         if !own && trust::check_named(&path, owners).is_err() {
             hits.push(value);
         }
@@ -842,6 +860,8 @@ mod tests {
             format!("@{s}"),
             format!("-C{}", &s[1..]),
             format!("/dev/fd/../..{s}"),
+            format!("/proc/self/root{s}"),
+            format!("/proc/thread-self/root{s}"),
             dir.join("later.sh").to_str().unwrap().to_string(),
             dir.to_str().unwrap().to_string(),
             link.to_str().unwrap().to_string(),
