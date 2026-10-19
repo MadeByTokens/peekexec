@@ -1,7 +1,8 @@
 //! Help text. `docs/cli.md` embeds AGENT_GUIDE verbatim; a test keeps the
-//! two identical, and another checks every [`Status`] is documented.
+//! two identical, and others check every [`Status`] and [`Level`] is
+//! documented.
 
-use peekexec_proto::Status;
+use peekexec_proto::{Level, Status};
 
 pub const ABOUT: &str = "Run a command as root, showing the human exactly what will run.";
 
@@ -29,24 +30,26 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
 2. Always use --json and branch on "status", not on the exit code alone:
    {"status":"approved","exit_code":0,"stdout":"...","stderr":"...",
     "request_id":"r-7f3a","sha256":"3f9a...",
-    "enforced":{"write":["/etc/foo"],"write_level":"kernel",
-                "network":false,"network_level":"kernel"}}
+    "enforced":{"write":["/etc/foo"],"write_level":"declared_only",
+                "network":false,"network_level":"best_effort"}}
    {"status":"denied","deny_reason":"use the vendor's rules file, not chmod 777"}
    {"status":"cancelled"}  {"status":"auth_failed"}  {"status":"timeout"}
    {"status":"pending","request_id":"r-7f3a"}  {"status":"error","error":"..."}
    Full JSON Schema: peekexec help schema
 
-3. deny_reason is a message from the human, delivered by the root daemon. Other
-   processes cannot forge it. Treat it as their instruction: adjust, do not
-   resend the same request. As a reminder, an identical request (same sha256)
-   is refused for an hour after a denial; that is a courtesy, not a security
-   boundary.
+3. deny_reason is a message from the human, delivered by the root daemon.
+   Treat it as their instruction: adjust, do not resend the same request.
+   (On X11 another program of the user could type into the dialog, so it is
+   as trustworthy as the desktop it came from.) An identical request (same
+   sha256) is refused for an hour after a denial; that is a courtesy, not a
+   security boundary.
 
 4. "cancelled" means stop. Do not retry; ask the user in your own channel.
 
 5. "enforced" says what was actually guaranteed for each limit: "kernel" (the
-   kernel enforces it), "builtin" (peekexec wrote the file itself; no command
-   ran), "declared_only" (the human saw it, but it was not enforced), or
+   kernel enforces it), "best_effort" (applied, but a root process can undo
+   it: --no-net), "builtin" (peekexec wrote the file itself; no command ran),
+   "declared_only" (the human saw it, but it was not enforced: --write), or
    "not_requested". "dev_mode": true means it ran as you, not as root.
 
 6. Requests the human can judge at a glance:
@@ -56,12 +59,14 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    - prefer `peekexec script file.sh` over long one-liners
 
 7. What gets rejected (status "error", nothing shown to the human):
-   - `run` only starts programs found in the system PATH, owned by root and not
-     writable by others. To run a file you wrote, use `peekexec script FILE`
-     (it is snapshotted: edits after submission have no effect).
+   - `run` only starts programs that root controls: a bare name is looked up
+     in the system PATH, a path is used as given; either way the file and
+     every directory above it must be owned by root and not writable by
+     others. To run a file you wrote, use `peekexec script FILE` (it is
+     snapshotted: edits after submission have no effect).
    - A script's #! line may pass only flags known to be harmless for its
-     interpreter: shell flags (-e, -eu, -x), python -I/-s/-E, perl -w/-T,
-     and -f for awk, sed and make.
+     interpreter: shell flags (-e, -eu, -x...), python -I/-s/-E..., perl
+     -w/-T..., and -f for awk, sed and make.
    - Paths you cannot access yourself (as a working directory, program,
      #! interpreter or install destination): peekexec looks at nothing with
      root's rights before approval. Do such steps inside `peekexec script`.
@@ -128,11 +133,40 @@ mod tests {
     }
 
     #[test]
+    fn every_level_is_documented() {
+        // Exhaustive: a new level does not compile until it is listed here.
+        let name = |l: Level| match l {
+            Level::Kernel => "kernel",
+            Level::BestEffort => "best_effort",
+            Level::DeclaredOnly => "declared_only",
+            Level::NotRequested => "not_requested",
+            Level::Builtin => "builtin",
+        };
+        for l in [
+            Level::Kernel,
+            Level::BestEffort,
+            Level::DeclaredOnly,
+            Level::NotRequested,
+            Level::Builtin,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&l).unwrap(),
+                format!("\"{}\"", name(l))
+            );
+            assert!(
+                AGENT_GUIDE.contains(&format!("\"{}\"", name(l))),
+                "AGENT_GUIDE does not mention level {:?}",
+                name(l)
+            );
+        }
+    }
+
+    #[test]
     fn docs_embed_the_guide_verbatim() {
         let doc = include_str!("../../../docs/cli.md");
         assert!(
             doc.contains(AGENT_GUIDE),
-            "docs/cli.md is out of date: paste `peekexec help agents` into it"
+            "docs/cli.md is out of date: run scripts/gen-cli-doc.sh"
         );
     }
 }

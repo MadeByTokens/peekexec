@@ -1,8 +1,10 @@
 //! Wire types shared by the client, the daemon and the dialog.
 //!
-//! [`Status`] and [`Response`] are the public contract with automated
-//! callers: `peekexec help agents` and `peekexec help schema` are generated
-//! from them, so changing them changes the documented interface.
+//! [`Status`], [`Level`] and [`Response`] are the public contract with
+//! automated callers: `peekexec help schema` and the exit-code table are
+//! generated from them, and tests check that `peekexec help agents` names
+//! every status and level, so changing them changes the documented
+//! interface.
 
 use peekexec_core::Request;
 use schemars::JsonSchema;
