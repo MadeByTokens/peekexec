@@ -1,8 +1,8 @@
 //! Help text. `docs/cli.md` embeds AGENT_GUIDE verbatim; a test keeps the
-//! two identical, and others check every [`Status`] and [`Level`] is
-//! documented.
+//! two identical, and others check every [`Status`] and
+//! [`peekexec_proto::Level`] is documented.
 
-use peekexec_proto::{Level, Status};
+use peekexec_proto::Status;
 
 pub const ABOUT: &str = "Run a command as root, showing the human exactly what will run.";
 
@@ -116,6 +116,7 @@ pub fn after_help() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use peekexec_proto::Level;
 
     #[test]
     fn every_status_is_documented() {
