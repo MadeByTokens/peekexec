@@ -8,7 +8,15 @@
 > independent security experts; bugs in it could let a local program gain root
 > without approval. It comes with no warranty (see the licenses). Do not
 > install it on shared or multi-user machines, or on machines you cannot
-> afford to lose. Read [THREAT_MODEL.md](THREAT_MODEL.md) for what it does and
+> afford to lose.
+>
+> What it is good for today: on your own single-user machine, letting you
+> catch an agent's *mistakes* before they run as root. It is not a defence
+> against an agent that is trying to get root behind your back (nothing that
+> runs as your user is; see [When to use something else](#when-to-use-something-else)).
+> Until an outside security review has been done, treat it as pre-alpha.
+>
+> Read [THREAT_MODEL.md](THREAT_MODEL.md) for what it does and
 > does not protect against, and report problems privately as described in
 > [SECURITY.md](SECURITY.md).
 
