@@ -882,10 +882,28 @@ fn user_of(uid: u32) -> Result<User, String> {
     let u = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
         .map_err(|e| format!("cannot look up uid {uid}: {e}"))?
         .ok_or_else(|| format!("uid {uid} has no user entry"))?;
+    let groups = groups_of(&u.name, u.gid.as_raw());
     Ok(User {
         name: u.name,
         home: u.dir.to_string_lossy().into_owned(),
+        uid,
+        groups,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn groups_of(user: &str, gid: u32) -> Vec<u32> {
+    use nix::unistd::{getgrouplist, Gid};
+    std::ffi::CString::new(user)
+        .ok()
+        .and_then(|name| getgrouplist(&name, Gid::from_raw(gid)).ok())
+        .map(|gs| gs.into_iter().map(|g| g.as_raw()).collect())
+        .unwrap_or_else(|| vec![gid])
+}
+
+#[cfg(not(target_os = "linux"))]
+fn groups_of(_user: &str, gid: u32) -> Vec<u32> {
+    vec![gid]
 }
 
 /// The first administrator group that exists here.

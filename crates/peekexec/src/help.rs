@@ -59,8 +59,9 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    - `run` only starts programs found in the system PATH, owned by root and not
      writable by others. To run a file you wrote, use `peekexec script FILE`
      (it is snapshotted: edits after submission have no effect).
-   - A script's #! line may pass only simple flags (-e, -eu, -x) to its
-     interpreter.
+   - A script's #! line may pass only flags known to be harmless for its
+     interpreter: shell flags (-e, -eu, -x), python -I/-s/-E, perl -w/-T,
+     and -f for awk, sed and make.
    - More than 3 requests waiting for the human at once.
    - --env accepts only harmless variables (DEBIAN_FRONTEND, LANG, LC_*, TZ,
      TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.

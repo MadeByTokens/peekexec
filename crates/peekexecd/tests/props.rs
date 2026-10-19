@@ -65,7 +65,7 @@ proptest! {
             ancestry: vec![],
             pinned: false,
         };
-        let user = User { name: "u".into(), home: "/home/u".into() };
+        let user = User { name: "u".into(), home: "/home/u".into(), uid: 1000, groups: vec![1000] };
         let display = Display { vars: vec![], tier: DisplayTier::X11, verified: false };
         let req = Request {
             action: Action::Run { argv },

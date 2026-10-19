@@ -68,11 +68,18 @@ It does not promise:
    its `--why` remains a claim.
 2. **Shown ↔ executed.**
    - Script and install contents travel inside the request. Scripts run from a
-     root-only snapshot; the caller's file is never re-read.
+     root-only snapshot whose name the daemon picks (`script`, keeping a short
+     alphanumeric extension), so no part of the interpreter's arguments comes
+     from the requester; the caller's file is never re-read.
    - `run` resolves argv[0] in a fixed system PATH and requires the program and
      every directory above it to be root-owned and not writable by others. A
      script's `#!` interpreter is held to the same rule, and may receive only
-     simple flags (`-e`, `-eu`, `-x`...).
+     flags allowlisted for that interpreter (`-e` is harmless to sh but means
+     "run this code" to perl or awk).
+   - What the view shows, it shows to the requester (preview) and to a dialog
+     running as the user. So the current content of a file being replaced is
+     shown (as a diff) only if the user could read it without root; otherwise
+     the dialog says it is withheld.
    - The environment is rebuilt from scratch; requests may add only allowlisted
      variables (`DEBIAN_FRONTEND`, `LANG`, `LC_*`, `TZ`...) with path-free values.
    - The working directory is `/` unless the request names one. A named

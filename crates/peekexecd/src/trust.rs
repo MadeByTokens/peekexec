@@ -74,6 +74,56 @@ pub fn resolve_program(name: &str, cwd: &str, owners: &[u32]) -> Result<PathBuf,
     })
 }
 
+/// Whether `uid` (with `groups`) could read `path` itself, judged from the
+/// mode bits. Conservative: with a POSIX ACL the group bits are only a mask,
+/// so such a file counts as readable only if everyone may read it.
+pub fn readable_by(path: &Path, uid: u32, groups: &[u32]) -> bool {
+    let Ok(m) = std::fs::metadata(path) else {
+        return false;
+    };
+    let mode = m.permissions().mode();
+    if uid == 0 || mode & 0o004 != 0 {
+        return true;
+    }
+    if has_acl(path) {
+        return false;
+    }
+    if m.uid() == uid {
+        mode & 0o400 != 0
+    } else {
+        groups.contains(&m.gid()) && mode & 0o040 != 0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn has_acl(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: valid C strings; a null buffer of size 0 only asks for the size.
+    let n = unsafe {
+        libc::getxattr(
+            p.as_ptr(),
+            c"system.posix_acl_access".as_ptr(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    // No such attribute, or a filesystem without them: no ACL. Anything
+    // else (e.g. EACCES): assume there is one.
+    n >= 0
+        || !matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODATA | libc::ENOTSUP)
+        )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn has_acl(_path: &Path) -> bool {
+    true
+}
+
 fn is_executable_file(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }

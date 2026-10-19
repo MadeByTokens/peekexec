@@ -333,7 +333,16 @@ fn shebang_arguments_are_restricted() {
         args: vec![],
     }));
     assert_eq!(r.status, Status::Error);
-    assert!(r.error.unwrap().contains("Only simple flags"));
+    assert!(r.error.unwrap().contains("Allowed:"));
+    // `-e` is "exit on error" to sh, but "run the next argument" to awk.
+    if std::path::Path::new("/usr/bin/awk").exists() {
+        let r = d.run(request(Action::Script {
+            path: "/x/x;BEGIN{print 1}".into(),
+            content: b"#!/usr/bin/awk -e\n{ print }\n".to_vec(),
+            args: vec![],
+        }));
+        assert_eq!(r.status, Status::Error, "{r:?}");
+    }
 }
 
 #[test]

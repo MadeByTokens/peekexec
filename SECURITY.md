@@ -38,6 +38,7 @@ interfaces, each with a `SAFETY:` comment:
 | `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `loginuid`, `unshare(CLONE_NEWNET)` |
 | `crates/peekexecd/src/prompt.rs` | 1 | `pre_exec` for the dialog: `setgroups`, `setgid`, `setuid` |
 | `crates/peekexecd/src/server.rs` | 2 | `localtime_r` (time shown on agent sessions) |
+| `crates/peekexecd/src/trust.rs` | 1 | `getxattr` (does a file have a POSIX ACL) |
 
 ## Release integrity
 

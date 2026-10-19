@@ -129,7 +129,9 @@ pub fn prepare(
                 .unwrap_or("script")
                 .to_string();
             let dir = ctx.snapshot_root.join(id);
-            let copy = dir.join(&name);
+            // The interpreter receives the snapshot's path as an argument,
+            // so none of it may come from the requester.
+            let copy = dir.join(snapshot_name(&name));
             let (interp, interp_arg) = interpreter(content, &owners)?;
             if materialize {
                 write_snapshot(&dir, &copy, content)?;
@@ -176,7 +178,17 @@ pub fn prepare(
             let dest = install_target(dest, src, &owners)?;
             let dest_s = path_str(&dest)?;
             let existing = std::fs::metadata(&dest).ok();
+            // The view goes to the requester (preview) and to a dialog
+            // running as the user: it may only show what the user could
+            // read without root.
+            let readable = trust::readable_by(&dest, user.uid, &user.groups);
             let header = match &existing {
+                Some(_) if !readable => format!(
+                    "replaces an existing file that you cannot read yourself, with {} bytes \
+                     the requester calls {src}; its mode stays (setuid/setgid/sticky bits are \
+                     always cleared)",
+                    content.len()
+                ),
                 Some(m) => format!(
                     "replaces an existing file ({} bytes) with {} bytes the requester calls {src}; \
                      mode stays {:o} (setuid/setgid/sticky bits are always cleared)",
@@ -190,7 +202,12 @@ pub fn prepare(
                 ),
             };
             let mut sections = vec![install_section(&dest_s, &header, content, &mut notes)];
-            if let Some(diff) = existing
+            if existing.is_some() && !readable {
+                notes.push(format!(
+                    "Replaces {dest_s}, which you cannot read without root: what it contains \
+                     now is not shown, and is lost."
+                ));
+            } else if let Some(diff) = existing
                 .is_some()
                 .then(|| install_diff(&dest, content))
                 .flatten()
@@ -400,6 +417,9 @@ pub fn system_prompt_message(view: &PromptView) -> String {
 pub struct User {
     pub name: String,
     pub home: String,
+    pub uid: u32,
+    /// Primary and supplementary groups, from the user database.
+    pub groups: Vec<u32>,
 }
 
 fn validate(req: &Request) -> Result<(), String> {
@@ -545,27 +565,53 @@ fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<String>
         let resolved = trust::resolve_program(&name, "/", owners)?;
         return Ok((path_str(&resolved)?, None));
     }
+    let resolved = trust::resolve_program(prog, "/", owners)?;
+    let resolved = path_str(&resolved)?;
     if let Some(a) = &arg {
-        if !shebang_flag_ok(a) {
+        if !shebang_flag_ok(basename(&resolved), a) {
             return Err(format!(
-                "the #! line passes {a:?} to the interpreter. Only simple flags such as \
-                 -e, -eu or -x are allowed: anything else could make it run code the human \
-                 never sees"
+                "the #! line passes {a:?} to {resolved}. Allowed: simple shell flags \
+                 (-e, -eu, -x...), python -I/-s/-E..., perl -w/-T, and -f for awk, sed and \
+                 make. Other flags can make an interpreter run code the human never sees"
             ));
         }
     }
-    let resolved = trust::resolve_program(prog, "/", owners)?;
-    Ok((path_str(&resolved)?, arg))
+    Ok((resolved, arg))
 }
 
-/// `#!` arguments are passed to the interpreter before the script, so they
-/// must not name files, modules or code. Single-letter flags from this set
-/// cover `sh -e`, `bash -eux`, `python3 -I -s`, `perl -w`...
-fn shebang_flag_ok(arg: &str) -> bool {
+/// `#!` arguments go to the interpreter before the script, so they must not
+/// name files, modules or code, and their meaning depends on the
+/// interpreter (`-e` is "exit on error" to sh, "run this code" to perl or
+/// awk). So each family has its own set; `interp` is the resolved binary's
+/// name (`dash`, `python3.10`, `gawk`).
+fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
     let Some(flags) = arg.strip_prefix('-') else {
         return false;
     };
-    !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| "eEuxvwlIsSBO".contains(c))
+    let family = interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let allowed = match family {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash" => "aeEfuvxBCTl",
+        "python" => "IsSEBuO",
+        "perl" => "wWXTt",
+        // `-f FILE`: read the program from the script itself, as the kernel
+        // would for `#!/usr/bin/awk -f`.
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "make" | "gmake" => return flags == "f",
+        _ => return false,
+    };
+    !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
+}
+
+/// The snapshot's file name: fixed, keeping a short alphanumeric extension
+/// (`deploy.py` → `script.py`) for interpreters that care.
+fn snapshot_name(requested: &str) -> String {
+    match Path::new(requested).extension().and_then(|e| e.to_str()) {
+        Some(ext)
+            if (1..=8).contains(&ext.len()) && ext.bytes().all(|b| b.is_ascii_alphanumeric()) =>
+        {
+            format!("script.{ext}")
+        }
+        _ => "script".into(),
+    }
 }
 
 /// A directory descriptor usable with fchdir (O_PATH is Linux-only).
@@ -848,8 +894,17 @@ mod tests {
 
     #[test]
     fn shebang_flags_are_allowlisted() {
-        for ok in ["-e", "-eu", "-eux", "-I", "-w"] {
-            assert!(shebang_flag_ok(ok), "{ok}");
+        for (interp, ok) in [
+            ("dash", "-e"),
+            ("bash", "-eu"),
+            ("bash", "-eux"),
+            ("python3.10", "-I"),
+            ("python3", "-Is"),
+            ("perl", "-w"),
+            ("gawk", "-f"),
+            ("sed", "-f"),
+        ] {
+            assert!(shebang_flag_ok(interp, ok), "{interp} {ok}");
         }
         for bad in [
             "-mfoo",
@@ -861,10 +916,128 @@ mod tests {
             "-",
             "-Mstrict",
         ] {
-            assert!(!shebang_flag_ok(bad), "{bad}");
+            assert!(!shebang_flag_ok("bash", bad), "{bad}");
+        }
+        // `-e`/`-E` means "the next argument is code" to these.
+        for (interp, bad) in [
+            ("gawk", "-e"),
+            ("mawk", "-e"),
+            ("perl", "-e"),
+            ("perl", "-E"),
+            ("ruby", "-e"),
+            ("node", "-e"),
+            ("php", "-B"),
+            ("busybox", "-e"),
+            ("gawk", "-fe"),
+        ] {
+            assert!(!shebang_flag_ok(interp, bad), "{interp} {bad}");
         }
         let owners = trust::trusted_owners();
         assert!(interpreter(b"#!/bin/sh -c\n", &owners).is_err());
+    }
+
+    #[test]
+    fn snapshot_name_ignores_the_requested_name() {
+        assert_eq!(snapshot_name("x;BEGIN{system(\"id\")}"), "script");
+        assert_eq!(snapshot_name("deploy.py"), "script.py");
+        assert_eq!(snapshot_name("a.b;c"), "script");
+        assert_eq!(snapshot_name("noext"), "script");
+        assert_eq!(snapshot_name(".hidden"), "script");
+    }
+
+    #[test]
+    fn script_runs_from_a_daemon_named_snapshot() {
+        let r = req(Action::Script {
+            path: "/home/u/x;whatever".into(),
+            content: b"#!/bin/sh -e\necho hi\n".to_vec(),
+            args: vec![],
+        });
+        let p = prepare_for_tests(&r);
+        let Execution::Command(plan) = p.exec else {
+            panic!("not a command")
+        };
+        assert!(
+            plan.argv.last().unwrap().ends_with("/r-test/script"),
+            "{:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
+    fn install_never_shows_what_the_user_cannot_read() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pe-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.join("secret.conf");
+        std::fs::write(&dest, "secret-line\n").unwrap();
+        let install = |dest: &Path| {
+            req(Action::Install {
+                src: "new.conf".into(),
+                content: b"new\n".to_vec(),
+                dest: dest.to_str().unwrap().into(),
+            })
+        };
+        // Readable by the requester: the diff is shown.
+        let shown = prepare_for_tests(&install(&dest));
+        assert!(shown
+            .view
+            .sections
+            .iter()
+            .any(|s| s.raw.contains("secret-line")));
+        // Not readable (the daemon is this process, so it still can be read
+        // here, the way root reads anything): nothing of it is shown.
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let hidden = prepare_for_tests_as(&install(&dest), 4242, vec![4242]);
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let text = serde_json::to_string(&hidden.view).unwrap();
+        assert!(!text.contains("secret-line"), "{text}");
+        assert!(!text.contains("No changes"), "{text}");
+        assert!(hidden.view.notes.iter().any(|n| n.contains("cannot read")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn prepare_for_tests(r: &Request) -> Prepared {
+        let me = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        prepare_for_tests_as(r, me, vec![gid])
+    }
+
+    fn prepare_for_tests_as(r: &Request, uid: u32, groups: Vec<u32>) -> Prepared {
+        let sandbox = crate::platform::linux::Namespaces;
+        let ctx = Ctx {
+            sandbox: &sandbox,
+            wants_password: true,
+            dev: true,
+            snapshot_root: Path::new("/nonexistent/peekexec-tests"),
+        };
+        let peer = Peer {
+            uid,
+            gid: groups[0],
+            process: ProcessInfo {
+                pid: 1,
+                exe: None,
+                cmdline: vec![],
+                start_time: None,
+            },
+            cwd: None,
+            ancestry: vec![],
+            pinned: true,
+        };
+        let user = User {
+            name: "u".into(),
+            home: "/home/u".into(),
+            uid,
+            groups,
+        };
+        let display = Display {
+            vars: vec![],
+            tier: peekexec_proto::DisplayTier::X11,
+            verified: true,
+        };
+        prepare(&ctx, &peer, &user, r, "r-test", &display, false).unwrap()
     }
 
     #[test]
