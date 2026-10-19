@@ -564,7 +564,7 @@ impl Daemon {
             env: Vec::new(),
             sections: vec![Section {
                 title: Shown::fixed("agent session"),
-                header: None,
+                invocation: Vec::new(),
                 syntax: Syntax::Plain,
                 formatted: verbatim(&description),
                 raw: description,

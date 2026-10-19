@@ -140,6 +140,16 @@ fn collapse_blank_runs(lines: Vec<DisplayLine>) -> Vec<DisplayLine> {
     out
 }
 
+/// Colour of a section's invocation lines (`argv[i] ...`): readable, but
+/// set apart from the content.
+pub fn invocation_color(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(150, 190, 230)
+    } else {
+        Color32::from_rgb(30, 80, 140)
+    }
+}
+
 fn default_fg(dark: bool) -> Color32 {
     if dark {
         Color32::from_gray(220)

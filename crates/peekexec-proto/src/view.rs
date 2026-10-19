@@ -3,7 +3,7 @@
 //! of the very same value, so what an agent previews is what the human gets.
 
 use peekexec_core::format::Line;
-use peekexec_core::textcheck::{classify, FindingKind};
+use peekexec_core::textcheck::{classify, scan, FindingKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{DisplayTier, Enforced, Level};
@@ -148,8 +148,12 @@ pub enum Syntax {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Section {
     pub title: Shown,
-    /// How the content is invoked (interpreter, resolved program, target).
-    pub header: Option<Shown>,
+    /// How the content runs, one fact per line: each argument root passes
+    /// (`argv[i] ...`, escaped, never cut), the resolved program, the
+    /// target's owner and mode. Shown in full with the content, and counted
+    /// in the desktop's prompt like it (design rule 4): nothing that
+    /// executes lives only in a line that can be cut or left out.
+    pub invocation: Vec<Shown>,
     pub syntax: Syntax,
     /// Ground truth: exactly what executes, unformatted.
     pub raw: String,
@@ -200,6 +204,16 @@ pub struct PromptView {
 }
 
 impl PromptView {
+    /// Suspicious characters in what executes: the content and the
+    /// invocation (where escaped characters are `⟨U+XXXX⟩` tokens, which
+    /// count too). The dialog and the daemon count the same way.
+    pub fn findings(&self) -> usize {
+        self.sections
+            .iter()
+            .map(|s| scan(&s.raw).len() + s.invocation.iter().map(|l| scan(l).len()).sum::<usize>())
+            .sum()
+    }
+
     /// One-line requester chain, e.g. `claude (pid 4121) ← bash ← kitty`,
     /// showing at most `max` processes.
     pub fn requester_chain(&self, sep: &str, max: usize) -> String {
@@ -310,8 +324,8 @@ impl PromptView {
         for s in &self.sections {
             line(String::new());
             line(format!("── {} ──", s.title));
-            if let Some(h) = &s.header {
-                line(format!("     {h}"));
+            for l in &s.invocation {
+                line(format!("     {l}"));
             }
             for (i, l) in s.formatted.iter().enumerate() {
                 let mark = if l.continued { '↳' } else { ' ' };

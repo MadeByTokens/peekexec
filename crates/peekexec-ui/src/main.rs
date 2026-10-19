@@ -14,7 +14,6 @@ use std::time::Duration;
 use eframe::egui::{
     self, Align, Color32, Event, Key, Layout, RichText, ScrollArea, TextEdit, Vec2, ViewportCommand,
 };
-use peekexec_core::textcheck::scan;
 use peekexec_proto::ui::{FromUi, ToUi};
 use peekexec_proto::view::{self, Approval, PromptView, Provenance, Shown, ViewKind};
 use peekexec_proto::wire::{read_msg, write_msg};
@@ -138,7 +137,7 @@ struct Dialog {
 
 impl Dialog {
     fn new(view: PromptView, rx: Receiver<Option<ToUi>>, glyphs: &'static fonts::Glyphs) -> Self {
-        let findings = view.sections.iter().map(|s| scan(&s.raw).len()).sum();
+        let findings = view.findings();
         Dialog {
             view,
             glyphs,
@@ -467,9 +466,6 @@ impl Dialog {
         let Some(section) = self.view.sections.get(self.tab) else {
             return;
         };
-        if let Some(h) = &section.header {
-            ui.label(RichText::new(h.as_str()).monospace().weak().small());
-        }
         let key = (self.tab, self.raw, dark);
         if self.cache.as_ref().map(|(k, _)| *k) != Some(key) {
             let lines = self.highlighter.lines(section, self.raw, dark);
@@ -494,6 +490,21 @@ impl Dialog {
                         ui.scroll_with_delta(Vec2::new(0.0, page * (height - 60.0).max(40.0)));
                     }
                     ui.spacing_mut().item_spacing.y = 1.0;
+                    // How it runs, in full, above what it runs: each
+                    // argument is a line of its own that wraps, never cut.
+                    for fact in &section.invocation {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(fact.as_str())
+                                    .monospace()
+                                    .color(code::invocation_color(dark)),
+                            )
+                            .wrap(),
+                        );
+                    }
+                    if !section.invocation.is_empty() {
+                        ui.separator();
+                    }
                     for line in lines {
                         let job = code::layout(line, digits, dark, self.glyphs.cont);
                         ui.add(egui::Label::new(job).wrap());

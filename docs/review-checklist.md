@@ -22,13 +22,13 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 
 | Input | Pre | Ans | Dialog | Prompt | Run | Log |
 |---|---|---|---|---|---|---|
-| `argv` | R3: NUL refused. A bare argv[0] is looked up in SAFE_PATH, one with a `/` is taken relative to cwd; either way a root-owned chain, not nosuid; file-like args checked for the "root does not control" note; all as the user, in the helper (✓ R1) | errors are what the user could learn (✓ R1) | R3: one line per argument, controls escaped (✓) | shell-quoted, wrapped, never cut (✓). ⚠ after `sh -c SCRIPT` the arguments (`$0`, `$1`…) are only in the header, which the prompt leaves out | R2: program by a canonical path whose every component only root can change (root-owned, not writable by others, not nosuid; checked by the helper and again by root), so the name is as good as the object (✓) | Debug-quoted (✓) |
+| `argv` | R3: NUL refused. A bare argv[0] is looked up in SAFE_PATH, one with a `/` is taken relative to cwd; either way a root-owned chain, not nosuid; file-like args checked for the "root does not control" note; all as the user, in the helper (✓ R1) | errors are what the user could learn (✓ R1) | R3: one line per argument, controls escaped; after `sh -c SCRIPT`, each further argument is an `argv[i]` invocation line, in full (✓) | shell-quoted, wrapped, never cut; invocation lines counted with the content (✓) | R2: program by a canonical path whose every component only root can change (root-owned, not writable by others, not nosuid; checked by the helper and again by root), so the name is as good as the object (✓) | Debug-quoted (✓) |
 | script `content` | R3: `#!` interpreter resolved and trusted, flags allowlisted per interpreter (✓) | — | Full text, findings marked (✓). ⚠ runs of tabs are not collapsed and can push code out of view | 12 lines, then INCOMPLETE (✓) | R2: root-only snapshot with a daemon-chosen name (✓) | sha256 (✓) |
-| script interpreter, `#!` flag | resolved by the helper (✓). ⚠ root re-checks only that the interpreter is root-controlled, not that it and the flag follow from the content | — | ⚠ only in the header, cut at 400 characters | ⚠ left out | from the helper's answer | — |
-| script `path` (label) | — | — | escaped (✓). ⚠ comes first in the header, so a long label pushes the arguments past the cut | file name in the title (✓) | never used (✓) | Debug-quoted (✓) |
-| script `args` | NUL refused (✓) | — | ⚠ in the header: joined, cut at 400 characters | ⚠ left out | verbatim argv (✓) | Debug-quoted (✓) |
+| script interpreter, `#!` flag | resolved by the helper (✓). ⚠ root re-checks only that the interpreter is root-controlled, not that it and the flag follow from the content | — | `argv[0]`, `argv[1]` invocation lines (✓) | counted invocation lines (✓) | from the helper's answer | — |
+| script `path` (label) | — | — | escaped, after the arguments (✓) | file name in the title; full label after the arguments (✓) | never used (✓) | Debug-quoted (✓) |
+| script `args` | NUL refused (✓) | — | one `argv[i]` invocation line each, escaped, never cut (✓) | counted invocation lines (✓) | verbatim argv (✓) | Debug-quoted (✓) |
 | install `content` | — | — | text shown, binary described (✓) | 12 lines, then INCOMPLETE (✓) | written by the daemon, atomic (✓) | sha256 (✓) |
-| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1). ⚠ only NUL refused: line breaks and hidden characters pass | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1). ⚠ drawn unescaped in the summary | title cut at 80 characters, summary at 160 (✓). ⚠ owner and mode facts are only in the header, left out | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
+| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1). ⚠ only NUL refused: line breaks and hidden characters pass | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1). ⚠ drawn unescaped in the summary | title cut at 80 characters, summary at 160; owner and mode are counted invocation lines (✓) | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
 | `cwd` | canonicalized, checked and opened by the helper as the user; the descriptor is passed back (✓ R1, R2) | errors as the user (✓ R1) | escaped; untrusted directory flagged (✓) | `in:` line (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
 | `env` name | R3: exact allowlist of names (the locale categories are listed one by one), so the count is bounded too (✓) | — | escaped (`Shown`); the header scrolls past 45% of the window, so nothing in it can push the code out of view (✓) | every variable listed (✓) | rebuilt from scratch (✓) | — |
 | `env` value | `[A-Za-z0-9_.@:+,-]`, no paths (✓) | — | escaped (✓) | listed (✓) | rebuilt from scratch (✓) | — |
@@ -87,7 +87,9 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
   environment and stdio, no other descriptors, verified credential drops,
   and `no_new_privs` for all but the approved command. R5 by construction.
   No `CLONE_PIDFD`: see the pid-reuse row.
-- **(e)** Planned: no executed data in headers. A section's header goes;
-  in its place, the exact invocation (one escaped `argv[i]` per line) is
-  part of what the dialog shows in full and what the prompt counts, so
-  the dialog and the prompt are built from the same lines.
+- **(e)** Done: no executed data in headers. `Section::invocation`
+  replaces the one-line header: the exact argv (one escaped `argv[i]`
+  per line, never cut) and the target's facts, shown in full above the
+  content in the dialog and counted with it in the desktop prompt, which
+  are built from the same lines. `PromptView::findings` counts them too,
+  in the daemon and the dialog alike.

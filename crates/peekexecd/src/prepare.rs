@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
-use peekexec_core::textcheck::{classify, scan, FindingKind};
+use peekexec_core::textcheck::{classify, FindingKind};
 use peekexec_core::{Action, Request};
 use peekexec_proto::view::{
     Approval, ProcLine, PromptView, Provenance, Section, Shown, Syntax, ViewKind,
@@ -188,15 +188,17 @@ pub fn prepare(
             };
             let text = String::from_utf8_lossy(content).into_owned();
             let is_shell = SHELLS.contains(&basename(&interp));
+            // The requester's label comes last: it cannot push the
+            // arguments out of view.
+            let snapshot = argv.len() - args.len() - 1;
+            let mut invocation = argv_lines(&argv, snapshot, "(a snapshot of the script below)");
+            invocation.push(display_line(
+                &format!("the requester calls the script {path}"),
+                200,
+            ));
             let section = Section {
                 title: display_line(&name, 80),
-                header: Some(display_line(
-                    &format!(
-                        "snapshot of the file the requester calls {path}; runs as: {}",
-                        shell_join(&argv)
-                    ),
-                    400,
-                )),
+                invocation,
                 syntax: if is_shell {
                     Syntax::Shell
                 } else {
@@ -211,23 +213,28 @@ pub fn prepare(
         (Action::Install { src, content, .. }, Facts::Install { dest, existing }) => {
             let dest_s = dest;
             let dest = PathBuf::from(&dest_s);
-            let header = match &existing {
-                Some(e) => format!(
-                    "replaces an existing file ({} bytes) with {} bytes the requester calls {src}; \
-                     owner stays {}, mode stays {:o} (setuid/setgid/sticky bits are always \
-                     cleared)",
-                    e.len,
-                    content.len(),
-                    e.owner,
-                    e.mode
-                ),
-                None => format!(
-                    "new file, owner root, mode {:o}, {} bytes the requester calls {src}",
+            let mut facts = match &existing {
+                Some(e) => vec![
+                    format!(
+                        "replaces an existing file of {} bytes with {} bytes",
+                        e.len,
+                        content.len()
+                    ),
+                    format!(
+                        "owner stays {}, mode stays {:o} (setuid, setgid and sticky bits are \
+                         always cleared)",
+                        e.owner, e.mode
+                    ),
+                ],
+                None => vec![format!(
+                    "new file: owner root, mode {:o}, {} bytes",
                     crate::exec::new_file_mode(content),
                     content.len()
-                ),
+                )],
             };
-            let mut sections = vec![install_section(&dest_s, &header, content, &mut notes)];
+            facts.push(format!("the requester calls the new content {src}"));
+            let facts: Vec<Shown> = facts.iter().map(|f| display_line(f, 300)).collect();
+            let mut sections = vec![install_section(&dest_s, facts, content, &mut notes)];
             match existing.map(|e| e.content) {
                 Some(Ok(old)) => {
                     if let Some(diff) = install_diff(&old, content) {
@@ -313,9 +320,8 @@ pub fn prepare(
         enter_approves: false,
         approve_delay_ms: 0,
     };
-    let findings: usize = view.sections.iter().map(|s| scan(&s.raw).len()).sum();
     let mut view = view;
-    view.enter_approves = view.notes.is_empty() && findings == 0;
+    view.enter_approves = view.notes.is_empty() && view.findings() == 0;
     Ok(Prepared {
         view,
         exec,
@@ -369,25 +375,35 @@ pub fn system_prompt_message(view: &PromptView) -> String {
     const WIDTH: usize = 120;
     let mut body = String::new();
     let mut omitted = 0;
+    let mut add = |lines: Vec<String>, indent: &str, body: &mut String| {
+        for l in lines.iter().take(LINES) {
+            body.push_str(&format!("{indent}{l}\n"));
+        }
+        if lines.len() > LINES {
+            omitted += lines.len() - LINES;
+            body.push_str(&format!(
+                "{indent}… {} more lines NOT shown here\n",
+                lines.len() - LINES
+            ));
+        }
+    };
     for s in &view.sections {
-        let lines: Vec<String> = s
+        body.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
+        // How it runs (each argument), then what it runs: both counted.
+        let invocation = s
+            .invocation
+            .iter()
+            .flat_map(|l| wrap(&display_line(l, usize::MAX), WIDTH))
+            .collect();
+        add(invocation, "  ", &mut body);
+        let lines = s
             .formatted
             .iter()
             .map(|l| display_line(l.text.trim(), usize::MAX))
             .filter(|l| !l.is_empty())
             .flat_map(|l| wrap(&l, WIDTH))
             .collect();
-        body.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
-        for l in lines.iter().take(LINES) {
-            body.push_str(&format!("    {l}\n"));
-        }
-        if lines.len() > LINES {
-            omitted += lines.len() - LINES;
-            body.push_str(&format!(
-                "    … {} more lines NOT shown here\n",
-                lines.len() - LINES
-            ));
-        }
+        add(lines, "    ", &mut body);
     }
     let mut m = String::new();
     m.push_str(match view.kind {
@@ -585,21 +601,22 @@ fn run_section(argv: &[String], program: &str) -> Section {
         .map(|(i, a)| format!("argv[{i}] {}\n", escape_controls(a)))
         .collect();
     let resolved = if basename(program) == basename(&argv[0]) && argv[0].starts_with('/') {
-        String::new()
+        None
     } else {
-        format!("{} → {program}", argv[0])
+        Some(display_line(
+            &format!("the program is {program} (argv[0] {})", argv[0]),
+            usize::MAX,
+        ))
     };
     let is_shell = SHELLS.contains(&basename(&argv[0])) || SHELLS.contains(&basename(program));
     if is_shell && argv.len() >= 3 && argv[1] == "-c" {
-        let mut invocation = vec![program.to_string(), "-c".into(), "‹script below›".into()];
-        invocation.extend(argv[3..].iter().cloned());
-        let mut header = invocation.join(" ");
-        if !resolved.is_empty() {
-            header = format!("{header}   ({resolved})");
-        }
+        // The arguments after the script ($0, $1, ...) are executed data
+        // too: one line each, in full, never in a header that is cut.
+        let mut invocation = argv_lines(argv, 2, "(the script below)");
+        invocation.extend(resolved);
         return Section {
             title: Shown::fixed("shell script"),
-            header: Some(display_line(&header, 400)),
+            invocation,
             syntax: Syntax::Shell,
             raw: argv[2].clone(),
             formatted: format_shell(&argv[2]),
@@ -607,11 +624,24 @@ fn run_section(argv: &[String], program: &str) -> Section {
     }
     Section {
         title: Shown::fixed("command"),
-        header: (!resolved.is_empty()).then(|| display_line(&resolved, 400)),
+        invocation: resolved.into_iter().collect(),
         syntax: Syntax::Shell,
         raw,
         formatted: verbatim(&shell_join(argv)),
     }
+}
+
+/// `argv[i] VALUE`, one line per argument, escaped and never cut; the
+/// argument at `content` is the section's content and is named instead.
+/// The fixed words are ASCII, so only requester text counts as findings.
+fn argv_lines(argv: &[String], content: usize, name: &str) -> Vec<Shown> {
+    argv.iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let value = if i == content { name } else { a.as_str() };
+            display_line(&format!("argv[{i}] {value}"), usize::MAX)
+        })
+        .collect()
 }
 
 /// The snapshot's file name: fixed, keeping a short alphanumeric extension
@@ -707,7 +737,12 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
     })
 }
 
-fn install_section(dest: &str, header: &str, content: &[u8], notes: &mut Vec<String>) -> Section {
+fn install_section(
+    dest: &str,
+    invocation: Vec<Shown>,
+    content: &[u8],
+    notes: &mut Vec<String>,
+) -> Section {
     let binary = content.contains(&0) || std::str::from_utf8(content).is_err();
     let (raw, syntax) = if binary {
         let kind = if content.starts_with(b"\x7fELF") {
@@ -729,7 +764,7 @@ fn install_section(dest: &str, header: &str, content: &[u8], notes: &mut Vec<Str
     };
     Section {
         title: display_line(&format!("new {dest}"), 120),
-        header: Some(display_line(header, 400)),
+        invocation,
         syntax,
         formatted: verbatim(&raw),
         raw,
@@ -754,9 +789,9 @@ fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
     };
     Some(Section {
         title: Shown::fixed("changes"),
-        header: Some(Shown::fixed(
+        invocation: vec![Shown::fixed(
             "unified diff: lines starting with - are removed, + are added",
-        )),
+        )],
         syntax: Syntax::Diff,
         formatted: verbatim(&raw),
         raw,
@@ -884,15 +919,36 @@ mod tests {
     }
 
     #[test]
-    fn headers_are_escaped_too() {
-        // Arguments after `sh -c SCRIPT` go into the header line.
-        let argv: Vec<String> = ["sh", "-c", "true", "name\nRuns as: nobody"]
+    fn script_arguments_are_lines_of_their_own() {
+        // Arguments after `sh -c SCRIPT`: one escaped line each, in full.
+        let long = "x".repeat(1000);
+        let argv: Vec<String> = ["sh", "-c", "true", "name\nRuns as: nobody", "", &long]
             .map(String::from)
             .to_vec();
         let s = run_section(&argv, "/usr/bin/dash");
-        let header = s.header.unwrap();
-        assert!(!header.contains('\n'), "{header}");
-        assert!(header.contains("⟨U+000A⟩"), "{header}");
+        let lines: Vec<&str> = s.invocation.iter().map(Shown::as_str).collect();
+        assert_eq!(lines[2], "argv[2] (the script below)");
+        assert_eq!(lines[3], "argv[3] name⟨U+000A⟩Runs as: nobody");
+        assert_eq!(lines[4], "argv[4] ", "an empty argument is visible");
+        assert!(lines[5].ends_with(&long), "never cut");
+
+        // A long label comes after the arguments.
+        let r = req(Action::Script {
+            path: format!("/home/u/{}.sh", "y".repeat(500)),
+            content: b"exec \"$@\"\n".to_vec(),
+            args: vec!["rm".into(), "-rf".into(), "/".into()],
+        });
+        let p = prepare_for_tests(&r);
+        let lines: Vec<&str> = p.view.sections[0]
+            .invocation
+            .iter()
+            .map(Shown::as_str)
+            .collect();
+        assert_eq!(&lines[2..5], ["argv[2] rm", "argv[3] -rf", "argv[4] /"]);
+        assert!(lines[5].starts_with("the requester calls the script"));
+        let m = system_prompt_message(&p.view);
+        assert!(m.contains("  argv[4] /\n"), "{m}");
+        assert!(!p.view.enter_approves || p.view.findings() == 0);
 
         let mut r = req(Action::Run {
             argv: vec!["true".into()],
@@ -907,7 +963,10 @@ mod tests {
         let s = run_section(&argv, "/usr/bin/dash");
         assert_eq!(s.raw, "a && b");
         assert_eq!(s.formatted.len(), 2);
-        assert!(s.header.unwrap().contains("sh → /usr/bin/dash"));
+        assert!(s
+            .invocation
+            .iter()
+            .any(|l| l.as_str() == "the program is /usr/bin/dash (argv[0] sh)"));
     }
 
     #[test]
@@ -1140,7 +1199,7 @@ mod tests {
         let mut notes = Vec::new();
         let s = install_section(
             "/usr/local/bin/x",
-            "h",
+            vec![],
             b"\x7fELF\x02\x01\x00junk",
             &mut notes,
         );
