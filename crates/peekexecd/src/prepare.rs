@@ -822,17 +822,28 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
     for text in texts {
         // `/etc//cron.d`, `/etc/./cron.d` and `/etc/x/../cron.d` name
         // /etc/cron.d too.
-        let text = normalize_paths(text);
+        // As written, and with `..` applied both ways it can mean.
+        let forms = [
+            text.to_string(),
+            normalize_paths(text, false),
+            normalize_paths(text, true),
+        ];
         for &p in SENSITIVE {
-            if text.contains(p) && !hits.contains(&p) {
+            if forms.iter().any(|t| t.contains(p)) && !hits.contains(&p) {
                 hits.push(p);
             }
         }
     }
     for w in enforced.write.iter().flatten() {
-        let w = normalize_paths(w);
+        let forms = [
+            w.clone(),
+            normalize_paths(w, false),
+            normalize_paths(w, true),
+        ];
         for &p in SENSITIVE_WRITES {
-            let under = w == p || w.starts_with(&format!("{p}/"));
+            let under = forms
+                .iter()
+                .any(|w| w == p || w.starts_with(&format!("{p}/")));
             if under && !hits.contains(&p) {
                 hits.push(p);
             }
@@ -848,8 +859,10 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
 }
 
 /// `text` with every absolute path in it normalized lexically: no empty
-/// or `.` components, and `..` applied.
-fn normalize_paths(text: &str) -> String {
+/// or `.` components, and `..` applied. With `merged_usr`, `/bin`, `/sbin`
+/// and `/lib*` are the symlinks into /usr they are on most systems now,
+/// so `/bin/..` is `/usr`.
+fn normalize_paths(text: &str, merged_usr: bool) -> String {
     let boundary = |c: char| c.is_whitespace() || "'\"`;|&<>(),=".contains(c);
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -865,7 +878,14 @@ fn normalize_paths(text: &str) -> String {
                 match c {
                     "" | "." => {}
                     ".." => {
+                        let top = matches!(
+                            parts.as_slice(),
+                            ["bin" | "sbin" | "lib" | "lib32" | "lib64" | "libx32"]
+                        );
                         parts.pop();
+                        if merged_usr && top {
+                            parts.push("usr");
+                        }
                     }
                     c => parts.push(c),
                 }
@@ -1456,9 +1476,21 @@ mod tests {
         assert!(hit.contains("/etc/cron"), "{hit}");
         assert!(sensitive_targets(&[section("#!/usr/bin/env sh\n/usr/bin/true")], &none).is_none());
         assert_eq!(
-            normalize_paths("a=/x/./y//z/../w b/../c"),
+            normalize_paths("a=/x/./y//z/../w b/../c", false),
             "a=/x/y/w b/../c"
         );
+        // /bin is usr/bin on merged-/usr systems.
+        let w = |p: &str| Enforced {
+            write: Some(vec![p.into()]),
+            ..none.clone()
+        };
+        for p in [
+            "/bin/../share/polkit-1/rules.d/00.rules",
+            "/bin/../local/bin/apt",
+            "/usr/share/polkit-1/rules.d/../../../../bin/../share/polkit-1/rules.d/x",
+        ] {
+            assert!(sensitive_targets(&[], &w(p)).is_some(), "{p}");
+        }
     }
 
     #[test]
