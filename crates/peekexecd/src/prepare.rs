@@ -780,6 +780,31 @@ const SENSITIVE: &[&str] = &[
     "/etc/passwd",
     "/etc/shadow",
     "/etc/group",
+    "/etc/sysctl",
+    "/usr/lib/sysctl.d",
+    "/etc/tmpfiles.d",
+    "/usr/lib/tmpfiles.d",
+    "/etc/dpkg/dpkg.cfg",
+    "/etc/dbus-1",
+    "/usr/share/dbus-1/system",
+    "/root/.bashrc",
+    "/root/.profile",
+];
+
+/// Directories whose files root runs or loads: flagged when they are
+/// written to (`--write`, an install), not wherever the text names them,
+/// since nearly every script mentions /usr/bin.
+const SENSITIVE_WRITES: &[&str] = &[
+    "/usr/bin",
+    "/usr/sbin",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/usr/lib",
+    "/usr/libexec",
+    "/usr/local/lib",
+    "/root",
+    "/etc/default",
 ];
 
 /// One note for all hits, so naming many paths cannot push other warnings
@@ -791,13 +816,20 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
         .map(|s| s.raw.as_str())
         .chain(enforced.write.iter().flatten().map(String::as_str));
     for text in texts {
-        // `/etc//cron.d` and `/etc/./cron.d` name /etc/cron.d too.
-        let mut text = text.to_string();
-        while text.contains("//") || text.contains("/./") {
-            text = text.replace("//", "/").replace("/./", "/");
-        }
+        // `/etc//cron.d`, `/etc/./cron.d` and `/etc/x/../cron.d` name
+        // /etc/cron.d too.
+        let text = normalize_paths(text);
         for &p in SENSITIVE {
             if text.contains(p) && !hits.contains(&p) {
+                hits.push(p);
+            }
+        }
+    }
+    for w in enforced.write.iter().flatten() {
+        let w = normalize_paths(w);
+        for &p in SENSITIVE_WRITES {
+            let under = w == p || w.starts_with(&format!("{p}/"));
+            if under && !hits.contains(&p) {
                 hits.push(p);
             }
         }
@@ -809,6 +841,43 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
             paths.join(", ")
         )
     })
+}
+
+/// `text` with every absolute path in it normalized lexically: no empty
+/// or `.` components, and `..` applied.
+fn normalize_paths(text: &str) -> String {
+    let boundary = |c: char| c.is_whitespace() || "'\"`;|&<>(),=".contains(c);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('/') {
+        let at_start = rest[..i].chars().next_back().map_or(true, boundary);
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let end = rest.find(boundary).unwrap_or(rest.len());
+        let (path, tail) = rest.split_at(end);
+        if at_start {
+            let mut parts: Vec<&str> = Vec::new();
+            for c in path.split('/') {
+                match c {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    c => parts.push(c),
+                }
+            }
+            out.push('/');
+            out.push_str(&parts.join("/"));
+            if path.ends_with('/') && !parts.is_empty() {
+                out.push('/');
+            }
+        } else {
+            out.push_str(path);
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn install_section(
@@ -1349,13 +1418,40 @@ mod tests {
         let note = sensitive_targets(&[], &e).unwrap();
         assert!(note.contains("/etc/sudoers*, /etc/cron*"), "{note}");
         // Redundant slashes and dots do not hide a path.
-        for p in ["/etc//cron.d/x", "/etc/./cron.d/x", "/usr/local/bin/apt"] {
+        for p in [
+            "/etc//cron.d/x",
+            "/etc/./cron.d/x",
+            "/etc/foo/../cron.d/x",
+            "/usr/local/bin/apt",
+            "/etc/sysctl.d/99-x.conf",
+            "/usr/bin/apt",
+            "/root/.config/x",
+        ] {
             let e = Enforced {
                 write: Some(vec![p.into()]),
                 ..e.clone()
             };
             assert!(sensitive_targets(&[], &e).is_some(), "{p}");
         }
+        // In the command text: `..` too; program directories only as targets.
+        let section = |raw: &str| Section {
+            title: Shown::fixed("t"),
+            invocation: vec![],
+            syntax: Syntax::Shell,
+            formatted: verbatim(raw),
+            raw: raw.into(),
+        };
+        let none = Enforced {
+            write: Some(vec![]),
+            ..e.clone()
+        };
+        let hit = sensitive_targets(&[section("cp x '/etc/a/../cron.d/y'")], &none).unwrap();
+        assert!(hit.contains("/etc/cron"), "{hit}");
+        assert!(sensitive_targets(&[section("#!/usr/bin/env sh\n/usr/bin/true")], &none).is_none());
+        assert_eq!(
+            normalize_paths("a=/x/./y//z/../w b/../c"),
+            "a=/x/y/w b/../c"
+        );
     }
 
     #[test]
