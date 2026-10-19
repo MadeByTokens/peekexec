@@ -106,9 +106,10 @@ GUIDE FOR AUTOMATED CALLERS
      snapshotted: edits after submission have no effect).
    - A script's #! line may pass only flags known to be harmless for its
      interpreter: shell flags (-e, -eu, -x...), python -I/-s/-E..., perl
-     -w/-T..., and -f for awk, sed and make. Python scripts (and Python
-     files you install) must be UTF-8: another `coding:` cookie or an
-     embedded zip archive is refused.
+     -w/-T..., and -f for awk and sed (their options end after the
+     script: arguments are never read as options). Python scripts (and
+     Python files you install) must be UTF-8: another `coding:` cookie or
+     an embedded zip archive is refused.
    - Paths you cannot access yourself (as a working directory, program,
      #! interpreter or install destination): peekexec looks at nothing with
      root's rights before approval. Do such steps inside `peekexec script`.

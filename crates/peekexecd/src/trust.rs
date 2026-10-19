@@ -27,6 +27,36 @@ pub fn trusted_owners() -> Vec<u32> {
 /// Canonicalize `path` and check it and every ancestor. Returns the
 /// canonical path.
 pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
+    check_with(path, owners, false)
+}
+
+/// Whether the user could change what `path` names, as the program will
+/// look it up after approval: every existing prefix of the path *as
+/// written* must be root-controlled, so a symlink, a missing file or a
+/// directory under the user's control counts too. Kernel filesystems
+/// (/proc, /sys, /dev) are nosuid but their owners are real.
+pub fn check_named(path: &Path, owners: &[u32]) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    for p in path.ancestors() {
+        // A device node's mode says who may use the device (/dev/null is
+        // 0666), not who may change what the name refers to: its directory
+        // decides that, and is checked next.
+        let device = |m: &std::fs::Metadata| {
+            let t = m.file_type();
+            t.is_char_device() || t.is_block_device()
+        };
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if device(&m) => continue,
+            Ok(_) => {
+                check_with(p, owners, true)?;
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf, String> {
     let canon = path
         .canonicalize()
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -40,7 +70,7 @@ pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
                 m.uid()
             ));
         }
-        if on_nosuid_mount(p) {
+        if on_nosuid_mount(p) && !(kernel_fs_ok && on_kernel_fs(p)) {
             return Err(format!(
                 "{} is on a filesystem mounted nosuid (removable media, a disk image or FUSE \
                  mounted for a user): whoever mounted it controls its files, whatever owner \
@@ -89,6 +119,15 @@ pub fn resolve_program(name: &str, cwd: &str, owners: &[u32]) -> Result<PathBuf,
 fn on_nosuid_mount(p: &Path) -> bool {
     use nix::sys::statvfs::{statvfs, FsFlags};
     statvfs(p).map_or(true, |s| s.flags().contains(FsFlags::ST_NOSUID))
+}
+
+/// proc, sysfs, tmpfs (and devtmpfs), devpts, cgroup2: files the kernel
+/// owns, whose owners cannot be claimed by whoever mounted them.
+// f_type is i64 here but differs by architecture.
+#[allow(clippy::unnecessary_cast)]
+fn on_kernel_fs(p: &Path) -> bool {
+    const KERNEL: [i64; 5] = [0x9fa0, 0x6265_6572, 0x0102_1994, 0x1cd1, 0x6367_7270];
+    nix::sys::statfs::statfs(p).is_ok_and(|s| KERNEL.contains(&(s.filesystem_type().0 as i64)))
 }
 
 fn is_executable_file(p: &Path) -> bool {

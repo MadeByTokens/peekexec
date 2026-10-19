@@ -59,6 +59,7 @@ pub enum Facts {
     Script {
         interpreter: String,
         interpreter_arg: Option<String>,
+        file_args_note: Option<String>,
     },
     Install {
         /// Final destination, canonical parent.
@@ -96,11 +97,12 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
                 file_args_note: untrusted_file_args(&argv[1..], &cwd, owners),
             }
         }
-        Action::Script { content, .. } => {
+        Action::Script { content, args, .. } => {
             let (interpreter, interpreter_arg) = interpreter(content, owners)?;
             Facts::Script {
                 interpreter,
                 interpreter_arg,
+                file_args_note: untrusted_file_args(args, &cwd, owners),
             }
         }
         Action::Install { src, dest, .. } => {
@@ -218,6 +220,7 @@ pub fn verify(
             Facts::Script {
                 interpreter: got,
                 interpreter_arg: got_arg,
+                ..
             },
         ) => {
             // The same parse and flag allowlist, on the request's own bytes.
@@ -463,8 +466,8 @@ pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<Str
         if !shebang_flag_ok(basename(&resolved), a) {
             return Err(format!(
                 "the #! line passes {a:?} to {resolved}. Allowed: simple shell flags \
-                 (-e, -eu, -x...), python -I/-s/-E..., perl -w/-T, and -f for awk, sed and \
-                 make. Other flags can make an interpreter run code the human never sees"
+                 (-e, -eu, -x...), python -I/-s/-E..., perl -w/-T, and -f for awk and sed. \
+                 Other flags can make an interpreter run code the human never sees"
             ));
         }
     }
@@ -485,8 +488,10 @@ fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
         "python" => "IsSEBuO",
         "perl" => "wWXTt",
         // `-f FILE`: read the program from the script itself, as the kernel
-        // would for `#!/usr/bin/awk -f`.
-        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "make" | "gmake" => return flags == "f",
+        // would for `#!/usr/bin/awk -f`. The daemon ends their options after
+        // it (`--`). Not make: it reads `VAR=value` and further makefiles
+        // from its arguments even after `--`.
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" => return flags == "f",
         _ => return false,
     };
     !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
@@ -542,22 +547,24 @@ fn coding_cookie(line: &[u8]) -> Option<String> {
     })
 }
 
-/// Arguments naming an existing file that root does not control
-/// (`sh ~/x.sh`, `cp /tmp/f /etc/`, `--config=/home/u/c`): the program may
-/// read or run it, but its content is not shown and can change after
-/// approval. One note for all of them.
+/// Arguments naming a path the user could change (`sh ~/x.sh`,
+/// `cp -r /tmp/d /etc/`, `--config=/home/u/c`, `-f/home/u/x`, a symlink of
+/// theirs, a file they may create later): the program may read or run it,
+/// but its content is not shown and can change after approval. One note
+/// for all of them.
 fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
     let mut hits = Vec::new();
     for a in args {
-        let value = a.split_once('=').map_or(a.as_str(), |(_, v)| v);
+        let value = match a.split_once('=') {
+            Some((_, v)) => v,
+            None if a.starts_with('-') => a.find('/').map_or("", |i| &a[i..]),
+            None => a,
+        };
         if !value.contains('/') {
             continue;
         }
         let path = Path::new(cwd).join(value);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
-            continue;
-        }
-        if trust::check(&path, owners).is_err() && !hits.contains(&value) {
+        if trust::check_named(&path, owners).is_err() && !hits.contains(&value) {
             hits.push(value);
         }
     }
@@ -730,6 +737,9 @@ mod tests {
         assert_eq!(arg.as_deref(), Some("-e"));
         assert!(interpreter(b"#!relative\n", &owners).is_err());
         assert!(interpreter(b"#!/usr/bin/env -S bash -x\n", &owners).is_err());
+        // make reads makefiles and variables from its arguments, even after --.
+        assert!(!shebang_flag_ok("make", "-f"));
+        assert!(shebang_flag_ok("gawk", "-f"));
         if trust::resolve_program("python3", "/", &owners).is_ok() {
             let utf7 = b"#!/usr/bin/python3 -I\n# coding: utf-7\n# x +AAo-print(1)\n";
             assert!(interpreter(utf7, &owners).unwrap_err().contains("utf-7"));
@@ -757,8 +767,31 @@ mod tests {
         assert!(note.contains("job.sh"), "{note}");
         let opt = format!("--config={s}");
         assert!(untrusted_file_args(&[opt], "/", &[0]).is_some());
-        // System files and plain words are not flagged.
-        assert!(untrusted_file_args(&["/etc/hostname".into(), "-y".into()], "/", &[0]).is_none());
+        // System files, kernel files, devices and plain words are not flagged.
+        let system = [
+            "/etc/hostname",
+            "-y",
+            "/proc/cpuinfo",
+            "/dev/null",
+            "/usr/share",
+        ];
+        let system: Vec<String> = system.map(String::from).to_vec();
+        assert!(untrusted_file_args(&system, "/", &[0]).is_none());
+        // Nor need the path exist, be a file, or be written plainly.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("/bin/true", &link).unwrap();
+        for a in [
+            dir.join("later.sh").to_str().unwrap().to_string(),
+            dir.to_str().unwrap().to_string(),
+            link.to_str().unwrap().to_string(),
+            format!("-f{s}"),
+            format!("/usr/bin/../..{s}"),
+        ] {
+            assert!(
+                untrusted_file_args(std::slice::from_ref(&a), "/", &[0]).is_some(),
+                "{a}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -853,6 +886,7 @@ mod tests {
             facts: Facts::Script {
                 interpreter: interpreter.into(),
                 interpreter_arg: interpreter_arg.map(String::from),
+                file_args_note: None,
             },
             ..honest.clone()
         };

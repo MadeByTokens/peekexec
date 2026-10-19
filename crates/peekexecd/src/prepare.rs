@@ -156,6 +156,7 @@ pub fn prepare(
             Facts::Script {
                 interpreter: interp,
                 interpreter_arg: interp_arg,
+                file_args_note,
             },
         ) => {
             let name = Path::new(path)
@@ -175,7 +176,14 @@ pub fn prepare(
             let mut argv = vec![interp.clone()];
             argv.extend(interp_arg.clone());
             argv.push(copy.clone());
+            let snapshot = argv.len() - 1;
+            // `awk -f FILE` and `sed -f FILE` go on reading options (another
+            // `-f`, `-e CODE`) from the arguments that follow.
+            if interp_arg.as_deref() == Some("-f") {
+                argv.push("--".into());
+            }
             argv.extend(args.iter().cloned());
+            notes.extend(file_args_note);
             let plan = ExecPlan {
                 program: interp.clone(),
                 argv: argv.clone(),
@@ -190,7 +198,6 @@ pub fn prepare(
             let is_shell = SHELLS.contains(&basename(&interp));
             // The requester's label comes last: it cannot push the
             // arguments out of view.
-            let snapshot = argv.len() - args.len() - 1;
             let mut invocation = argv_lines(&argv, snapshot, "(a snapshot of the script below)");
             invocation.push(display_line(
                 &format!("the requester calls the script {path}"),
@@ -1046,6 +1053,32 @@ mod tests {
             plan.argv.last().unwrap().ends_with("/r-test/script"),
             "{:?}",
             plan.argv
+        );
+    }
+
+    #[test]
+    fn awk_and_sed_take_no_options_from_script_arguments() {
+        let r = req(Action::Script {
+            path: "/home/u/x.awk".into(),
+            content: b"#!/usr/bin/awk -f\n{ print }\n".to_vec(),
+            args: vec!["-f".into(), "/home/u/evil.awk".into()],
+        });
+        let p = prepare_for_tests(&r);
+        let Execution::Command(plan) = p.exec else {
+            panic!("not a command")
+        };
+        let n = plan.argv.len();
+        assert_eq!(plan.argv[1], "-f");
+        assert!(plan.argv[2].contains("/r-test/script"), "{:?}", plan.argv);
+        assert_eq!(&plan.argv[3..n], ["--", "-f", "/home/u/evil.awk"]);
+        let lines: Vec<&str> = p.view.sections[0]
+            .invocation
+            .iter()
+            .map(Shown::as_str)
+            .collect();
+        assert_eq!(
+            lines[2], "argv[2] (a snapshot of the script below)",
+            "{lines:?}"
         );
     }
 
