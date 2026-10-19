@@ -30,8 +30,8 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | install `content` | — | — | text shown, binary described (✓) | 12 lines, then INCOMPLETE (✓) | written by the daemon, atomic (✓) | sha256 (✓) |
 | install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1). ⚠ only NUL refused: line breaks and hidden characters pass | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1). ⚠ drawn unescaped in the summary | title cut at 80 characters, summary at 160 (✓). ⚠ owner and mode facts are only in the header, left out | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
 | `cwd` | canonicalized, checked and opened by the helper as the user; the descriptor is passed back (✓ R1, R2) | errors as the user (✓ R1) | escaped; untrusted directory flagged (✓) | `in:` line (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
-| `env` name | ⚠ allowlist of names, but any name starting `LC_` passes: line breaks, `=`, any length | — | ⚠ drawn unescaped, unbounded count: can push every other fact out of view | ⚠ left out | rebuilt from scratch (✓). ⚠ a `=` in the name moves a path into the value | — |
-| `env` value | `[A-Za-z0-9_.@:+,-]`, no paths (✓) | — | listed (✓ by grammar) | ⚠ left out | rebuilt from scratch (✓) | — |
+| `env` name | R3: exact allowlist of names (the locale categories are listed one by one), so the count is bounded too (✓) | — | escaped (`Shown`); the header scrolls past 45% of the window, so nothing in it can push the code out of view (✓) | every variable listed (✓) | rebuilt from scratch (✓) | — |
+| `env` value | `[A-Za-z0-9_.@:+,-]`, no paths (✓) | — | escaped (✓) | listed (✓) | rebuilt from scratch (✓) | — |
 | `write` | absolute, no control or hidden characters (✓) | — | in the summary (✓) | in the summary (✓) | declared only, reported as such (✓) | — |
 | `why` | — | — | escaped, labelled unverified (✓) | never shown (✓) | — | Debug-quoted (✓) |
 | `timeout_secs` | clamped 5–600 s (✓) | — | — | — | — | — |
@@ -81,7 +81,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 - **(c)** Done: `Shown` in `crates/peekexec-proto/src/view.rs`. Every
   one-line field of the view has this type, made only by escaping or from
   a daemon constant; it caught a header line built from unescaped argv.
-  ⚠ Not yet: the view's `env` pairs and `enforced.write`.
+  ⚠ Not yet: `enforced.write`.
 - **(d)** Done: `crates/peekexecd/src/spawn.rs` starts every process
   (dialog, inspection helper, approved command) with an explicit
   environment and stdio, no other descriptors, verified credential drops,

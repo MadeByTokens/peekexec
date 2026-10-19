@@ -179,8 +179,9 @@ pub struct PromptView {
     /// Whether the display was found from sources the requester cannot
     /// control (see THREAT_MODEL.md).
     pub display_verified: bool,
-    /// Allowlisted names, values limited to `[A-Za-z0-9_.@:+,-]`.
-    pub env: Vec<(String, String)>,
+    /// Allowlisted names, values limited to `[A-Za-z0-9_.@:+,-]`; escaped
+    /// all the same, like every other one-line field.
+    pub env: Vec<(Shown, Shown)>,
     pub sections: Vec<Section>,
     /// Warnings the human should see (unpinned identity, dev mode, ...).
     pub notes: Vec<Shown>,

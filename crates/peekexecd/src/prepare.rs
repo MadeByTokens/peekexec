@@ -74,8 +74,20 @@ pub const ENV_ALLOW: &[&str] = &[
     "NO_COLOR",
     "COLUMNS",
     "LINES",
+    "LC_ALL",
+    "LC_ADDRESS",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NAME",
+    "LC_NUMERIC",
+    "LC_PAPER",
+    "LC_TELEPHONE",
+    "LC_TIME",
 ];
-pub const ENV_ALLOW_PREFIX: &[&str] = &["LC_"];
 
 /// Values are restricted too: no `/`, so none of them can name a file
 /// (`TZ=:/home/u/x`, `LANG=/home/u/locale`).
@@ -291,7 +303,7 @@ pub fn prepare(
         env: req
             .env
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (display_line(k, 64), display_line(v, 256)))
             .collect(),
         sections,
         notes,
@@ -412,6 +424,14 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         "\nfrom: {from}\nin: {}\n",
         display_line(&view.cwd, 120)
     ));
+    // Every variable: the allowlist bounds how many there can be.
+    for (k, v) in &view.env {
+        m.push_str(&format!(
+            "env: {}={}\n",
+            display_line(k, 64),
+            display_line(v, 256)
+        ));
+    }
     if view.kind == ViewKind::Root {
         let facts: Vec<String> = view
             .summary(0)
@@ -501,14 +521,14 @@ fn validate(req: &Request) -> Result<(), String> {
         }
     }
     for (k, v) in &req.env {
-        let allowed =
-            ENV_ALLOW.contains(&k.as_str()) || ENV_ALLOW_PREFIX.iter().any(|p| k.starts_with(p));
-        if !allowed {
+        // Exact names: a name is requester text too, and a prefix rule let
+        // line breaks and `=` through (design rule 3).
+        if !ENV_ALLOW.contains(&k.as_str()) {
             return Err(format!(
-                "--env {k} is not allowed. Allowed: {}, {}*. Other variables can make root \
-                 load code that the dialog cannot show",
-                ENV_ALLOW.join(", "),
-                ENV_ALLOW_PREFIX.join("*, ")
+                "--env {} is not allowed. Allowed: {}. Other variables can make root load \
+                 code that the dialog cannot show",
+                display_line(k, 64),
+                ENV_ALLOW.join(", ")
             ));
         }
         if !env_value_ok(v) {
@@ -817,6 +837,9 @@ mod tests {
             "PAGER",
             "JAVA_TOOL_OPTIONS",
             "BASH_FUNC_x%%",
+            "LC_X\nRuns as: nobody",
+            "LC_ALL=/home/u/x",
+            "LC_",
         ] {
             assert!(with(k, "x").is_err(), "{k} accepted");
         }
@@ -1044,6 +1067,18 @@ mod tests {
         assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
         assert!(!m.contains("ignored"), "why must not be in the prompt: {m}");
         assert!(m.ends_with("request sha256 3f9a1c000000…"), "{m}");
+
+        // The variables root gets are in the prompt.
+        v.env = vec![(
+            Shown::fixed("DEBIAN_FRONTEND"),
+            Shown::fixed("noninteractive"),
+        )];
+        assert!(
+            system_prompt_message(&v).contains("\nenv: DEBIAN_FRONTEND=noninteractive\n"),
+            "{}",
+            system_prompt_message(&v)
+        );
+        v.env.clear();
 
         // Too long for the prompt: it says so, before the content.
         let script: String = (0..30).map(|i| format!("step{i}\n")).collect();

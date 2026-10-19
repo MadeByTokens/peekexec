@@ -246,7 +246,16 @@ impl eframe::App for Dialog {
         });
         let dark = ctx.global_style().visuals.dark_mode;
 
-        egui::Panel::top("who").show(ui, |ui| self.header(ui, dark));
+        // The header holds requester text (cwd, why, variables): however
+        // long it gets, it scrolls, and the code below stays in view.
+        let max_header = ctx.content_rect().height() * 0.45;
+        egui::Panel::top("who").show(ui, |ui| {
+            ScrollArea::vertical()
+                .id_salt("who")
+                .max_height(max_header)
+                .auto_shrink([false, true])
+                .show(ui, |ui| self.header(ui, dark));
+        });
         egui::Panel::bottom("answer").show(ui, |ui| self.footer(ui, &ctx, now, opened));
         egui::CentralPanel::default().show(ui, |ui| self.code(ui, dark, page));
 
@@ -325,7 +334,7 @@ impl Dialog {
                 ui.end_row();
                 for (k, v) in &self.view.env {
                     ui.label(RichText::new("Env").weak());
-                    ui.monospace(format!("{k}={v}"));
+                    ui.monospace(format!("{}={}", k.as_str(), v.as_str()));
                     ui.end_row();
                 }
             });

@@ -156,7 +156,8 @@ has a seat and is its active one"), never the absence of a warning sign
      shown (as a diff) only if the user could read it without root; otherwise
      the dialog says it is withheld.
    - The environment is rebuilt from scratch; requests may add only allowlisted
-     variables (`DEBIAN_FRONTEND`, `LANG`, `LC_*`, `TZ`...) with path-free values.
+     variables by exact name (`DEBIAN_FRONTEND`, `LANG`, the `LC_*` locale
+     categories, `TZ`...) with path-free values.
    - The working directory is `/` unless the request names one. A named
      directory is opened when the request is prepared and entered by descriptor
      (`fchdir`), so moving or replacing the path afterwards has no effect. A
