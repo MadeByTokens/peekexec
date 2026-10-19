@@ -64,9 +64,10 @@ A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
 - **Flags:** a working directory root does not control, targets that make root
   run things later (sudoers, cron, systemd, udev, pam.d, profile, ld.so...),
   unverified display, executables in the install.
-- **Fast path:** focus starts in the password field; with nothing to warn
-  about, type it and press Enter. With any flag, approving needs a click, and
-  a dialog right after another one ignores keys for longer.
+- **Fast path:** focus starts in the password field; for a plain `run` (no
+  shell or interpreter, one word per argument) with nothing to warn about,
+  type it and press Enter. Scripts, installs, `sh -c` and any flag need a
+  click, and a dialog right after another one ignores keys for longer.
 - **Cancel:** button, Esc, closing the window, or timeout (default 120 s).
   Nothing runs; the snapshot is removed.
 - **Deny with reason:** a text box whose content goes back to the agent as

@@ -216,7 +216,15 @@ pub fn prepare(
             let enforced = ctx.sandbox.enforcement(&plan);
             (vec![section], Execution::Command(plan), enforced)
         }
-        (Action::Install { src, content, .. }, Facts::Install { dest, existing }) => {
+        (
+            Action::Install { src, content, .. },
+            Facts::Install {
+                dest,
+                existing,
+                file_args_note,
+            },
+        ) => {
+            notes.extend(file_args_note);
             let dest_s = dest;
             let dest = PathBuf::from(&dest_s);
             let mut facts = match &existing {
@@ -331,13 +339,40 @@ pub fn prepare(
         approve_delay_ms: 0,
     };
     let mut view = view;
-    view.enter_approves = view.notes.is_empty() && view.findings() == 0;
+    view.enter_approves = plain_run(req, &exec) && view.notes.is_empty() && view.findings() == 0;
     Ok(Prepared {
         view,
         exec,
         enforced,
         snapshot_dir,
     })
+}
+
+/// Programs that take code to run, not only arguments: what they do is
+/// written in text the human has to read.
+const INTERPRETERS: &[&str] = &[
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "busybox", "python", "perl", "ruby", "node",
+    "nodejs", "php", "lua", "tclsh", "awk", "gawk", "mawk", "nawk", "sed", "env",
+];
+
+/// Whether Enter may approve this request at all: only a plain `run`, one
+/// program and its arguments, read at a glance. Scripts, installs, code
+/// for an interpreter (`sh -c`, `python3 -c`) and any argument that is
+/// more than one word take a click, whatever the checks found: the checks
+/// are a list of known dangers, and the requester can preview against it
+/// until nothing is flagged.
+fn plain_run(req: &Request, exec: &Execution) -> bool {
+    let (Action::Run { argv }, Execution::Command(plan)) = (&req.action, exec) else {
+        return false;
+    };
+    // By the name it was called and the file it resolved to
+    // (`/usr/bin/python` may be a link to `python3`).
+    let interpreter = argv.first().into_iter().chain([&plan.program]).any(|p| {
+        let family = basename(p).trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+        INTERPRETERS.contains(&family)
+    });
+    let one_word = |a: &String| !a.chars().any(|c| c.is_whitespace() || c.is_control());
+    !interpreter && argv.iter().all(one_word)
 }
 
 /// Text for a single dialog line: characters that could fake extra lines or
@@ -1086,6 +1121,40 @@ mod tests {
             "path in value accepted"
         );
         assert!(with("LANG", "/home/u/locale").is_err());
+    }
+
+    #[test]
+    fn enter_approves_only_plain_runs() {
+        let run = |argv: &[&str]| {
+            req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            })
+        };
+        let plain = |r: &Request| plain_run(r, &prepare_for_tests(r).exec);
+        assert!(plain(&run(&["true"])));
+        assert!(plain(&run(&["ls", "-l", "/etc"])));
+        for code in [
+            &["sh", "-c", "id"][..],
+            &["/usr/bin/python3", "-c", "print(1)"],
+            &["perl", "-e", "1"],
+            &["env", "true"],
+            &["echo", "two words"],
+            &["echo", "a\nb"],
+        ] {
+            assert!(!plain(&run(code)), "{code:?}");
+        }
+        let script = req(Action::Script {
+            path: "/home/u/x.sh".into(),
+            content: b"#!/bin/sh\ntrue\n".to_vec(),
+            args: vec![],
+        });
+        assert!(!plain(&script));
+        let install = req(Action::Install {
+            src: "x.conf".into(),
+            content: b"x\n".to_vec(),
+            dest: "/etc/peekexec-test-nonexistent.conf".into(),
+        });
+        assert!(!plain(&install));
     }
 
     #[test]

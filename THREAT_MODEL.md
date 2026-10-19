@@ -271,10 +271,15 @@ has a seat and is its active one"), never the absence of a warning sign
   ground truth.
 - **`--why` is the requester's claim**, shown below everything the daemon
   checked and labelled unverified.
-- **Enter-to-approve** works only when there is nothing to warn about and no
+- **Enter-to-approve** works only for a plain `run` (one program that is
+  not a shell or interpreter, each argument a single word), only when there
+  is nothing to warn about, and only when no
   key was pressed while the window was opening (the human was typing into
   something else, perhaps a password); otherwise approving needs a pointer
-  click, which the keyboard (Tab, then Space) cannot stand in for. A dialog
+  click, which the keyboard (Tab, then Space) cannot stand in for. Scripts,
+  installs and code for an interpreter (`sh -c`, `python3 -c`) always take a
+  click: the warnings are a list of known dangers, and a requester can
+  preview a request until nothing on the list is flagged. A dialog
   arriving right after another gets a longer input guard, and the daemon
   refuses an Approve that comes sooner than the dialog allows one.
 - **The one-hour refusal of a denied request** is a courtesy for well-behaved

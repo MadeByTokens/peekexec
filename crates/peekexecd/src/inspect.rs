@@ -64,6 +64,7 @@ pub enum Facts {
         /// Final destination, canonical parent.
         dest: String,
         existing: Option<Existing>,
+        file_args_note: Option<String>,
     },
 }
 
@@ -93,7 +94,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             let program = trust::resolve_program(&argv[0], &cwd, owners)?;
             Facts::Run {
                 program: path_str(&program)?,
-                file_args_note: untrusted_file_args(&argv[1..], &cwd, owners),
+                file_args_note: untrusted_file_args(&argv[1..], b"", &cwd, owners),
             }
         }
         Action::Script { content, args, .. } => {
@@ -101,14 +102,19 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             Facts::Script {
                 interpreter,
                 interpreter_arg,
-                file_args_note: untrusted_file_args(args, &cwd, owners),
+                file_args_note: untrusted_file_args(args, content, &cwd, owners),
             }
         }
-        Action::Install { src, dest, .. } => {
+        Action::Install {
+            src, dest, content, ..
+        } => {
             let dest = install_target(dest, src, owners)?;
             Facts::Install {
                 existing: existing(&dest),
                 dest: path_str(&dest)?,
+                // A unit, rule or cron entry that names a file of the
+                // user's runs it as root later.
+                file_args_note: untrusted_file_args(&[], content, &cwd, owners),
             }
         }
     };
@@ -612,16 +618,62 @@ fn coding_cookie(line: &[u8]) -> Option<String> {
     })
 }
 
-/// Arguments naming a path the user could change (`sh ~/x.sh`,
-/// `cp -r /tmp/d /etc/`, `--config=/home/u/c`, `-f/home/u/x`, a symlink of
-/// theirs, a file they may create later): the program may read or run it,
-/// but its content is not shown and can change after approval. One note
-/// for all of them.
-fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
+/// Most distinct paths one request is checked for; past this the note
+/// says the request names too many to check (each costs a few `stat`s,
+/// inside the helper's time limit).
+const MAX_PATHS_CHECKED: usize = 1000;
+
+/// The words of text that runs (a `sh -c` string, a script, an installed
+/// unit or rule), split where a shell would split them, so
+/// `cp /home/u/x /etc/` yields `/home/u/x`.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| c.is_whitespace() || ";|&()<>'\"`{}".contains(c))
+        .filter(|w| !w.is_empty())
+}
+
+/// Whether an argument is text for a shell or an interpreter rather than
+/// one word: its words are checked too.
+fn is_code(a: &str) -> bool {
+    a.contains(|c: char| c.is_whitespace() || ";|&()<>'\"`{}".contains(c))
+}
+
+/// Paths named inside text: only absolute ones and `./`, `../`, so that
+/// prose (`and/or`, `TCP/IP`) in a comment is not taken for a path.
+fn named_in_text(text: &str) -> impl Iterator<Item = &str> {
+    words(text)
+        .flat_map(path_candidates)
+        .filter(|p| p.starts_with('/') || p.starts_with("./") || p.starts_with("../"))
+}
+
+/// Paths the user could change (`sh ~/x.sh`, `cp -r /tmp/d /etc/`,
+/// `--config=/home/u/c`, `-f/home/u/x`, a symlink of theirs, a file they
+/// may create later), named by an argument, by a word inside an argument
+/// that is code (`sh -c 'dpkg -i /home/u/x.deb'`), or by a word of `text`
+/// (a script, an installed file): whatever runs as root may read or run
+/// it, but its content is not shown and can change after approval. One
+/// note for all of them.
+fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) -> Option<String> {
+    let text = String::from_utf8_lossy(text);
+    let named = args
+        .iter()
+        .flat_map(|a| {
+            let inner = is_code(a).then(|| named_in_text(a));
+            path_candidates(a)
+                .into_iter()
+                .chain(inner.into_iter().flatten())
+        })
+        .chain(named_in_text(&text));
+    let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<&str> = Vec::new();
-    for value in args.iter().flat_map(|a| path_candidates(a)) {
-        if !value.contains('/') || hits.contains(&value) {
+    for value in named {
+        if !value.contains('/') || !seen.insert(value) {
             continue;
+        }
+        if seen.len() > MAX_PATHS_CHECKED {
+            return Some(format!(
+                "Names more than {MAX_PATHS_CHECKED} paths, more than peekexec checks: \
+                 some may be files root does not control, whose content is not shown here."
+            ));
         }
         let path = Path::new(cwd).join(value);
         let own = own_descriptor(&path);
@@ -638,9 +690,9 @@ fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<Str
             .collect();
         let more = hits.len().saturating_sub(3);
         format!(
-            "Names {}{}, which root does not control: if the program reads or runs it, that \
-             content is not shown here and can change after approval. To run your own script \
-             use `peekexec script`; to put a file in place, `peekexec install`.",
+            "Names {}{}, which root does not control: whatever reads or runs it as root gets \
+             content that is not shown here and can change after approval. To run your own \
+             script use `peekexec script`; to put a file in place, `peekexec install`.",
             shown.join(", "),
             if more > 0 {
                 format!(" and {more} more")
@@ -832,10 +884,10 @@ mod tests {
         std::fs::write(&script, "echo hi\n").unwrap();
         let s = script.to_str().unwrap();
         // Trusted owners are root only, as in production.
-        let note = untrusted_file_args(&[s.into()], "/", &[0]).unwrap();
+        let note = untrusted_file_args(&[s.into()], b"", "/", &[0]).unwrap();
         assert!(note.contains("job.sh"), "{note}");
         let opt = format!("--config={s}");
-        assert!(untrusted_file_args(&[opt], "/", &[0]).is_some());
+        assert!(untrusted_file_args(&[opt], b"", "/", &[0]).is_some());
         // System files, kernel files, devices and plain words are not flagged.
         let system = [
             "/etc/hostname",
@@ -848,7 +900,7 @@ mod tests {
             "/dev/fd/3",
         ];
         let system: Vec<String> = system.map(String::from).to_vec();
-        assert!(untrusted_file_args(&system, "/", &[0]).is_none());
+        assert!(untrusted_file_args(&system, b"", "/", &[0]).is_none());
         // Nor need the path exist, be a file, or be written plainly.
         let link = dir.join("link");
         std::os::unix::fs::symlink("/bin/true", &link).unwrap();
@@ -869,10 +921,31 @@ mod tests {
             format!("/usr/bin/../..{s}"),
         ] {
             assert!(
-                untrusted_file_args(std::slice::from_ref(&a), "/", &[0]).is_some(),
+                untrusted_file_args(std::slice::from_ref(&a), b"", "/", &[0]).is_some(),
                 "{a}"
             );
         }
+        // Inside text that runs: a `sh -c` string, a script, an installed
+        // unit.
+        let flagged = |args: &[String], text: &str| {
+            untrusted_file_args(args, text.as_bytes(), "/", &[0]).is_some()
+        };
+        assert!(flagged(&[format!("dpkg -i {s} && echo ok")], ""));
+        assert!(flagged(&[], &format!("#!/bin/sh\ncp {s} /etc/x.conf\n")));
+        assert!(flagged(&[], &format!("[Service]\nExecStart={s} --now\n")));
+        assert!(flagged(&[], &format!("x=$(cat '{s}')")));
+        // Prose and system paths in text are not.
+        assert!(!flagged(
+            &[],
+            "#!/bin/sh\n# and/or TCP/IP, see /usr/share/doc\necho /etc/hostname\n"
+        ));
+        assert!(!flagged(&["a/b c".into()], ""));
+        // Too many to check: it says so.
+        let many: String = (0..=MAX_PATHS_CHECKED)
+            .map(|i| format!("/usr/x{i} "))
+            .collect();
+        let note = untrusted_file_args(&[], many.as_bytes(), "/", &[0]).unwrap();
+        assert!(note.contains("more than"), "{note}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -998,6 +1071,7 @@ mod tests {
             facts: Facts::Install {
                 dest: "/etc/sudoers.d/zz".into(),
                 existing: None,
+                file_args_note: None,
             },
             ..honest.clone()
         };
@@ -1007,6 +1081,7 @@ mod tests {
             facts: Facts::Install {
                 dest: "/etc/sudoers.d/a.conf".into(),
                 existing: None,
+                file_args_note: None,
             },
             ..honest.clone()
         };
@@ -1024,6 +1099,7 @@ mod tests {
             facts: Facts::Install {
                 dest: d.into(),
                 existing: None,
+                file_args_note: None,
             },
             ..honest.clone()
         };
@@ -1033,6 +1109,7 @@ mod tests {
             facts: Facts::Install {
                 dest: "/etc/a.conf".into(),
                 existing: None,
+                file_args_note: None,
             },
             ..honest
         };
