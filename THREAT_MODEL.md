@@ -47,17 +47,38 @@ the requester controls, against every place the daemon uses it.
    privilege; the confused deputy). Whatever the daemon looks at before a
    human approves, it looks at with the requesting user's credentials, in a
    helper with `no_new_privs`, so the kernel decides what may be learned.
+   That includes other users' processes: the daemon reads only the
+   requester's own. What the helper answers is input too: whatever root
+   can recompute from the request (the program, the `#!` interpreter and
+   its flag, the install target) it recomputes and compares; the rest it
+   checks, with generic errors.
 2. **Objects, not names** (complete mediation). Hold what was checked (a
    descriptor, an inode, a pidfd) and use that, never a path or pid looked
-   up again later.
+   up again later. Authority comes from the account, not from what the
+   process carries: administrator membership and the dialog's credentials
+   come from the user database, never from the caller's egid or
+   environment.
 3. **Requester bytes are data, never structure.** They go into one argv
    slot or one file verbatim, or are shown through one escaping function;
    they never become part of a path, a command line or a line of the
-   dialog.
-4. **What is shown is complete, or says what it leaves out.**
+   dialog. This covers every part of an input: an environment variable's
+   *name* is requester text as much as its value, and so is an install
+   destination. Each part is held to a grammar (an allowlist of
+   characters, not a list of bad ones), and every field of the view that
+   holds requester text has a type that can only be made by escaping
+   (`Shown`), so forgetting is a compile error.
+4. **What is shown is complete, or says what it leaves out**, in every
+   view a human may rely on: the dialog *and* the desktop's prompt.
+   Everything root executes or writes (each argument, each variable, the
+   target) is in a counted line, never only in a header that is cut or
+   left out. Nothing the requester sends can push another fact out of
+   view: line breaks are escaped, runs of blank lines, spaces or tabs are
+   collapsed into a visible marker, and lists are bounded.
 5. **Every process started gets an explicit allowlist** of descriptors,
    environment and credentials, and cannot gain privilege by exec
-   (`no_new_privs`) unless it is the approved command.
+   (`no_new_privs`) unless it is the approved command. If the allowlist
+   cannot be enforced (an old kernel without `close_range`), the process
+   is not started.
 6. **Do what a careful administrator would do**: keep owners, modes and
    labels, finish, and report.
 7. **Economy of mechanism.** Every feature that runs as root before
@@ -65,6 +86,9 @@ the requester controls, against every place the daemon uses it.
 
 Allowlists decide (environment, `#!` flags); denylists only warn (sensitive
 paths). When a check cannot be made, the answer is no (fail-safe defaults).
+A check that the human is present needs positive evidence ("this session
+has a seat and is its active one"), never the absence of a warning sign
+("not marked remote").
 
 ## Actors
 
