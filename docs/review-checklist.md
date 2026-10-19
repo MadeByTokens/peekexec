@@ -94,9 +94,11 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
   content in the dialog and counted with it in the desktop prompt, which
   are built from the same lines. `PromptView::findings` counts them too,
   in the daemon and the dialog alike.
-- **(f)** Planned, needs a VM test: `allow_any` and `allow_inactive` set
-  to `no` in `org.peekexec.approve.policy`, so polkit itself refuses
-  subjects the daemon already refuses (defence in depth). Not changed
-  untested: a requester in no login session (`user@.service` apps) is
-  classified through the display session, and whether polkit then
-  applies `allow_active` must be checked first.
+- **(f)** Done: `allow_any` and `allow_inactive` are `no` in
+  `org.peekexec.approve.policy`, so polkit itself refuses subjects the
+  daemon already refuses (defence in depth). Checked in the VM with
+  `pkcheck` on polkit 124: an ssh session's process is "Not authorized";
+  gnome-shell and a `systemd-run --user` process (in no session, judged
+  by the display session) still get `auth_admin`. An older polkit without
+  that display-session fallback refuses session-less requesters: fail
+  closed.
