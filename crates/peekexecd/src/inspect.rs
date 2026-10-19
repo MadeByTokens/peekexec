@@ -182,11 +182,14 @@ pub fn inspect_as(
     }
 }
 
-/// Check what the daemon relies on in a helper's answer, as root: the
-/// program or interpreter and the install directory are root-controlled
-/// (checking them reveals nothing private), the destination is the one
-/// requested, and the descriptor is the directory shown. Returns the
-/// working-directory warning, recomputed.
+/// Check what the daemon relies on in a helper's answer, as root. What can
+/// be derived from the request is derived again and compared: the program
+/// argv[0] resolves to, the interpreter and `#!` flag the content names,
+/// the install destination. The rest is checked: the install directory is
+/// root-controlled, the descriptor is the directory shown. Root only looks
+/// again at paths the helper, as the user, already reached, and the
+/// results are only compared, never reported, so this reveals nothing
+/// (design rule 1). Returns the working-directory warning, recomputed.
 pub fn verify(
     req: &Request,
     inspection: &Inspection,
@@ -198,15 +201,29 @@ pub fn verify(
             && trust::check(Path::new(p), owners).is_ok_and(|c| c == Path::new(p))
     };
     match (&req.action, &inspection.facts) {
-        (Action::Run { .. }, Facts::Run { program, .. }) => {
-            if !trusted(program) {
-                return Err(format!("program {program:?} is not root-controlled"));
+        (Action::Run { argv }, Facts::Run { program, .. }) => {
+            let expected = trust::resolve_program(&argv[0], &inspection.cwd, owners)
+                .ok()
+                .and_then(|p| p.to_str().map(str::to_string));
+            if !trusted(program) || expected.as_deref() != Some(program.as_str()) {
+                return Err(format!(
+                    "program {program:?} is not what {:?} resolves to",
+                    argv[0]
+                ));
             }
         }
-        (Action::Script { .. }, Facts::Script { interpreter, .. }) => {
-            if !trusted(interpreter) {
+        (
+            Action::Script { content, .. },
+            Facts::Script {
+                interpreter: got,
+                interpreter_arg: got_arg,
+            },
+        ) => {
+            // The same parse and flag allowlist, on the request's own bytes.
+            let expected = interpreter(content, owners).ok();
+            if !trusted(got) || expected != Some((got.clone(), got_arg.clone())) {
                 return Err(format!(
-                    "interpreter {interpreter:?} is not root-controlled"
+                    "interpreter {got:?} {got_arg:?} is not what the #! line names"
                 ));
             }
         }
@@ -745,6 +762,47 @@ mod tests {
             ..honest.clone()
         };
         assert!(verify(&run, &moved, &dir_fd("/"), &owners).is_err());
+
+        // Another trusted program than argv[0] names.
+        let other = Inspection {
+            facts: Facts::Run {
+                program: path_str(&trust::resolve_program("false", "/", &owners).unwrap()).unwrap(),
+                file_args_note: None,
+            },
+            ..honest.clone()
+        };
+        assert!(verify(&run, &other, &dir_fd("/"), &owners).is_err());
+
+        // A script's interpreter and flag must be what its #! line names.
+        let script = req(
+            Action::Script {
+                path: "x.sh".into(),
+                content: b"#!/bin/sh -e\ntrue\n".to_vec(),
+                args: vec![],
+            },
+            "/",
+        );
+        let (interp, arg) = interpreter(b"#!/bin/sh -e\n", &owners).unwrap();
+        let facts = |interpreter: &str, interpreter_arg: Option<&str>| Inspection {
+            facts: Facts::Script {
+                interpreter: interpreter.into(),
+                interpreter_arg: interpreter_arg.map(String::from),
+            },
+            ..honest.clone()
+        };
+        assert!(verify(
+            &script,
+            &facts(&interp, arg.as_deref()),
+            &dir_fd("/"),
+            &owners
+        )
+        .is_ok());
+        // A flag the allowlist would refuse, or none at all.
+        assert!(verify(&script, &facts(&interp, Some("-c")), &dir_fd("/"), &owners).is_err());
+        assert!(verify(&script, &facts(&interp, None), &dir_fd("/"), &owners).is_err());
+        // Another trusted interpreter.
+        let other = path_str(&trust::resolve_program("true", "/", &owners).unwrap()).unwrap();
+        assert!(verify(&script, &facts(&other, Some("-e")), &dir_fd("/"), &owners).is_err());
 
         // An install must land where it was asked to.
         let install = req(
