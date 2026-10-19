@@ -434,6 +434,8 @@ fn open_workdir(
 /// The interpreter for a script: its `#!` line (resolved and trusted;
 /// `/usr/bin/env NAME` is looked up in SAFE_PATH), else /bin/sh.
 pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<String>), String> {
+    // Whatever the #! line says: a shell script can hand itself to Python.
+    read_as_shown(content, true)?;
     let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
     let Some(shebang) = first.strip_prefix(b"#!") else {
         let sh = trust::resolve_program("sh", "/", owners)?;
@@ -457,16 +459,10 @@ pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<Str
             return Err(format!("unsupported #!/usr/bin/env arguments: {name:?}"));
         }
         let resolved = path_str(&trust::resolve_program(&name, "/", owners)?)?;
-        if family(basename(&resolved)) == "python" {
-            python_runs_as_shown(content)?;
-        }
         return Ok((resolved, None));
     }
     let resolved = trust::resolve_program(prog, "/", owners)?;
     let resolved = path_str(&resolved)?;
-    if family(basename(&resolved)) == "python" {
-        python_runs_as_shown(content)?;
-    }
     if let Some(a) = &arg {
         if !shebang_flag_ok(basename(&resolved), a) {
             return Err(format!(
@@ -507,26 +503,32 @@ fn family(interp: &str) -> &str {
     interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
 
-/// Python does not always run the text that is shown: a PEP 263 coding
-/// cookie (`utf-7`, `unicode_escape`) decodes the file into other code, and
-/// a zip archive inside it is run instead of the text. So the cookie must
-/// name UTF-8 or ASCII, and no zip signature may appear.
-pub fn python_runs_as_shown(content: &[u8]) -> Result<(), String> {
+/// An interpreter may not run the text that is shown. Python decodes a
+/// file by a PEP 263 coding cookie (`utf-7`, `unicode_escape` turn a
+/// comment into code), and runs a zip archive inside it instead of the
+/// text. A file of any kind can reach Python (a shell script that execs
+/// `python3 "$0"`), so a cookie must name UTF-8 or ASCII wherever it
+/// appears, and `zip` refuses an archive.
+pub fn read_as_shown(content: &[u8], zip: bool) -> Result<(), String> {
     for line in content.split(|&b| b == b'\n').take(2) {
         if let Some(name) = coding_cookie(line) {
             let name = name.to_ascii_lowercase().replace('_', "-");
             if !matches!(name.as_str(), "utf-8" | "utf8" | "ascii" | "us-ascii") {
                 return Err(format!(
-                    "the script declares the source encoding {name:?}: Python would decode \
-                     it into code other than what is shown. Use UTF-8"
+                    "the file declares the source encoding {name:?}: Python would decode it \
+                     into code other than what is shown. Use UTF-8"
                 ));
             }
         }
     }
-    let zip = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"];
-    if content.windows(4).any(|w| zip.iter().any(|z| w == *z)) {
+    let signatures = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"];
+    if zip
+        && content
+            .windows(4)
+            .any(|w| signatures.iter().any(|z| w == *z))
+    {
         return Err(
-            "the script contains a zip archive, which Python would run instead of the text \
+            "the file contains a zip archive, which Python would run instead of the text \
              shown"
                 .into(),
         );
@@ -534,19 +536,28 @@ pub fn python_runs_as_shown(content: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The encoding a line declares, by Python's rule
-/// `^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`.
+/// The encoding a line declares, by CPython's own scan of the raw bytes
+/// (`^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`, ASCII word characters). Not
+/// decoded first: CPython reads the cookie even on a line that is not
+/// valid UTF-8.
 fn coding_cookie(line: &[u8]) -> Option<String> {
-    let line = std::str::from_utf8(line).ok()?;
-    let comment = line
-        .trim_start_matches([' ', '\t', '\x0c'])
-        .strip_prefix('#')?;
-    comment.match_indices("coding").find_map(|(i, _)| {
-        let rest = comment[i + "coding".len()..].strip_prefix([':', '='])?;
-        let name: String = rest
-            .trim_start_matches([' ', '\t'])
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    let start = line
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | 0x0c))?;
+    let comment = line[start..].strip_prefix(b"#")?;
+    (0..comment.len()).find_map(|i| {
+        let rest = comment[i..].strip_prefix(b"coding")?;
+        let rest = rest
+            .strip_prefix(b":")
+            .or_else(|| rest.strip_prefix(b"="))?;
+        let skip = rest
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count();
+        let name: String = rest[skip..]
+            .iter()
+            .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+            .map(|&b| b as char)
             .collect();
         (!name.is_empty()).then_some(name)
     })
@@ -742,6 +753,10 @@ mod tests {
         assert_eq!(arg.as_deref(), Some("-e"));
         assert!(interpreter(b"#!relative\n", &owners).is_err());
         assert!(interpreter(b"#!/usr/bin/env -S bash -x\n", &owners).is_err());
+        // A shell script can exec python on itself: checked whatever the #!.
+        let poly = b"#!/bin/sh\n# coding: utf-7\n''''exec python3 -I \"$0\" #'''\n";
+        assert!(interpreter(poly, &owners).unwrap_err().contains("utf-7"));
+        assert!(interpreter(b"#!/bin/sh\necho\nPK\x05\x06", &owners).is_err());
         // make reads makefiles and variables from its arguments, even after --.
         assert!(!shebang_flag_ok("make", "-f"));
         assert!(shebang_flag_ok("gawk", "-f"));
@@ -751,6 +766,9 @@ mod tests {
             let esc = b"#!/usr/bin/env python3\n# -*- coding: unicode_escape -*-\n";
             assert!(interpreter(esc, &owners).is_err());
             let zip = b"#!/usr/bin/python3\nprint(1)\nPK\x03\x04\x14\x00";
+            // An invalid byte on the cookie line: CPython still reads it.
+            let bad = b"#!/usr/bin/python3\n# coding: utf-7 \xff\n# x +AAo-print(1)\n";
+            assert!(interpreter(bad, &owners).unwrap_err().contains("utf-7"));
             assert!(interpreter(zip, &owners).unwrap_err().contains("zip"));
             let ok = b"#!/usr/bin/python3\n# -*- coding: utf-8 -*-\nprint(1)\n";
             assert!(interpreter(ok, &owners).is_ok());

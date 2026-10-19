@@ -577,13 +577,17 @@ fn validate(req: &Request) -> Result<(), String> {
     // printable ASCII and spaces.
     let plain = |s: &str| s.chars().all(|c| c.is_ascii_graphic() || c == ' ');
     if let Action::Install { src, dest, content } = &req.action {
-        // A Python program installed is run later, decoded by Python's rules.
+        // An installed file may be run later, perhaps by Python. Any coding
+        // cookie must be UTF-8; a zip archive is refused in what looks like
+        // Python (elsewhere one makes the file binary: described, not shown).
         let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
-        let python = [src, dest].iter().any(|p| p.ends_with(".py"))
-            || (first.starts_with(b"#!") && first.windows(6).any(|w| w == b"python"));
-        if python {
-            crate::inspect::python_runs_as_shown(content)?;
-        }
+        let python = [src, dest]
+            .iter()
+            .any(|p| [".py", ".pyw", ".pyz"].iter().any(|e| p.ends_with(e)))
+            || (first.starts_with(b"#!")
+                && (first.windows(6).any(|w| w == b"python")
+                    || first.windows(4).any(|w| w == b"pypy")));
+        crate::inspect::read_as_shown(content, python)?;
         // Into a directory, the file is named after `src`.
         let name = Path::new(src).file_name().and_then(|n| n.to_str());
         if let Some(bad) = [Some(dest.as_str()), name]

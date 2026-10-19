@@ -154,10 +154,12 @@ has a seat and is its active one"), never the absence of a warning sign
      script's `#!` interpreter is held to the same rule, and may receive only
      flags allowlisted for that interpreter (`-e` is harmless to sh but means
      "run this code" to perl or awk). An interpreter must also read the text
-     as shown: a Python script or installed Python file may declare no
-     source encoding but UTF-8 or ASCII (`# coding: utf-7` turns a comment
-     into code) and may not contain a zip archive (which Python runs
-     instead of the text).
+     as shown: no script or installed file may declare a source encoding but
+     UTF-8 or ASCII in its first two lines (`# coding: utf-7` turns a
+     comment into code for Python, and a shell script can hand itself to
+     Python), read from the raw bytes as Python does; no script, and no
+     installed file that looks like Python, may contain a zip archive
+     (which Python runs instead of the text).
    - What the view shows, it shows to the requester (preview) and to a dialog
      running as the user. So the current content of a file being replaced is
      shown (as a diff) only if the user could read it without root; otherwise

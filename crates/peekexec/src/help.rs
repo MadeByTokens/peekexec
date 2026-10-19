@@ -70,9 +70,9 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    - A script's #! line may pass only flags known to be harmless for its
      interpreter: shell flags (-e, -eu, -x...), python -I/-s/-E..., perl
      -w/-T..., and -f for awk and sed (their options end after the
-     script: arguments are never read as options). Python scripts (and
-     Python files you install) must be UTF-8: another `coding:` cookie or
-     an embedded zip archive is refused.
+     script: arguments are never read as options). Scripts and files you
+     install may declare no `coding:` but UTF-8, and scripts may not embed
+     a zip archive (Python would run either differently than shown).
    - Paths you cannot access yourself (as a working directory, program,
      #! interpreter or install destination): peekexec looks at nothing with
      root's rights before approval. Do such steps inside `peekexec script`.
