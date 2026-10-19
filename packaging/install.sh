@@ -86,6 +86,15 @@ for f in peekexec peekexecd peekexec-ui; do
     cp "$rel/$f" "$stage/$f"
 done
 cp -r "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" "$stage/"
+# cp -r copies symlinks as links, and install(1) would follow them, reading
+# whatever they point to at that moment. Only plain files are installed.
+if [ -n "$(find "$stage" -type l)" ]; then
+    echo "install.sh: symbolic links in $repo/packaging or target/release; refusing" >&2
+    exit 1
+fi
+# What is about to run as root, for the record (the human approving an
+# upgrade through peekexec sees this script, not the binaries).
+sha256sum "$stage/peekexec" "$stage/peekexecd" "$stage/peekexec-ui" | sed "s|$stage/||"
 # The test approver answers without a human; it must never be installed.
 if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$stage/peekexecd"; then
     echo "install.sh: $rel/peekexecd was built with the test-approver feature; refusing" >&2

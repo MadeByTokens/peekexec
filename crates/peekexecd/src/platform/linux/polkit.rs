@@ -83,6 +83,22 @@ impl SystemPrompt for Polkit {
         let start_time = subject
             .start_time
             .ok_or_else(|| PlatformError::Other("requester start time unknown".into()))?;
+        // polkit asks the agent of the subject's login session. A session
+        // the human is not sitting at (ssh, an inactive console) may have an
+        // agent of the requester's choosing.
+        let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid))
+            .map_err(|e| PlatformError::Other(format!("requester cgroup: {e}")))?;
+        if let Some(id) = session_of(&cgroup) {
+            let record =
+                std::fs::read_to_string(format!("/run/systemd/sessions/{id}")).unwrap_or_default();
+            if !active_local_session(&record, uid) {
+                return Err(PlatformError::Other(format!(
+                    "refusing: the requester runs in login session {id}, which is not your \
+                     active local session (e.g. ssh or another console). Send the request from \
+                     your desktop session"
+                )));
+            }
+        }
         let conn = zbus::blocking::Connection::system()
             .map_err(|e| PlatformError::Other(format!("system bus: {e}")))?;
         let cancellation_id = format!("peekexec-{}-{}", subject.pid, start_time);
@@ -233,6 +249,32 @@ impl Polkit {
     }
 }
 
+/// The logind session whose scope (`session-<id>.scope`) holds the
+/// process, if any. Scopes are root-owned: a process cannot move into one.
+/// Apps under `user@.service` belong to none; polkit then uses the user's
+/// display session.
+fn session_of(cgroup: &str) -> Option<String> {
+    cgroup
+        .lines()
+        .filter_map(|l| l.rsplit(':').next())
+        .flat_map(|path| path.split('/'))
+        .find_map(|part| part.strip_prefix("session-")?.strip_suffix(".scope"))
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_string)
+}
+
+/// A logind session record of `uid`'s, active and not remote.
+fn active_local_session(record: &str, uid: u32) -> bool {
+    let get = |key: &str| {
+        record
+            .lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+    };
+    get("UID") == Some(uid.to_string().as_str())
+        && get("ACTIVE") == Some("1")
+        && get("REMOTE") != Some("1")
+}
+
 fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
     match reply {
         Ok((true, _, _)) => Ok(PromptOutcome::Authorized),
@@ -249,5 +291,39 @@ fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
             Ok(PromptOutcome::Dismissed)
         }
         Err(e) => Err(PlatformError::Other(format!("polkit: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_session_scope() {
+        let cg = "0::/user.slice/user-1000.slice/session-2.scope\n";
+        assert_eq!(session_of(cg).as_deref(), Some("2"));
+        let app = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope\n";
+        assert_eq!(session_of(app), None);
+        assert_eq!(
+            session_of("0::/user.slice/user-1000.slice/session-c1.scope\n").as_deref(),
+            Some("c1")
+        );
+        assert_eq!(session_of("0::/x/session-../y.scope\n"), None);
+    }
+
+    #[test]
+    fn only_the_active_local_session_counts() {
+        let rec = "UID=1000\nACTIVE=1\nREMOTE=0\nTYPE=wayland\n";
+        assert!(active_local_session(rec, 1000));
+        assert!(!active_local_session(rec, 1001));
+        assert!(!active_local_session(
+            &rec.replace("REMOTE=0", "REMOTE=1"),
+            1000
+        ));
+        assert!(!active_local_session(
+            &rec.replace("ACTIVE=1", "ACTIVE=0"),
+            1000
+        ));
+        assert!(!active_local_session("", 1000));
     }
 }

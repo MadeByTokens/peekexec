@@ -130,8 +130,12 @@ It does not promise:
    subject: polkit allows one agent per subject, so this blocks the requester
    from registering one, while `fallback` keeps the session's agent in use.
    If the slot is already taken, peekexec refuses (tested with `pkttyagent
-   --process`). A requester with no agent in its session (e.g. over ssh)
-   gets an error. Residual risk: if the session's agent is not running (e.g.
+   --process`). Because polkit asks the agent of the requester's login
+   session, the requester must be in the user's active, local session, or in
+   none (apps under `user@.service`, where polkit uses the display session);
+   one in an ssh or inactive console session, whose agent the requester
+   could have chosen, is refused before polkit is asked. A requester with no
+   agent in its session gets an error. Residual risk: if the session's agent is not running (e.g.
    while GNOME Shell restarts), a process in that session could register a
    session agent of its own.
    Without the polkit action installed, the password falls back to the
