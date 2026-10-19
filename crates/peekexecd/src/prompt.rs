@@ -1,6 +1,8 @@
 //! Showing the dialog and turning the human's answer into a [`Decision`].
 
 use std::io::BufReader;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -27,6 +29,11 @@ pub enum Decision {
 }
 
 pub const ATTEMPTS: u8 = 3;
+
+/// close_range(2): mark the range close-on-exec instead of closing it, so
+/// std's own exec-error pipe keeps working.
+#[cfg(target_os = "linux")]
+const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
 
 pub struct Dialog {
     pub program: PathBuf,
@@ -59,13 +66,34 @@ pub fn ask(
     approver: &Approver,
     cancel: &AtomicBool,
 ) -> Result<Decision, String> {
+    // A socket, not pipes: until the dialog makes itself non-dumpable, other
+    // programs of the user may open /proc/<pid>/fd/N, and a pipe opened that
+    // way can be read from later (the password goes through it). A socket
+    // cannot be opened through /proc.
+    let (mut conn, theirs) =
+        UnixStream::pair().map_err(|e| format!("cannot create the dialog socket: {e}"))?;
+    let theirs_out = theirs
+        .try_clone()
+        .map_err(|e| format!("cannot create the dialog socket: {e}"))?;
     let mut cmd = Command::new(&dialog.program);
     cmd.env_clear()
         .envs(display.vars.iter().map(|(k, v)| (k, v)))
         .env("LANG", "C.UTF-8")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+        // Not the daemon's own stderr: under systemd that is the journal,
+        // where the dialog's lines would pass for the daemon's (audit) ones.
+        .stderr(Stdio::piped());
+    // SAFETY: a single raw syscall; failure (old kernel) is ignored.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        cmd.pre_exec(|| {
+            // Nothing but stdio reaches the dialog, whatever another
+            // thread had open without O_CLOEXEC.
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
+            Ok(())
+        });
+    }
     if let Some((uid, gid)) = dialog.run_as {
         // Drop root completely and explicitly: no supplementary groups (root's
         // group 0 must not leak), then the gid, then the uid, then make sure
@@ -89,12 +117,23 @@ pub fn ask(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start dialog {}: {e}", dialog.program.display()))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    let stdout = child.stdout.take().expect("piped");
+    // The child holds its own copies now.
+    drop(cmd);
+    let stderr = child.stderr.take().expect("piped");
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let line: String = line.chars().take(500).collect();
+            eprintln!("peekexecd: dialog stderr: {line:?}");
+        }
+    });
+    let reader = conn
+        .try_clone()
+        .map_err(|e| format!("cannot read from the dialog: {e}"))?;
 
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut r = BufReader::new(stdout);
+        let mut r = BufReader::new(reader);
         while let Ok(Some(msg)) = read_msg::<_, FromUi>(&mut r) {
             if tx.send(msg).is_err() {
                 break;
@@ -105,10 +144,11 @@ pub fn ask(
     let show = ToUi::Show {
         view: Box::new(view.clone()),
     };
-    let answer = write_msg(&mut stdin, &show)
-        .map(|()| wait_for_answer(&rx, &mut stdin, view, approver, cancel))
+    let answer = write_msg(&mut conn, &show)
+        .map(|()| wait_for_answer(&rx, &mut conn, view, approver, cancel))
         .map_err(|e| format!("dialog did not accept the request: {e}"));
-    drop(stdin); // the dialog exits when its stdin closes
+    // The dialog exits when its stdin reaches end of file.
+    let _ = conn.shutdown(std::net::Shutdown::Write);
     let _ = child.kill();
     let status = child.wait();
     match answer? {
@@ -126,7 +166,7 @@ pub fn ask(
 /// `None` if the dialog disconnected without answering.
 fn wait_for_answer(
     rx: &mpsc::Receiver<FromUi>,
-    stdin: &mut std::process::ChildStdin,
+    stdin: &mut UnixStream,
     view: &PromptView,
     approver: &Approver,
     cancel: &AtomicBool,

@@ -52,7 +52,7 @@ pub fn verified_x_server(uid: u32) -> Option<XServer> {
         let Some(session) = sessions.iter().find(|s| in_scope(&cgroup, &s.scope)) else {
             continue;
         };
-        let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
+        let Some(exe) = super::peer::exe_of(pid).map(std::path::PathBuf::from) else {
             continue;
         };
         if exe.file_name().and_then(|n| n.to_str()) != Some("Xorg")

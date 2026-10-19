@@ -43,7 +43,10 @@ It does not promise:
    anything. The connecting process is pinned with a pidfd (Linux 6.5+), which
    proves the pid was not reused, not that the process did not exec something
    else. Ancestors are best effort. Processes whose executable is not
-   root-owned are marked.
+   root-owned are marked. The executable path the kernel reports is the one
+   the process sees, which in another mount namespace can name any file, so
+   it counts only if it is the very file (device and inode) at that path in
+   the daemon's view; otherwise it is marked "not the file at this path".
 
    **Registered agent sessions** make "is this from my agent?" checkable. The
    human approves a registration once (password, like any request); it pins
@@ -72,7 +75,9 @@ It does not promise:
      alphanumeric extension), so no part of the interpreter's arguments comes
      from the requester; the caller's file is never re-read.
    - `run` resolves argv[0] in a fixed system PATH and requires the program and
-     every directory above it to be root-owned and not writable by others. A
+     every directory above it to be root-owned and not writable by others, and
+     not on a nosuid mount: removable media, disk images and FUSE mounted for
+     a user are nosuid, and their files may claim any owner. A
      script's `#!` interpreter is held to the same rule, and may receive only
      flags allowlisted for that interpreter (`-e` is harmless to sh but means
      "run this code" to perl or awk).
@@ -91,8 +96,12 @@ It does not promise:
      written atomically (temp file and rename). Symlinks, directories and
      hard-linked targets are refused, and setuid, setgid and sticky bits are
      never carried over.
-3. **Daemon → dialog.** The approval and `deny_reason` travel over pipes the
-   requester cannot write to directly. An Approve click is always required
+3. **Daemon → dialog.** The approval and `deny_reason` travel over a socket
+   pair the requester cannot write to directly; not pipes, because until the
+   dialog makes itself non-dumpable other programs of the user may open
+   `/proc/<pid>/fd/N`, and a pipe opened that way can be read later. The
+   dialog inherits no other descriptors, and its stderr reaches the log
+   labelled as the dialog's. An Approve click is always required
    before PAM runs, so a PAM stack that succeeds without a password still
    cannot skip the human. PAM prompts the dialog cannot answer (a username, an
    OTP code) fail closed.

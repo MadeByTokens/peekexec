@@ -153,6 +153,27 @@ fn readlink(pid: u32, what: &str) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Appended to an executable path that names some other file here.
+pub const NOT_THIS_FILE: &str = " (not the file at this path)";
+
+/// The executable of `pid`, as a path in the daemon's own view of the
+/// filesystem. The kernel prints the path as the process sees it: in another
+/// mount namespace a bind mount can put any file at `/usr/bin/bash`. So the
+/// path is accepted only if it names the very file the process runs (same
+/// device and inode); otherwise it is marked, and no trust check passes.
+pub fn exe_of(pid: u32) -> Option<String> {
+    let path = readlink(pid, "exe")?;
+    let running = std::fs::metadata(format!("/proc/{pid}/exe")).ok();
+    let here = std::fs::metadata(&path).ok();
+    let same =
+        matches!((running, here), (Some(a), Some(b)) if a.dev() == b.dev() && a.ino() == b.ino());
+    Some(if same {
+        path
+    } else {
+        format!("{path}{NOT_THIS_FILE}")
+    })
+}
+
 fn process_info(pid: u32) -> ProcessInfo {
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map(|raw| {
@@ -164,7 +185,7 @@ fn process_info(pid: u32) -> ProcessInfo {
         .unwrap_or_default();
     ProcessInfo {
         pid,
-        exe: readlink(pid, "exe"),
+        exe: exe_of(pid),
         cmdline,
         start_time: start_time_of(pid),
     }
@@ -234,5 +255,39 @@ mod tests {
     fn reads_own_environ() {
         let env = ProcPeerInfo.environ(std::process::id()).unwrap();
         assert!(env.iter().any(|(k, _)| k == "PATH"));
+    }
+
+    #[test]
+    fn exe_path_must_name_the_running_file() {
+        let me = exe_of(std::process::id()).unwrap();
+        assert!(!me.ends_with(NOT_THIS_FILE), "{me}");
+
+        // In its own mount namespace a process can put another file at a
+        // system path; the kernel then reports that path as its executable.
+        let dir = std::env::temp_dir().join(format!("pe-exe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let copy = dir.join("sleep");
+        std::fs::copy("/bin/sleep", &copy).unwrap();
+        let script = format!(
+            "mount --bind {} /bin/sleep && exec /bin/sleep 5",
+            copy.display()
+        );
+        let mut child = std::process::Command::new("unshare")
+            .args(["-Urm", "sh", "-c", &script])
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let exe = exe_of(child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(&dir).unwrap();
+        match exe {
+            Some(e) if e.starts_with("/bin/sleep") || e.starts_with("/usr/bin/sleep") => {
+                assert!(e.ends_with(NOT_THIS_FILE), "{e}");
+            }
+            // No unprivileged user namespaces here (e.g. AppArmor-restricted).
+            other => eprintln!("skipped: no namespace sandbox ({other:?})"),
+        }
     }
 }

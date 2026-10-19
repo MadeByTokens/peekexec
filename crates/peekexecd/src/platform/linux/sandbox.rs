@@ -60,6 +60,9 @@ impl Sandbox for Namespaces {
                     }
                 }
                 libc::umask(0o022);
+                // Only stdio is inherited: mark every other descriptor
+                // close-on-exec (CLOSE_RANGE_CLOEXEC; ignored if unsupported).
+                libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2);
                 if let Some(uid) = &loginuid {
                     let fd = libc::open(c"/proc/self/loginuid".as_ptr(), libc::O_WRONLY);
                     if fd >= 0 {

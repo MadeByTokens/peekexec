@@ -35,8 +35,8 @@ interfaces, each with a `SAFETY:` comment:
 | `crates/peekexecd/src/exec.rs` | 3 | `waitid(WNOWAIT)`, `killpg` |
 | `crates/peekexec-ui/src/main.rs` | 3 | `prctl(PR_SET_DUMPABLE)`, euid/egid check, zeroing the password buffer |
 | `crates/peekexecd/src/platform/linux/mod.rs` | 2 | adopting the systemd socket (fd 3), `FD_CLOEXEC` |
-| `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `loginuid`, `unshare(CLONE_NEWNET)` |
-| `crates/peekexecd/src/prompt.rs` | 1 | `pre_exec` for the dialog: `setgroups`, `setgid`, `setuid` |
+| `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `close_range`, `loginuid`, `unshare(CLONE_NEWNET)` |
+| `crates/peekexecd/src/prompt.rs` | 2 | `pre_exec` for the dialog: `close_range`, `setgroups`, `setgid`, `setuid` |
 | `crates/peekexecd/src/server.rs` | 2 | `localtime_r` (time shown on agent sessions) |
 | `crates/peekexecd/src/trust.rs` | 1 | `getxattr` (does a file have a POSIX ACL) |
 

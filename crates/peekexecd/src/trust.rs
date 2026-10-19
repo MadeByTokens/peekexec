@@ -40,6 +40,14 @@ pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
                 m.uid()
             ));
         }
+        if on_nosuid_mount(p) {
+            return Err(format!(
+                "{} is on a filesystem mounted nosuid (removable media, a disk image or FUSE \
+                 mounted for a user): whoever mounted it controls its files, whatever owner \
+                 they show",
+                p.display()
+            ));
+        }
         let mode = m.permissions().mode();
         let sticky_dir = !leaf && m.is_dir() && mode & S_ISVTX != 0;
         if mode & 0o022 != 0 && !sticky_dir {
@@ -72,6 +80,15 @@ pub fn resolve_program(name: &str, cwd: &str, owners: &[u32]) -> Result<PathBuf,
     check(&candidate, owners).map_err(|e| {
         format!("{e}. To run a file you own, use `peekexec script`, which snapshots it")
     })
+}
+
+/// Mounts made for users (udisks for removable media and disk images,
+/// FUSE) are always nosuid, and the kernel itself refuses to trust setuid
+/// files there. Their files may claim any owner, so ownership proves
+/// nothing. Unknown (statvfs failed) counts as nosuid.
+fn on_nosuid_mount(p: &Path) -> bool {
+    use nix::sys::statvfs::{statvfs, FsFlags};
+    statvfs(p).map_or(true, |s| s.flags().contains(FsFlags::ST_NOSUID))
 }
 
 /// Whether `uid` (with `groups`) could read `path` itself, judged from the
@@ -165,5 +182,41 @@ mod tests {
     fn missing_programs_are_reported() {
         let err = resolve_program("no-such-tool-zz", "/", &[0]).unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn nosuid_mounts_are_not_trusted() {
+        // /run is a nosuid tmpfs on systemd systems; files on such mounts
+        // (removable media, disk images, FUSE) may claim any owner.
+        let run = Path::new("/run");
+        if !on_nosuid_mount(run) {
+            eprintln!("skipped: /run is not mounted nosuid here");
+            return;
+        }
+        let err = check(run, &[0]).unwrap_err();
+        assert!(err.contains("nosuid"), "{err}");
+        assert!(!on_nosuid_mount(Path::new("/usr/bin")));
+    }
+
+    #[test]
+    fn readability_follows_mode_bits() {
+        let dir = std::env::temp_dir().join(format!("pe-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("f");
+        std::fs::write(&f, "x").unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        let set = |m| std::fs::set_permissions(&f, std::fs::Permissions::from_mode(m)).unwrap();
+        set(0o600);
+        assert!(readable_by(&f, me, &[gid]));
+        assert!(!readable_by(&f, me + 1, &[gid]));
+        set(0o640);
+        assert!(readable_by(&f, me + 1, &[gid]));
+        assert!(!readable_by(&f, me + 1, &[gid + 1]));
+        set(0o604);
+        assert!(readable_by(&f, me + 1, &[gid + 1]));
+        set(0o000);
+        assert!(!readable_by(&f, me, &[gid]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
