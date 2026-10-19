@@ -26,6 +26,37 @@ It does not promise:
 - containment: `--write` is declared only, `--no-net` is best effort;
 - protection from a malicious program running as the same user on X11.
 
+## Design rules
+
+Every change is held to these. They are the classic principles of Saltzer
+and Schroeder (*The Protection of Information in Computer Systems*, 1975),
+stated for peekexec, with the kernel interfaces made for them. Reviews go
+through [docs/review-checklist.md](docs/review-checklist.md): every input
+the requester controls, against every place the daemon uses it.
+
+1. **Before approval, the requester's authority, not root's** (least
+   privilege; the confused deputy). Whatever the daemon looks at before a
+   human approves, it looks at with the requesting user's credentials, in a
+   helper with `no_new_privs`, so the kernel decides what may be learned.
+2. **Objects, not names** (complete mediation). Hold what was checked (a
+   descriptor, an inode, a pidfd) and use that, never a path or pid looked
+   up again later.
+3. **Requester bytes are data, never structure.** They go into one argv
+   slot or one file verbatim, or are shown through one escaping function;
+   they never become part of a path, a command line or a line of the
+   dialog.
+4. **What is shown is complete, or says what it leaves out.**
+5. **Every process started gets an explicit allowlist** of descriptors,
+   environment and credentials, and cannot gain privilege by exec
+   (`no_new_privs`) unless it is the approved command.
+6. **Do what a careful administrator would do**: keep owners, modes and
+   labels, finish, and report.
+7. **Economy of mechanism.** Every feature that runs as root before
+   approval must earn its place; fewer is safer.
+
+Allowlists decide (environment, `#!` flags); denylists only warn (sensitive
+paths). When a check cannot be made, the answer is no (fail-safe defaults).
+
 ## Actors
 
 | Actor | Trust |
