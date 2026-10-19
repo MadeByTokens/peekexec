@@ -536,6 +536,24 @@ pub fn read_as_shown(content: &[u8], zip: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// The parts of an argument that may name a path: the argument itself,
+/// the value of `-Xvalue`, and every absolute path after a separator
+/// (`--opt=/p`, `-v /a:/b`, `host:/p`, `file:///p`, `@/p`), up to the next
+/// `:` or `,`.
+fn path_candidates(a: &str) -> Vec<&str> {
+    let mut out = vec![a];
+    if a.starts_with('-') && !a.starts_with("--") {
+        out.extend(a.get(2..).filter(|v| !v.is_empty()));
+    }
+    for (i, c) in a.char_indices() {
+        if c == '/' && (i == 0 || a[..i].ends_with(['=', ':', '@', ','])) {
+            let rest = &a[i..];
+            out.push(&rest[..rest.find([':', ',']).unwrap_or(rest.len())]);
+        }
+    }
+    out
+}
+
 /// The encoding a line declares, by CPython's own scan of the raw bytes
 /// (`^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`, ASCII word characters). Not
 /// decoded first: CPython reads the cookie even on a line that is not
@@ -569,18 +587,28 @@ fn coding_cookie(line: &[u8]) -> Option<String> {
 /// but its content is not shown and can change after approval. One note
 /// for all of them.
 fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
-    let mut hits = Vec::new();
-    for a in args {
-        let value = match a.split_once('=') {
-            Some((_, v)) => v,
-            None if a.starts_with('-') => a.find('/').map_or("", |i| &a[i..]),
-            None => a,
-        };
-        if !value.contains('/') {
+    let mut hits: Vec<&str> = Vec::new();
+    for value in args.iter().flat_map(|a| path_candidates(a)) {
+        if !value.contains('/') || hits.contains(&value) {
             continue;
         }
         let path = Path::new(cwd).join(value);
-        if trust::check_named(&path, owners).is_err() && !hits.contains(&value) {
+        // The process's own descriptors and /proc entry: the program's
+        // own, whatever the helper (running as the user) would see there.
+        let own = [
+            "/dev/fd",
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+            "/proc/self",
+            "/proc/thread-self",
+        ]
+        .iter()
+        .any(|p| path.starts_with(p))
+            && !path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir);
+        if !own && trust::check_named(&path, owners).is_err() {
             hits.push(value);
         }
     }
@@ -797,6 +825,9 @@ mod tests {
             "/proc/cpuinfo",
             "/dev/null",
             "/usr/share",
+            "/dev/stdout",
+            "/proc/self/status",
+            "/dev/fd/3",
         ];
         let system: Vec<String> = system.map(String::from).to_vec();
         assert!(untrusted_file_args(&system, "/", &[0]).is_none());
@@ -804,6 +835,13 @@ mod tests {
         let link = dir.join("link");
         std::os::unix::fs::symlink("/bin/true", &link).unwrap();
         for a in [
+            format!("{s}:/data"),
+            format!("localhost:{s}"),
+            format!("file://{s}"),
+            format!("git+file://{s}"),
+            format!("@{s}"),
+            format!("-C{}", &s[1..]),
+            format!("/dev/fd/../..{s}"),
             dir.join("later.sh").to_str().unwrap().to_string(),
             dir.to_str().unwrap().to_string(),
             link.to_str().unwrap().to_string(),
