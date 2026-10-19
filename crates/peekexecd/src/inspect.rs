@@ -17,9 +17,8 @@ use std::io::{BufReader, IoSlice, IoSliceMut, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use peekexec_core::{Action, Request};
@@ -27,6 +26,7 @@ use peekexec_proto::wire::{read_msg, write_msg};
 use serde::{Deserialize, Serialize};
 
 use crate::prepare::display_line;
+use crate::spawn::{self, Spec};
 use crate::trust;
 
 /// argv[1] that makes `peekexecd` act as the inspection helper.
@@ -78,12 +78,7 @@ pub struct Existing {
     pub content: Result<Vec<u8>, String>,
 }
 
-/// Credentials the helper runs with.
-pub struct Creds {
-    pub uid: u32,
-    pub gid: u32,
-    pub groups: Vec<u32>,
-}
+pub use crate::spawn::Creds;
 
 /// Inspect `req` with this process's own authority. `owners` are the uids
 /// whose files count as root-controlled (the daemon's, not this process's).
@@ -152,39 +147,16 @@ pub fn inspect_as(
     let fail = |e: std::io::Error| format!("cannot start the inspection helper: {e}");
     let (mut conn, theirs) = UnixStream::pair().map_err(fail)?;
     let theirs_out = theirs.try_clone().map_err(fail)?;
-    let mut cmd = Command::new(helper);
-    cmd.arg(HELPER_ARG)
-        .env_clear()
-        .env("LANG", "C.UTF-8")
-        .stdin(Stdio::from(OwnedFd::from(theirs)))
-        .stdout(Stdio::from(OwnedFd::from(theirs_out)))
-        .stderr(Stdio::null());
-    let creds: Option<(libc::uid_t, libc::gid_t, Vec<libc::gid_t>)> =
-        creds.map(|c| (c.uid, c.gid, c.groups.clone()));
-    // SAFETY: only async-signal-safe libc calls on data prepared before the
-    // fork; no allocation.
-    unsafe {
-        cmd.pre_exec(move || {
-            #[cfg(target_os = "linux")]
-            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2);
-            if let Some((uid, gid, groups)) = &creds {
-                if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
-                    || libc::setgid(*gid) != 0
-                    || libc::setuid(*uid) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if *uid != 0 && libc::setuid(0) == 0 {
-                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
-                }
-            }
-            #[cfg(target_os = "linux")]
-            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    let mut cmd = spawn::command(Spec {
+        program: helper,
+        args: &[HELPER_ARG.into()],
+        env: &[("LANG".into(), "C.UTF-8".into())],
+        stdin: Stdio::from(OwnedFd::from(theirs)),
+        stdout: Stdio::from(OwnedFd::from(theirs_out)),
+        stderr: Stdio::null(),
+        creds: creds.cloned(),
+        no_new_privs: true,
+    });
     let mut child = cmd.spawn().map_err(fail)?;
     // The child holds its own copies of its ends now.
     drop(cmd);

@@ -3,9 +3,8 @@
 use std::io::BufReader;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -16,6 +15,7 @@ use peekexec_proto::wire::{read_msg, write_msg};
 
 use crate::platform::{Authenticator, ProcessInfo, PromptOutcome, SystemPrompt};
 use crate::session::Display;
+use crate::spawn::{self, Creds, Spec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -29,11 +29,6 @@ pub enum Decision {
 }
 
 pub const ATTEMPTS: u8 = 3;
-
-/// close_range(2): mark the range close-on-exec instead of closing it, so
-/// std's own exec-error pipe keeps working.
-#[cfg(target_os = "linux")]
-const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
 
 pub struct Dialog {
     pub program: PathBuf,
@@ -75,45 +70,26 @@ pub fn ask(
     let theirs_out = theirs
         .try_clone()
         .map_err(|e| format!("cannot create the dialog socket: {e}"))?;
-    let mut cmd = Command::new(&dialog.program);
-    cmd.env_clear()
-        .envs(display.vars.iter().map(|(k, v)| (k, v)))
-        .env("LANG", "C.UTF-8")
-        .stdin(Stdio::from(OwnedFd::from(theirs)))
-        .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+    let mut env = display.vars.clone();
+    env.push(("LANG".into(), "C.UTF-8".into()));
+    let mut cmd = spawn::command(Spec {
+        program: &dialog.program,
+        args: &[],
+        env: &env,
+        stdin: Stdio::from(OwnedFd::from(theirs)),
+        stdout: Stdio::from(OwnedFd::from(theirs_out)),
         // Not the daemon's own stderr: under systemd that is the journal,
         // where the dialog's lines would pass for the daemon's (audit) ones.
-        .stderr(Stdio::piped());
-    // SAFETY: a single raw syscall; failure (old kernel) is ignored.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        cmd.pre_exec(|| {
-            // Nothing but stdio reaches the dialog, whatever another
-            // thread had open without O_CLOEXEC.
-            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
-            Ok(())
-        });
-    }
-    if let Some((uid, gid)) = dialog.run_as {
-        // Drop root completely and explicitly: no supplementary groups (root's
-        // group 0 must not leak), then the gid, then the uid, then make sure
-        // root cannot be regained. Not left to std's uid()/gid() internals.
-        // SAFETY: only async-signal-safe libc calls, no allocation.
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::setgroups(0, std::ptr::null()) != 0
-                    || libc::setgid(gid) != 0
-                    || libc::setuid(uid) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setuid(0) == 0 || libc::getegid() != gid {
-                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
-                }
-                Ok(())
-            });
-        }
-    }
+        stderr: Stdio::piped(),
+        // The human's own uid and gid, and no supplementary groups: root's
+        // group 0 must not leak.
+        creds: dialog.run_as.map(|(uid, gid)| Creds {
+            uid,
+            gid,
+            groups: Vec::new(),
+        }),
+        no_new_privs: true,
+    });
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("cannot start dialog {}: {e}", dialog.program.display()))?;

@@ -1,6 +1,6 @@
 //! The daemon ⇄ dialog channel, with a stand-in dialog script: the view
 //! arrives, the answer comes back, and the dialog gets nothing but stdio,
-//! on descriptors that cannot be reopened through /proc.
+//! on descriptors that cannot be reopened through /proc, with no_new_privs.
 
 #![cfg(target_os = "linux")]
 
@@ -32,9 +32,10 @@ const FAKE_DIALOG: &str = r#"#!/bin/sh
 read -r line
 case "$line" in *'"msg":"show"'*) show=yes ;; *) show=no ;; esac
 if ( : < /proc/self/fd/0 ) 2>/dev/null; then reopen=yes; else reopen=no; fi
+nnp=$(grep NoNewPrivs /proc/self/status | tr -dc 0-9)
 fds=$(ls /proc/self/fd | tr '\n' ' ')
 echo "a line for the log" >&2
-printf '{"msg":"deny","reason":"show=%s reopen=%s fds=%s"}\n' "$show" "$reopen" "$fds"
+printf '{"msg":"deny","reason":"show=%s reopen=%s nnp=%s fds=%s"}\n' "$show" "$reopen" "$nnp" "$fds"
 cat > /dev/null
 "#;
 
@@ -114,6 +115,7 @@ fn dialog_channel_is_a_socket_with_only_stdio() {
         panic!("{decision:?}")
     };
     assert!(reason.contains("show=yes"), "{reason}");
+    assert!(reason.contains("nnp=1"), "no_new_privs not set: {reason}");
     assert!(
         reason.contains("reopen=no"),
         "stdin reopened via /proc: {reason}"

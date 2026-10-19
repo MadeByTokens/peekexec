@@ -1,10 +1,12 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::{Child, Stdio};
 
 use peekexec_proto::{Enforced, Level};
 
 use crate::platform::{declared_only, ExecPlan, PlatformError, Sandbox};
+use crate::spawn::{self, Spec};
 
 /// `--no-net` via a fresh network namespace (root only). That stops a
 /// well-behaved program from using the network, but it is not containment:
@@ -28,17 +30,26 @@ impl Sandbox for Namespaces {
     }
 
     fn spawn(&self, plan: &ExecPlan) -> Result<Child, PlatformError> {
-        let mut cmd = Command::new(&plan.program);
+        let env: Vec<(String, String)> = plan
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut cmd = spawn::command(Spec {
+            program: Path::new(&plan.program),
+            args: plan.argv.get(1..).unwrap_or_default(),
+            env: &env,
+            stdin: Stdio::null(),
+            stdout: Stdio::piped(),
+            stderr: Stdio::piped(),
+            // The approved command runs as root, and may run setuid tools.
+            creds: None,
+            no_new_privs: false,
+        });
         if let Some(arg0) = plan.argv.first() {
             cmd.arg0(arg0);
         }
-        cmd.args(plan.argv.iter().skip(1))
-            .env_clear()
-            .envs(&plan.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0);
+        cmd.process_group(0);
         let dir_fd = plan.cwd_fd.as_ref().map(|fd| fd.as_raw_fd());
         if dir_fd.is_none() {
             cmd.current_dir(&plan.cwd);
@@ -60,9 +71,6 @@ impl Sandbox for Namespaces {
                     }
                 }
                 libc::umask(0o022);
-                // Only stdio is inherited: mark every other descriptor
-                // close-on-exec (CLOSE_RANGE_CLOEXEC; ignored if unsupported).
-                libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2);
                 if let Some(uid) = &loginuid {
                     let fd = libc::open(c"/proc/self/loginuid".as_ptr(), libc::O_WRONLY);
                     if fd >= 0 {

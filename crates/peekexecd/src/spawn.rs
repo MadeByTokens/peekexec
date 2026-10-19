@@ -1,0 +1,83 @@
+//! Starting processes (design rule 5): every process the daemon starts gets
+//! an explicit environment, explicit stdio, no other descriptors, and, when
+//! it runs as someone else, credentials dropped for good. Callers add their
+//! own `pre_exec` steps after these.
+
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::process::{Command, Stdio};
+
+/// The user a process is started as.
+#[derive(Debug, Clone)]
+pub struct Creds {
+    pub uid: u32,
+    pub gid: u32,
+    /// Supplementary groups; empty for none.
+    pub groups: Vec<u32>,
+}
+
+/// Everything about a process that is not left to inheritance.
+pub struct Spec<'a> {
+    pub program: &'a Path,
+    pub args: &'a [String],
+    /// The whole environment: nothing is inherited.
+    pub env: &'a [(String, String)],
+    pub stdin: Stdio,
+    pub stdout: Stdio,
+    pub stderr: Stdio,
+    /// Run as this user (from root), or unchanged.
+    pub creds: Option<Creds>,
+    /// `no_new_privs`: exec can never grant more privilege. For everything
+    /// but the approved command, which may legitimately run setuid tools.
+    pub no_new_privs: bool,
+}
+
+/// close_range(2) flag: mark the range close-on-exec instead of closing it,
+/// so std's own exec-error pipe keeps working.
+#[cfg(target_os = "linux")]
+const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+
+/// A [`Command`] set up from `spec`.
+pub fn command(spec: Spec) -> Command {
+    let mut cmd = Command::new(spec.program);
+    cmd.args(spec.args)
+        .env_clear()
+        .envs(spec.env.iter().map(|(k, v)| (k, v)))
+        .stdin(spec.stdin)
+        .stdout(spec.stdout)
+        .stderr(spec.stderr);
+    let creds = spec.creds.map(|c| {
+        let groups: Vec<libc::gid_t> = c.groups.clone();
+        (c.uid as libc::uid_t, c.gid as libc::gid_t, groups)
+    });
+    let no_new_privs = spec.no_new_privs;
+    // SAFETY: only async-signal-safe libc calls on data prepared before the
+    // fork; no allocation.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Nothing but stdio reaches the program, whatever another
+            // thread had open without O_CLOEXEC. Ignored if unsupported.
+            #[cfg(target_os = "linux")]
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
+            if let Some((uid, gid, groups)) = &creds {
+                // Groups first (root's group 0 must not leak), then gid,
+                // then uid; then make sure none of it can be undone.
+                if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
+                    || libc::setgid(*gid) != 0
+                    || libc::setuid(*uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getegid() != *gid || (*uid != 0 && libc::setuid(0) == 0) {
+                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd
+}

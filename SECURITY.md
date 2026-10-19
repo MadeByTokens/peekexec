@@ -35,10 +35,10 @@ interfaces, each with a `SAFETY:` comment:
 | `crates/peekexecd/src/exec.rs` | 6 | `waitid(WNOWAIT)`, `killpg`, `poll` (output reader), `getxattr`/`fsetxattr` (an installed file keeps its SELinux label and ACL) |
 | `crates/peekexec-ui/src/main.rs` | 3 | `prctl(PR_SET_DUMPABLE)`, euid/egid check, zeroing the password buffer |
 | `crates/peekexecd/src/platform/linux/mod.rs` | 2 | adopting the systemd socket (fd 3), `FD_CLOEXEC` |
-| `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `close_range`, `loginuid`, `unshare(CLONE_NEWNET)` |
-| `crates/peekexecd/src/prompt.rs` | 2 | `pre_exec` for the dialog: `close_range`, `setgroups`, `setgid`, `setuid` |
+| `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec` for approved commands: `fchdir`, `umask`, `loginuid`, `unshare(CLONE_NEWNET)` |
+| `crates/peekexecd/src/spawn.rs` | 1 | `pre_exec` for every process the daemon starts: `close_range`, `setgroups`/`setgid`/`setuid` and the check they cannot be undone, `PR_SET_NO_NEW_PRIVS` |
 | `crates/peekexecd/src/server.rs` | 2 | `localtime_r` (time shown on agent sessions) |
-| `crates/peekexecd/src/inspect.rs` | 4 | `pre_exec` for the inspection helper (`close_range`, `setgroups`/`setgid`/`setuid`, `PR_SET_NO_NEW_PRIVS`); adopting the descriptor received with `SCM_RIGHTS`; the helper adopting its socket (fd 0) and making itself non-dumpable |
+| `crates/peekexecd/src/inspect.rs` | 3 | adopting the descriptor received with `SCM_RIGHTS`; the helper adopting its socket (fd 0) and making itself non-dumpable |
 
 ## Release integrity
 

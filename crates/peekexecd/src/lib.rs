@@ -12,4 +12,5 @@ pub mod prompt;
 pub mod server;
 pub mod session;
 pub mod sessions;
+pub mod spawn;
 pub mod trust;

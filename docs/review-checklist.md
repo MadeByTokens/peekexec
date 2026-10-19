@@ -51,9 +51,9 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
 | Its own polkit agents, other login sessions | Show (Wayland): guard agent holds the subject's slot; subject must be in the active local session or none (✓) | ✓ |
 | A nested or relaying display server | Show: X11 verified through logind and the Xorg process; otherwise unverified, password goes to the desktop's prompt (✓) | ✓ |
-| Timing: dialog start-up | /proc reopening defeated by a socket pair (✓); ⚠ no `no_new_privs` on the dialog → (d) | ⚠ |
+| Timing: dialog start-up | /proc reopening defeated by a socket pair; started through `spawn::command` with `no_new_privs`, only stdio, credentials dropped for good (✓) | ✓ |
 | Timing: between showing and running | R2: cwd by descriptor, snapshot by copy (✓); program and install target by path → (b) | ⚠ |
-| Timing: pid reuse | pidfds for the requester and agents (✓); ⚠ approved command tracked by pid → (d) | ⚠ |
+| Timing: pid reuse | pidfds for the requester and agents. The approved command stays unreaped (`waitid(WNOWAIT)`) until its group is killed, which is exactly the condition `pidfd_open(2)` gives for a pid that cannot be reused, so a pidfd would add nothing (R7) (✓) | ✓ |
 | Processes the approved command starts | killed with its process group; detached ones cannot hold the request (✓) | ✓ |
 | The inspection helper's answer (it runs as the user) | Pre: program, interpreter and install directory re-checked as root; destination must be the requested one; descriptor must be the directory shown; cwd warning recomputed; failures are generic (✓). The helper is non-dumpable from exec (binary mode 0711) and by `prctl` (✓). Residual: with ptrace_scope 0 (already noted in the dialog) a tampered helper could misstate an existing file's old content; the new content is always shown in full | ✓ |
 | Panics it can trigger | release builds abort; socket activation restarts (✓) | ✓ |
@@ -68,5 +68,8 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
   (`execveat`), write through the directory descriptor. R2 by construction.
 - **(c)** A text type for everything shown, constructible only by escaping.
   R3 by construction.
-- **(d)** One spawn helper: explicit descriptors, environment and
-  credentials, `no_new_privs`, `CLONE_PIDFD`. R5 by construction.
+- **(d)** Done: `crates/peekexecd/src/spawn.rs` starts every process
+  (dialog, inspection helper, approved command) with an explicit
+  environment and stdio, no other descriptors, verified credential drops,
+  and `no_new_privs` for all but the approved command. R5 by construction.
+  No `CLONE_PIDFD`: see the pid-reuse row.
