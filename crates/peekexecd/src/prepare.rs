@@ -1108,7 +1108,10 @@ mod tests {
         let m = system_prompt_message(&prepare_for_tests(&r).view);
         assert!(m.contains("g⟨U+0456⟩thub"), "{m}");
         assert!(m.contains("a⟨U+E0041⟩b"), "{m}");
-        assert!(m.contains("⟨3000 spaces⟩") && m.contains("rm -rf /x"), "{m}");
+        assert!(
+            m.contains("⟨3000 spaces⟩") && m.contains("rm -rf /x"),
+            "{m}"
+        );
         assert!(m.contains("suspicious character"), "{m}");
         assert!(!m.contains('\u{456}') && !m.contains('\u{E0041}'));
     }

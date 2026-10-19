@@ -76,9 +76,10 @@ the requester controls, against every place the daemon uses it.
    collapsed into a visible marker, and lists are bounded.
 5. **Every process started gets an explicit allowlist** of descriptors,
    environment and credentials, and cannot gain privilege by exec
-   (`no_new_privs`) unless it is the approved command. If the allowlist
-   cannot be enforced (an old kernel without `close_range`), the process
-   is not started.
+   (`no_new_privs`) unless it is the approved command. Descriptors are
+   marked close-on-exec with `close_range`, or one by one up to the
+   descriptor limit on a kernel without it; if that fails, the process is
+   not started.
 6. **Do what a careful administrator would do**: keep owners, modes and
    labels, finish, and report.
 7. **Economy of mechanism.** Every feature that runs as root before
@@ -286,6 +287,13 @@ is the requester's.
 ## Out of scope
 
 - A malicious root, kernel, or display server.
+- Lying to the agent about what happened. Whatever sets the agent's
+  environment or PATH (a `.envrc`, a Makefile, a prompt injection) can put
+  another `peekexec` first in PATH, or name another socket in
+  `PEEKEXEC_SOCKET`, and forge any answer, a `deny_reason` included. The
+  second is caught: the client checks that the daemon runs as root and
+  otherwise reports `dev_mode: true`. The first is not. Neither gets root:
+  that still takes the human.
 - Physical attacks on an unlocked machine.
 - Judging whether an approved command is a good idea.
 - Windows (UAC already provides an elevation prompt; out of scope).

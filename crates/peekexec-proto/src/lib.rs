@@ -138,8 +138,9 @@ pub struct Response {
     pub stdout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
-    /// The human's message to you. Delivered by the root daemon; it cannot
-    /// be forged by other processes.
+    /// The human's message to you, delivered by the root daemon (unless
+    /// `dev_mode` is true). As trustworthy as the dialog it was typed into:
+    /// see `display_verified`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,8 +151,10 @@ pub struct Response {
     /// user's could have been relaying the dialog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_verified: Option<bool>,
-    /// True when the daemon runs in development mode: the command ran as
-    /// the requesting user, not as root.
+    /// True when the daemon that answered does not run as root (development
+    /// mode, or a program posing as peekexecd on a socket named by
+    /// PEEKEXEC_SOCKET; the client checks the daemon's uid): nothing ran as
+    /// root, and the status and `deny_reason` are not the human's.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dev_mode: bool,
     /// The agent session id (register).

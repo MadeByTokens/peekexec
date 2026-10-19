@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 clap.workspace = true
+nix.workspace = true
 peekexec-core.workspace = true
 peekexec-proto.workspace = true
 schemars.workspace = true

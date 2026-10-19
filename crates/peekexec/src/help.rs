@@ -37,7 +37,8 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    {"status":"pending","request_id":"r-7f3a"}  {"status":"error","error":"..."}
    Full JSON Schema: peekexec help schema
 
-3. deny_reason is a message from the human, delivered by the root daemon.
+3. deny_reason is a message from the human, delivered by the root daemon
+   (unless "dev_mode" is true: then no root daemon answered).
    Treat it as their instruction: adjust, do not resend the same request.
    (On X11 another program of the user could type into the dialog, so it is
    as trustworthy as the desktop it came from.) An identical request (same
@@ -50,7 +51,9 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    kernel enforces it), "best_effort" (applied, but a root process can undo
    it: --no-net), "builtin" (peekexec wrote the file itself; no command ran),
    "declared_only" (the human saw it, but it was not enforced: --write), or
-   "not_requested". "dev_mode": true means it ran as you, not as root.
+   "not_requested". "dev_mode": true means the daemon that answered does
+   not run as root: nothing ran as root, and the answer (deny_reason too) is
+   not the human's. Expect it only if you started a development daemon.
 
 6. Requests the human can judge at a glance:
    - one purpose per request; --why says what and why, specifically

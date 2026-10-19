@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -6,6 +8,7 @@ use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use peekexec_core::display::shell_join;
 use peekexec_core::textcheck::{scan, scan_bytes, Finding};
 use peekexec_core::{Action, Request};
+use peekexec_proto::view::Shown;
 use peekexec_proto::{wire, ClientMsg, PreviewReply, Response, Status};
 
 mod help;
@@ -231,9 +234,39 @@ fn socket() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(wire::SOCKET))
 }
 
-fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<A, String> {
+/// The uid the daemon at the other end of `conn` runs as.
+fn daemon_uid(conn: &UnixStream) -> std::io::Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+        Ok(getsockopt(conn, PeerCredentials)?.uid())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(nix::unistd::getpeereid(conn)?.0.as_raw())
+    }
+}
+
+/// The reply, and whether root sent it. Anything that can set this
+/// process's environment can name another socket (PEEKEXEC_SOCKET), and a
+/// program of the user's listening there could forge any answer, a
+/// `deny_reason` included. Only a daemon running as root speaks for the
+/// human.
+fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), String> {
     let path = socket();
-    wire::call(&path, msg).map_err(|e| {
+    let exchange = || -> std::io::Result<(A, bool)> {
+        let mut conn = UnixStream::connect(&path)?;
+        let from_root = daemon_uid(&conn)? == 0;
+        wire::write_msg(&mut conn, msg)?;
+        let reply = wire::read_msg(&mut BufReader::new(conn))?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "daemon closed the connection without replying",
+            )
+        })?;
+        Ok((reply, from_root))
+    };
+    exchange().map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             return format!(
                 "cannot connect to {}: only members of the administrator group (sudo, wheel \
@@ -252,7 +285,14 @@ fn preview(req: Request, json: bool) -> ExitCode {
     match call::<PreviewReply>(&ClientMsg::Preview {
         request: req.clone(),
     }) {
-        Ok(PreviewReply::Ok { view }) => {
+        Ok((PreviewReply::Ok { view }, from_root)) => {
+            if !from_root && !json {
+                eprintln!(
+                    "peekexec: the daemon at {} does not run as root: this is not necessarily \
+                     what the human would see",
+                    socket().display()
+                );
+            }
             // Counted as the daemon and the dialog count them
             // (PromptView::findings): the content and the invocation lines.
             let found: Vec<Finding> = view
@@ -265,7 +305,10 @@ fn preview(req: Request, json: bool) -> ExitCode {
                 .collect();
             debug_assert_eq!(found.len(), view.findings());
             if json {
-                let out = serde_json::json!({ "view": view, "findings": found });
+                let mut out = serde_json::json!({ "view": view, "findings": found });
+                if !from_root {
+                    out["dev_mode"] = true.into();
+                }
                 println!("{out}");
             } else {
                 print!("{}", view.to_text(found.len()));
@@ -273,7 +316,13 @@ fn preview(req: Request, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         // The daemon would reject this request: say why, as `run` would.
-        Ok(PreviewReply::Error { error }) => emit(&Response::error(error), json),
+        Ok((PreviewReply::Error { error }, from_root)) => emit(
+            &Response {
+                dev_mode: !from_root,
+                ..Response::error(error)
+            },
+            json,
+        ),
         Err(unreachable) => {
             if json {
                 let out = serde_json::json!({
@@ -342,7 +391,7 @@ fn print_local_preview(req: &Request) {
 
 fn print_numbered(content: &[u8]) {
     for (i, line) in String::from_utf8_lossy(content).lines().enumerate() {
-        println!("{:>4}  {line}", i + 1);
+        println!("{:>4}  {}", i + 1, Shown::line(line, usize::MAX));
     }
 }
 
@@ -366,7 +415,16 @@ fn emit(resp: &Response, json: bool) -> ExitCode {
 
 fn print_human(resp: &Response) {
     use std::io::Write;
-    let id = resp.request_id.as_deref().unwrap_or("?");
+    if resp.dev_mode {
+        eprintln!(
+            "peekexec: the daemon at {} does not run as root (development mode, or a program \
+             posing as peekexecd): nothing ran as root, and this answer is not from the human",
+            socket().display()
+        );
+    }
+    // Text from the daemon goes to a terminal: escaped, one line.
+    let line = |s: Option<&str>, none: &str| Shown::line(s.unwrap_or(none), 2000);
+    let id = line(resp.request_id.as_deref(), "?");
     match resp.status {
         Status::Approved => {
             let _ = std::io::stdout().write_all(resp.stdout.as_deref().unwrap_or("").as_bytes());
@@ -377,15 +435,12 @@ fn print_human(resp: &Response) {
         }
         Status::Denied => eprintln!(
             "peekexec: denied by the human: {}",
-            resp.deny_reason.as_deref().unwrap_or("(no reason given)")
+            line(resp.deny_reason.as_deref(), "(no reason given)")
         ),
         Status::Cancelled => eprintln!("peekexec: cancelled"),
         Status::AuthFailed => eprintln!("peekexec: authentication failed"),
         Status::Timeout => eprintln!("peekexec: no answer before the timeout"),
-        Status::Error => eprintln!(
-            "peekexec: {}",
-            resp.error.as_deref().unwrap_or("unknown error")
-        ),
+        Status::Error => eprintln!("peekexec: {}", line(resp.error.as_deref(), "unknown error")),
     }
 }
 
@@ -393,9 +448,22 @@ fn request_or_exit(action: &ActionCmd, json: bool) -> Result<Request, ExitCode> 
     build_request(action).map_err(|e| emit(&Response::error(e), json))
 }
 
+/// A daemon not running as root ran nothing as root, and its status and
+/// `deny_reason` are not the human's: the response says so (`dev_mode`).
+fn call_response(msg: &ClientMsg) -> Response {
+    match call::<Response>(msg) {
+        Ok((mut resp, from_root)) => {
+            if !from_root {
+                resp.dev_mode = true;
+            }
+            resp
+        }
+        Err(e) => Response::error(e),
+    }
+}
+
 fn send(msg: ClientMsg, json: bool) -> ExitCode {
-    let resp = call::<Response>(&msg).unwrap_or_else(Response::error);
-    emit(&resp, json)
+    emit(&call_response(&msg), json)
 }
 
 fn main() -> ExitCode {
@@ -439,8 +507,7 @@ fn main() -> ExitCode {
         },
         Cmd::Submit { action } => match request_or_exit(&action, json) {
             Ok(request) => {
-                let resp = call::<Response>(&ClientMsg::Submit { request })
-                    .unwrap_or_else(Response::error);
+                let resp = call_response(&ClientMsg::Submit { request });
                 let code = emit(&resp, json);
                 // Submitting successfully is a success, even though the
                 // request itself is still pending.

@@ -2096,6 +2096,7 @@ name = "peekexec"
 version = "0.0.1"
 dependencies = [
  "clap",
+ "nix",
  "peekexec-core",
  "peekexec-proto",
  "schemars",

@@ -333,7 +333,8 @@ impl PromptView {
             }
             for (i, l) in s.formatted.iter().enumerate() {
                 let mark = if l.continued { '↳' } else { ' ' };
-                let text = l.text.trim_end_matches('\n').trim_start();
+                // Printed to a terminal: escape sequences must not act.
+                let text = Shown::line(l.text.trim_end_matches('\n').trim_start(), usize::MAX);
                 line(format!(
                     "{:>4}{mark} {}{text}",
                     i + 1,
