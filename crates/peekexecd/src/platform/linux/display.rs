@@ -4,14 +4,17 @@
 //! password as it is typed.
 //!
 //! The X server must be, all at once:
-//! - inside the cgroup scope of the user's active local X11 logind session
-//!   (scopes are root-owned; processes cannot move into them),
+//! - inside the cgroup scope of the user's X11 logind session that has a
+//!   seat and a VT and is that seat's active session (scopes are root-owned;
+//!   processes cannot move into them),
 //! - a descendant of that session's leader process (as logind records it),
 //! - a root-owned `Xorg` binary started for the session's VT (`vtN`; a second
 //!   Xorg cannot take a VT that is in use),
 //! - the only process meeting all of the above.
 //!
-//! The display number is read from the socket that very process listens on,
+//! The display number is read from the abstract socket that very process
+//! listens on (clients try it first; the filesystem socket sits in a
+//! world-writable directory and may be the user's),
 //! the cookie path from its own `-auth` argument. Anything less returns
 //! `None`, and the dialog reports the display as unverified. Wayland
 //! sessions are never verified here: there the compositor is the display
@@ -29,7 +32,7 @@ const SESSIONS: &str = "/run/systemd/sessions";
 struct Session {
     scope: String,
     leader: u32,
-    vt: Option<u32>,
+    vt: u32,
 }
 
 pub fn verified_x_server(uid: u32) -> Option<XServer> {
@@ -61,10 +64,8 @@ pub fn verified_x_server(uid: u32) -> Option<XServer> {
             continue;
         }
         let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        if let Some(vt) = session.vt {
-            if !has_arg(&cmdline, &format!("vt{vt}")) {
-                continue;
-            }
+        if !has_arg(&cmdline, &format!("vt{}", session.vt)) {
+            continue;
         }
         if !descends_from(pid, session.leader) {
             continue;
@@ -97,8 +98,10 @@ fn active_x11_sessions(uid: u32) -> Vec<Session> {
         .collect()
 }
 
-/// A logind session record, if it is this user's active, local X11 session
-/// with a known scope and leader.
+/// A logind session record, if it is this user's X11 session that the
+/// human is sitting at, with a known scope, leader and VT. Positive
+/// evidence only, as for polkit: logind counts every seatless session as
+/// active.
 fn parse_session(record: &str, uid: u32) -> Option<Session> {
     let get = |key: &str| {
         record
@@ -106,7 +109,10 @@ fn parse_session(record: &str, uid: u32) -> Option<Session> {
             .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
     };
     let ok = get("UID") == Some(uid.to_string().as_str())
+        && get("SEAT").is_some_and(|s| !s.is_empty())
         && get("ACTIVE") == Some("1")
+        && get("STATE") == Some("active")
+        && get("CLASS") == Some("user")
         && get("REMOTE") != Some("1")
         && get("TYPE") == Some("x11");
     if !ok {
@@ -115,7 +121,7 @@ fn parse_session(record: &str, uid: u32) -> Option<Session> {
     Some(Session {
         scope: get("SCOPE")?.to_string(),
         leader: get("LEADER")?.parse().ok()?,
-        vt: get("VTNR").and_then(|v| v.parse().ok()),
+        vt: get("VTNR")?.parse().ok()?,
     })
 }
 
@@ -154,8 +160,9 @@ fn in_scope(cgroup: &str, scope: &str) -> bool {
     })
 }
 
-/// Display number of an X socket (`@/tmp/.X11-unix/X1` or the filesystem
-/// one) that `pid` holds in listening state.
+/// Display number of the abstract X socket (`@/tmp/.X11-unix/X1`) that
+/// `pid` holds in listening state. Not the filesystem one: an abstract name
+/// held by Xorg cannot be taken by anyone else, and clients try it first.
 fn listening_display(pid: u32) -> Option<u32> {
     let inodes: HashSet<u64> = std::fs::read_dir(format!("/proc/{pid}/fd"))
         .ok()?
@@ -187,11 +194,7 @@ fn parse_unix_line(line: &str) -> Option<(u64, u32)> {
     }
     let inode = f.get(6)?.parse().ok()?;
     let path = f.get(7)?;
-    let num = path
-        .trim_start_matches('@')
-        .strip_prefix("/tmp/.X11-unix/X")?
-        .parse()
-        .ok()?;
+    let num = path.strip_prefix("@/tmp/.X11-unix/X")?.parse().ok()?;
     Some((inode, num))
 }
 
@@ -208,15 +211,25 @@ mod tests {
 
     #[test]
     fn picks_active_local_x11_session() {
-        let rec = "UID=1000\nUSER=u\nACTIVE=1\nSTATE=active\nREMOTE=0\nTYPE=x11\nSCOPE=session-2.scope\nLEADER=3795\nVTNR=2\n";
+        let rec = "UID=1000\nUSER=u\nACTIVE=1\nSTATE=active\nREMOTE=0\nTYPE=x11\nCLASS=user\nSEAT=seat0\nSCOPE=session-2.scope\nLEADER=3795\nVTNR=2\n";
         assert_eq!(
             parse_session(rec, 1000),
             Some(Session {
                 scope: "session-2.scope".into(),
                 leader: 3795,
-                vt: Some(2)
+                vt: 2
             })
         );
+        // Positive evidence: a seat, a VT, the seat's active user session.
+        for (from, to) in [
+            ("SEAT=seat0\n", ""),
+            ("SEAT=seat0", "SEAT="),
+            ("VTNR=2\n", ""),
+            ("STATE=active", "STATE=online"),
+            ("CLASS=user", "CLASS=greeter"),
+        ] {
+            assert_eq!(parse_session(&rec.replace(from, to), 1000), None, "{from}");
+        }
         assert_eq!(parse_session(rec, 1001), None);
         assert_eq!(
             parse_session(&rec.replace("ACTIVE=1", "ACTIVE=0"), 1000),
@@ -264,6 +277,12 @@ mod tests {
             "0000000000000000: 00000002 00000000 00010000 0001 01 25177 @/tmp/.X11-unix/X1";
         let conn = "0000000000000000: 00000003 00000000 00000000 0001 03 28477 @/tmp/.X11-unix/X1";
         let other = "0000000000000000: 00000002 00000000 00010000 0001 01 99 /run/foo.sock";
+        let file = "0000000000000000: 00000002 00000000 00010000 0001 01 25176 /tmp/.X11-unix/X1";
+        assert_eq!(
+            parse_unix_line(file),
+            None,
+            "the filesystem socket may be the user's"
+        );
         assert_eq!(parse_unix_line(listen), Some((25177, 1)));
         assert_eq!(parse_unix_line(conn), None);
         assert_eq!(parse_unix_line(other), None);
