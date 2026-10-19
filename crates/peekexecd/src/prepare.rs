@@ -375,45 +375,46 @@ pub fn use_system_prompt(view: &mut PromptView) {
     view.notes.insert(0, Shown::fixed(SYSTEM_PROMPT_NOTE_TEXT));
 }
 
+/// Lines the desktop's prompt shows per part of a section (the invocation,
+/// the content), and characters per line: longer lines wrap, they are
+/// never cut. The prompt does not scroll, so this is all it can hold.
+pub const PROMPT_LINES: usize = 12;
+const PROMPT_WIDTH: usize = 120;
+
 /// The text the desktop's prompt shows: the decisive facts on their own,
-/// since a decoy window could sit next to it.
-pub fn system_prompt_message(view: &PromptView) -> String {
-    // Lines per section, and characters per line (longer ones wrap, they
-    // are never cut): the prompt is the only trustworthy view, so what it
-    // leaves out it says it leaves out.
-    const LINES: usize = 12;
-    const WIDTH: usize = 120;
-    let mut body = String::new();
+/// since a decoy window could sit next to it. On that path it is the only
+/// view the human can trust, so it must hold everything root runs (R4):
+/// `Err` says how many lines would not fit, and the request is refused
+/// rather than approved with parts of it shown only in the window that
+/// cannot be verified.
+pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
     let mut omitted = 0;
     let mut add = |lines: Vec<String>, indent: &str, body: &mut String| {
-        for l in lines.iter().take(LINES) {
+        omitted += lines.len().saturating_sub(PROMPT_LINES);
+        for l in lines {
             body.push_str(&format!("{indent}{l}\n"));
         }
-        if lines.len() > LINES {
-            omitted += lines.len() - LINES;
-            body.push_str(&format!(
-                "{indent}… {} more lines NOT shown here\n",
-                lines.len() - LINES
-            ));
-        }
     };
+    let mut body = String::new();
     for s in &view.sections {
         body.push_str(&format!("\n{}:\n", ascii(&cut(&s.title, 80))));
         // How it runs (each argument), then what it runs: both counted.
         let invocation = s
             .invocation
             .iter()
-            .flat_map(|l| wrap(&ascii(l), WIDTH))
+            .flat_map(|l| wrap(&ascii(l), PROMPT_WIDTH))
             .collect();
         add(invocation, "  ", &mut body);
         let lines = s
             .formatted
             .iter()
-            .map(|l| ascii(&display_line(l.text.trim(), usize::MAX)))
-            .filter(|l| !l.is_empty())
-            .flat_map(|l| wrap(&l, WIDTH))
+            .filter_map(prompt_line)
+            .flat_map(|l| wrap(&l, PROMPT_WIDTH))
             .collect();
         add(lines, "    ", &mut body);
+    }
+    if omitted > 0 {
+        return Err(omitted);
     }
     let mut m = String::new();
     m.push_str(match view.kind {
@@ -427,14 +428,16 @@ pub fn system_prompt_message(view: &PromptView) -> String {
              shown below as ⟨U+XXXX⟩.\n"
         ));
     }
-    if omitted > 0 {
-        m.push_str(&format!(
-            "⚠ INCOMPLETE: {omitted} lines are not shown here. They appear only in the \
-             peekexec window, which cannot be verified. Approve only if you expected exactly \
-             this request.\n"
-        ));
+    // The daemon's facts and warnings come before anything the requester
+    // sent, so nothing it sends can push them out of view.
+    if view.kind == ViewKind::Root {
+        let facts: Vec<String> = view
+            .summary(0)
+            .into_iter()
+            .map(|(_, t)| ascii(&cut(&t, 160)))
+            .collect();
+        m.push_str(&format!("{}\n", facts.join(" · ")));
     }
-    m.push_str(&body);
     // Every value below is a `Shown`, already escaped where the view was
     // built: only cut here (escaping again would mangle its tokens).
     let from = match &view.provenance {
@@ -454,25 +457,9 @@ pub fn system_prompt_message(view: &PromptView) -> String {
             .unwrap_or_default(),
     };
     m.push_str(&format!(
-        "\nfrom: {from}\nin: {}\n",
+        "from: {from}\nin: {}\n",
         ascii(&cut(&view.cwd, 120))
     ));
-    // Every variable: the allowlist bounds how many there can be.
-    for (k, v) in &view.env {
-        m.push_str(&format!(
-            "env: {}={}\n",
-            ascii(&cut(k, 64)),
-            ascii(&cut(v, 256))
-        ));
-    }
-    if view.kind == ViewKind::Root {
-        let facts: Vec<String> = view
-            .summary(0)
-            .into_iter()
-            .map(|(_, t)| ascii(&cut(&t, 160)))
-            .collect();
-        m.push_str(&format!("{}\n", facts.join(" · ")));
-    }
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
             let others: Vec<String> = others.iter().map(|o| ascii(&cut(o, 40))).collect();
@@ -490,11 +477,52 @@ pub fn system_prompt_message(view: &PromptView) -> String {
     for n in warnings {
         m.push_str(&format!("⚠ {}\n", ascii(&cut(n, 300))));
     }
+    m.push_str(&body);
+    // Every variable, after the command: the allowlist bounds how many
+    // there can be.
+    if !view.env.is_empty() {
+        m.push('\n');
+    }
+    for (k, v) in &view.env {
+        m.push_str(&format!(
+            "env: {}={}\n",
+            ascii(&cut(k, 64)),
+            ascii(&cut(v, 256))
+        ));
+    }
     m.push_str(&format!(
         "request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
-    m
+    Ok(m)
+}
+
+/// Why a request is refused when [`system_prompt_message`] cannot hold it.
+pub fn too_long_for_system_prompt(omitted: usize) -> String {
+    format!(
+        "refused: the desktop's password dialog is the only view of this request that can be \
+         trusted here, and it holds {PROMPT_LINES} lines per part; {omitted} lines of this \
+         request would not be in it. Split it into smaller steps (several short scripts, or \
+         `peekexec install` for each file)"
+    )
+}
+
+/// One content line for the prompt, or `None` for a line with nothing but
+/// spaces and tabs. A line the formatter split off is re-indented, so its
+/// own leading spaces go; any other line is shown exactly as it runs,
+/// leading whitespace included (as a count: it decides what Python, YAML
+/// or make does with the line).
+fn prompt_line(l: &peekexec_core::format::Line) -> Option<String> {
+    let text = l.text.strip_suffix('\n').unwrap_or(&l.text);
+    let text = if l.indent > 0 || l.continued {
+        text.trim_start_matches([' ', '\t'])
+    } else {
+        text
+    };
+    if text.chars().all(|c| c == ' ' || c == '\t') {
+        return None;
+    }
+    Some(ascii(&display_line(text, usize::MAX)))
 }
 
 /// At most `max` characters of already-escaped text.
@@ -1144,7 +1172,7 @@ mod tests {
             .collect();
         assert_eq!(&lines[2..5], ["argv[2] rm", "argv[3] -rf", "argv[4] /"]);
         assert!(lines[5].starts_with("the requester calls the script"));
-        let m = system_prompt_message(&p.view);
+        let m = system_prompt_message(&p.view).unwrap();
         assert!(m.contains("  argv[4] /\n"), "{m}");
         assert!(!p.view.enter_approves || p.view.findings() == 0);
 
@@ -1210,7 +1238,7 @@ mod tests {
                 "⟨U+0041⟩".into(),
             ],
         });
-        let m = system_prompt_message(&prepare_for_tests(&r).view);
+        let m = system_prompt_message(&prepare_for_tests(&r).view).unwrap();
         assert!(m.contains("g⟨U+0456⟩thub"), "{m}");
         assert!(m.contains("a⟨U+E0041⟩b"), "{m}");
         // Escaped once, and a typed token is not a token.
@@ -1265,8 +1293,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let line = format!("writes {}", dest.display());
         assert_eq!(p.view.sections[0].invocation[0].as_str(), line);
-        let m = system_prompt_message(&p.view);
-        assert!(m.contains(".rules") && !m.contains("INCOMPLETE"), "{m}");
+        let m = system_prompt_message(&p.view).unwrap();
+        assert!(m.contains(".rules"), "{m}");
     }
 
     #[test]
@@ -1392,11 +1420,10 @@ mod tests {
         use_system_prompt(&mut v);
         assert_eq!(v.approval, Approval::SystemPrompt);
         assert!(!v.wants_password);
-        let m = system_prompt_message(&v);
+        let m = system_prompt_message(&v).unwrap();
         assert!(m.starts_with("peekexec: run this as root?"));
         assert!(m.contains("    a &&"), "{m}");
         assert!(m.contains("    f $("), "all six lines fit: {m}");
-        assert!(!m.contains("INCOMPLETE"), "{m}");
         assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
         assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
         assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
@@ -1408,23 +1435,25 @@ mod tests {
             Shown::fixed("DEBIAN_FRONTEND"),
             Shown::fixed("noninteractive"),
         )];
-        assert!(
-            system_prompt_message(&v).contains("\nenv: DEBIAN_FRONTEND=noninteractive\n"),
-            "{}",
-            system_prompt_message(&v)
-        );
+        let m = system_prompt_message(&v).unwrap();
+        assert!(m.contains("\nenv: DEBIAN_FRONTEND=noninteractive\n"), "{m}");
+        // The daemon's facts and warnings come before anything the
+        // requester sent: the command, then its variables.
+        let facts = m.find("writes /etc/udev/rules.d").unwrap();
+        let warning = m.find("⚠ Touches").unwrap();
+        let command = m.find("    a &&").unwrap();
+        let env = m.find("env: DEBIAN").unwrap();
+        assert!(facts < command && warning < command && command < env, "{m}");
         v.env.clear();
 
-        // Too long for the prompt: it says so, before the content.
+        // Too long for the prompt: refused, not shown in part.
         let script: String = (0..30).map(|i| format!("step{i}\n")).collect();
         v.sections = vec![run_section(
             &["sh".into(), "-c".into(), script],
             "/usr/bin/dash",
         )];
-        let m = system_prompt_message(&v);
-        let warn = m.find("INCOMPLETE: 18 lines").expect(&m);
-        assert!(warn < m.find("step0").unwrap(), "{m}");
-        assert!(!m.contains("step12"), "{m}");
+        assert_eq!(system_prompt_message(&v), Err(18));
+        assert!(too_long_for_system_prompt(18).contains("18 lines"));
 
         // A long line wraps; nothing is cut off.
         let long = format!("apt-get install -y {}evil-tail", "pkg ".repeat(60));
@@ -1432,15 +1461,32 @@ mod tests {
             &["sh".into(), "-c".into(), long],
             "/usr/bin/dash",
         )];
-        let m = system_prompt_message(&v);
+        let m = system_prompt_message(&v).unwrap();
         assert!(m.contains("evil-tail"), "{m}");
 
         // Every warning is listed.
         v.notes = (0..6)
             .map(|i| display_line(&format!("warning {i}"), 100))
             .collect();
-        let m = system_prompt_message(&v);
+        let m = system_prompt_message(&v).unwrap();
         assert!(m.contains("⚠ warning 5"), "{m}");
+
+        // A script's indentation is part of what runs: shown as a count,
+        // never dropped. Lines of nothing but spaces are left out; other
+        // whitespace is a visible token.
+        v.sections = vec![Section {
+            title: Shown::fixed("job.py"),
+            invocation: vec![],
+            syntax: Syntax::Plain,
+            formatted: verbatim("if ok:\n    guarded()\n   \nunguarded()\n\u{a0}x\n\tr\n"),
+            raw: String::new(),
+        }];
+        let m = system_prompt_message(&v).unwrap();
+        assert!(m.contains("\n    ⟨4 spaces⟩guarded()\n"), "{m}");
+        assert!(m.contains("\n    unguarded()\n"), "{m}");
+        assert!(m.contains("\n    ⟨U+00A0⟩x\n"), "{m}");
+        assert!(m.contains("\n    ⟨U+0009⟩r\n"), "{m}");
+        assert!(!m.contains("\n       \n"), "{m}");
     }
 
     #[test]

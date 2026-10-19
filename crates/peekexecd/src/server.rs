@@ -419,13 +419,11 @@ impl Daemon {
             &display,
             false,
         )
-        .map(|p| {
+        .and_then(|p| {
             let mut view = p.view;
             self.apply_provenance(peer, &mut view);
-            if self.system_prompt_for(&display).is_some() {
-                prepare::use_system_prompt(&mut view);
-            }
-            view
+            self.choose_approval(&display, &mut view)?;
+            Ok(view)
         })
     }
 
@@ -636,8 +634,8 @@ impl Daemon {
             approve_delay_ms: 0,
         };
         let mut view = view;
-        if self.system_prompt_for(&display).is_some() {
-            prepare::use_system_prompt(&mut view);
+        if let Err(e) = self.choose_approval(&display, &mut view) {
+            return fail(e);
         }
         let prepared = Prepared {
             view,
@@ -794,8 +792,11 @@ impl Daemon {
 
         let mut prepared = prepared;
         self.apply_provenance(peer, &mut prepared.view);
-        if self.system_prompt_for(&display).is_some() {
-            prepare::use_system_prompt(&mut prepared.view);
+        if let Err(e) = self.choose_approval(&display, &mut prepared.view) {
+            if let Some(dir) = &prepared.snapshot_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            return fail(e);
         }
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
@@ -878,7 +879,9 @@ impl Daemon {
                     prompt,
                     subject: &peer.process,
                     uid: peer.uid,
-                    message: prepare::system_prompt_message(&prepared.view),
+                    // Checked to fit when the approval path was chosen.
+                    message: prepare::system_prompt_message(&prepared.view)
+                        .map_err(prepare::too_long_for_system_prompt)?,
                 }
             }
             _ => prompt::Approver::Password {
@@ -887,6 +890,17 @@ impl Daemon {
             },
         };
         prompt::ask(&dialog, display, &prepared.view, &approver, cancel)
+    }
+
+    /// How the human approves this view: in peekexec's dialog, or (when the
+    /// display cannot be verified) in the desktop's own prompt, which must
+    /// then hold the whole request.
+    fn choose_approval(&self, display: &Display, view: &mut PromptView) -> Result<(), String> {
+        if self.system_prompt_for(display).is_some() {
+            prepare::use_system_prompt(view);
+            prepare::system_prompt_message(view).map_err(prepare::too_long_for_system_prompt)?;
+        }
+        Ok(())
     }
 
     /// The desktop's own prompt, used when this display cannot be verified.

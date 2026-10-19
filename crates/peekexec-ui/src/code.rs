@@ -57,9 +57,11 @@ impl Highlighter {
                 .map(|l| {
                     let text = l.text.trim_end_matches('\n');
                     // Formatted view re-indents; the slice's own leading
-                    // whitespace is replaced by the computed indent.
+                    // spaces and tabs are replaced by the computed indent.
+                    // Only those: other whitespace (U+00A0, U+3000...) is
+                    // shown and marked.
                     let text = if l.indent > 0 || l.continued {
-                        text.trim_start()
+                        text.trim_start_matches([' ', '\t'])
                     } else {
                         text
                     };
@@ -108,7 +110,10 @@ impl Highlighter {
 }
 
 fn is_blank(l: &DisplayLine) -> bool {
-    l.spans.iter().all(|(_, s)| s.trim().is_empty())
+    // Spaces and tabs only: a line of other whitespace is not blank.
+    l.spans
+        .iter()
+        .all(|(_, s)| s.trim_matches([' ', '\t']).is_empty())
 }
 
 fn collapse_blank_runs(lines: Vec<DisplayLine>) -> Vec<DisplayLine> {
