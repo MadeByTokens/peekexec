@@ -933,7 +933,12 @@ mod tests {
         let text = serde_json::to_string(&hidden.view).unwrap();
         assert!(!text.contains("secret-line"), "{text}");
         assert!(!text.contains("No changes"), "{text}");
-        assert!(hidden.view.notes.iter().any(|n| n.contains("cannot read")));
+        assert!(
+            hidden.view.notes.iter().any(|n| n
+                .contains("whose current content cannot be read without root, so it is not shown")),
+            "{:?}",
+            hidden.view.notes
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

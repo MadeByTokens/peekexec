@@ -73,7 +73,8 @@ pub struct Existing {
     pub len: u64,
     pub mode: u32,
     pub owner: String,
-    /// Its content, or why it is not shown.
+    /// Its content, or why it is not shown, worded to follow "whose
+    /// current content".
     pub content: Result<Vec<u8>, String>,
 }
 
@@ -582,7 +583,7 @@ fn existing(target: &Path) -> Option<Existing> {
         .open(target)
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::PermissionDenied => {
-                "you cannot read it without root, so it is not shown".to_string()
+                "cannot be read without root, so it is not shown".to_string()
             }
             _ => format!("cannot be read: {e}"),
         })
@@ -593,7 +594,7 @@ fn existing(target: &Path) -> Option<Existing> {
                 .map_err(|e| format!("cannot be read: {e}"))?;
             if buf.len() as u64 > DIFF_MAX {
                 return Err(format!(
-                    "larger than {} MiB, so it is not compared",
+                    "is larger than {} MiB, so it is not compared",
                     DIFF_MAX >> 20
                 ));
             }
@@ -835,7 +836,10 @@ mod tests {
         assert_eq!(existing(&f).unwrap().content.unwrap(), b"secret-line\n");
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
         let e = existing(&f).unwrap();
-        assert!(e.content.unwrap_err().contains("cannot read it"));
+        assert!(e
+            .content
+            .unwrap_err()
+            .contains("cannot be read without root"));
         assert_eq!(e.len, 12, "what stat shows anyone who can reach it");
         std::fs::remove_dir_all(&dir).unwrap();
     }
