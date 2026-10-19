@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use peekexecd::server::{Daemon, Options};
-use peekexecd::{platform, trust};
+use peekexecd::{inspect, platform, trust};
 
 /// Root daemon for peekexec. Normally started by systemd (peekexecd.socket).
 #[derive(Parser)]
@@ -27,6 +27,12 @@ struct Args {
 }
 
 fn main() -> ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == inspect::HELPER_ARG)
+    {
+        inspect::helper_main();
+    }
     let args = Args::parse();
     match run(args) {
         Ok(()) => ExitCode::SUCCESS,

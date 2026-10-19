@@ -1,0 +1,623 @@
+//! Looking at the filesystem for a request before the human approves it.
+//!
+//! Design rule 1: before approval the daemon acts with the requesting
+//! user's authority, not root's. What root could learn about files the user
+//! cannot access would reach the requester in a preview, an error, or the
+//! dialog (which runs as the user). So every path the request names is
+//! resolved, checked and read here, in a helper process with the user's
+//! credentials and `no_new_privs`, and the kernel decides what may be looked
+//! at. The helper returns the facts and the opened working directory
+//! (`SCM_RIGHTS`); the daemon never resolves a requester-named path as root
+//! before approval.
+//!
+//! In development mode the daemon already runs as the user, and
+//! [`inspect`] is called directly.
+
+use std::io::{BufReader, IoSlice, IoSliceMut, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use peekexec_core::{Action, Request};
+use peekexec_proto::wire::{read_msg, write_msg};
+use serde::{Deserialize, Serialize};
+
+use crate::prepare::display_line;
+use crate::trust;
+
+/// argv[1] that makes `peekexecd` act as the inspection helper.
+pub const HELPER_ARG: &str = "--inspect-helper";
+
+/// A path on a filesystem that never answers (the user's own FUSE mount,
+/// say) must not hold the request forever.
+pub const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest existing file whose content is read to show a diff.
+const DIFF_MAX: u64 = 4 * 1024 * 1024;
+
+/// What the daemon needs to know about the filesystem to show and run a
+/// request, as seen with the requesting user's authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Inspection {
+    /// The working directory, canonical.
+    pub cwd: String,
+    pub cwd_warning: Option<String>,
+    pub facts: Facts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Facts {
+    Run {
+        /// argv[0], resolved, canonical and trusted.
+        program: String,
+        file_args_note: Option<String>,
+    },
+    Script {
+        interpreter: String,
+        interpreter_arg: Option<String>,
+    },
+    Install {
+        /// Final destination, canonical parent.
+        dest: String,
+        existing: Option<Existing>,
+    },
+}
+
+/// The file an install would replace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Existing {
+    pub len: u64,
+    pub mode: u32,
+    pub owner: String,
+    /// Its content, or why it is not shown.
+    pub content: Result<Vec<u8>, String>,
+}
+
+/// Credentials the helper runs with.
+pub struct Creds {
+    pub uid: u32,
+    pub gid: u32,
+    pub groups: Vec<u32>,
+}
+
+/// Inspect `req` with this process's own authority. `owners` are the uids
+/// whose files count as root-controlled (the daemon's, not this process's).
+pub fn inspect(req: &Request, owners: &[u32]) -> Result<(Inspection, OwnedFd), String> {
+    inspect_unexplained(req, owners).map_err(explain_denied)
+}
+
+fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, OwnedFd), String> {
+    let (cwd, fd, cwd_warning) = open_workdir(&req.cwd, owners)?;
+    let facts = match &req.action {
+        Action::Run { argv } => {
+            let program = trust::resolve_program(&argv[0], &cwd, owners)?;
+            Facts::Run {
+                program: path_str(&program)?,
+                file_args_note: untrusted_file_args(&argv[1..], &cwd, owners),
+            }
+        }
+        Action::Script { content, .. } => {
+            let (interpreter, interpreter_arg) = interpreter(content, owners)?;
+            Facts::Script {
+                interpreter,
+                interpreter_arg,
+            }
+        }
+        Action::Install { src, dest, .. } => {
+            let dest = install_target(dest, src, owners)?;
+            Facts::Install {
+                existing: existing(&dest),
+                dest: path_str(&dest)?,
+            }
+        }
+    };
+    Ok((
+        Inspection {
+            cwd,
+            cwd_warning,
+            facts,
+        },
+        fd,
+    ))
+}
+
+/// A refusal because the user cannot look at a path says how to do the
+/// step anyway: in a script, which the human reads in full.
+fn explain_denied(e: String) -> String {
+    if e.contains("Permission denied") {
+        format!(
+            "{e}. You cannot access this yourself, so peekexec does not look at it before \
+             approval. Do that step inside `peekexec script`, where the human reads exactly \
+             what happens"
+        )
+    } else {
+        e
+    }
+}
+
+/// Run [`inspect`] in a helper process: `helper` is this daemon's own
+/// binary, started with [`HELPER_ARG`], with `creds` (or unchanged, in
+/// tests), `no_new_privs`, an empty environment and only its stdio.
+pub fn inspect_as(
+    helper: &Path,
+    creds: Option<&Creds>,
+    req: &Request,
+    owners: &[u32],
+) -> Result<(Inspection, OwnedFd), String> {
+    let fail = |e: std::io::Error| format!("cannot start the inspection helper: {e}");
+    let (mut conn, theirs) = UnixStream::pair().map_err(fail)?;
+    let theirs_out = theirs.try_clone().map_err(fail)?;
+    let mut cmd = Command::new(helper);
+    cmd.arg(HELPER_ARG)
+        .env_clear()
+        .env("LANG", "C.UTF-8")
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .stdout(Stdio::from(OwnedFd::from(theirs_out)))
+        .stderr(Stdio::null());
+    let creds: Option<(libc::uid_t, libc::gid_t, Vec<libc::gid_t>)> =
+        creds.map(|c| (c.uid, c.gid, c.groups.clone()));
+    // SAFETY: only async-signal-safe libc calls on data prepared before the
+    // fork; no allocation.
+    unsafe {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 1u32 << 2);
+            if let Some((uid, gid, groups)) = &creds {
+                if libc::setgroups(groups.len() as _, groups.as_ptr()) != 0
+                    || libc::setgid(*gid) != 0
+                    || libc::setuid(*uid) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if *uid != 0 && libc::setuid(0) == 0 {
+                    return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+                }
+            }
+            #[cfg(target_os = "linux")]
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().map_err(fail)?;
+    // The child holds its own copies of its ends now.
+    drop(cmd);
+    let result = exchange(&mut conn, req, owners);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+#[derive(Serialize, Deserialize)]
+struct Job {
+    request: Request,
+    owners: Vec<u32>,
+}
+
+type Reply = Result<Inspection, String>;
+
+fn exchange(
+    conn: &mut UnixStream,
+    req: &Request,
+    owners: &[u32],
+) -> Result<(Inspection, OwnedFd), String> {
+    let timeout = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => format!(
+            "inspecting the request took longer than {} s: a path it names may be on a \
+             filesystem that does not answer",
+            HELPER_TIMEOUT.as_secs()
+        ),
+        _ => format!("inspection helper: {e}"),
+    };
+    conn.set_read_timeout(Some(HELPER_TIMEOUT))
+        .map_err(timeout)?;
+    write_msg(
+        conn,
+        &Job {
+            request: req.clone(),
+            owners: owners.to_vec(),
+        },
+    )
+    .map_err(timeout)?;
+    let fd = recv_marker(conn).map_err(timeout)?;
+    let reply: Reply = read_msg(&mut BufReader::new(&*conn))
+        .map_err(timeout)?
+        .ok_or("the inspection helper exited without answering")?;
+    match (reply, fd) {
+        (Ok(inspection), Some(fd)) => Ok((inspection, fd)),
+        (Ok(_), None) => Err("the inspection helper sent no directory descriptor".into()),
+        (Err(e), _) => Err(e),
+    }
+}
+
+/// One marker byte, carrying the working directory's descriptor when the
+/// inspection succeeded.
+fn recv_marker(conn: &UnixStream) -> std::io::Result<Option<OwnedFd>> {
+    use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
+    let mut byte = [0u8; 1];
+    let mut iov = [IoSliceMut::new(&mut byte)];
+    let mut space = nix::cmsg_space!(RawFd);
+    #[cfg(target_os = "linux")]
+    let flags = MsgFlags::MSG_CMSG_CLOEXEC;
+    #[cfg(not(target_os = "linux"))]
+    let flags = MsgFlags::empty();
+    let msg = recvmsg::<()>(conn.as_raw_fd(), &mut iov, Some(&mut space), flags)?;
+    if msg.bytes == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the inspection helper exited without answering",
+        ));
+    }
+    let mut fd = None;
+    for c in msg.cmsgs()? {
+        if let ControlMessageOwned::ScmRights(fds) = c {
+            for raw in fds {
+                // SAFETY: the kernel just installed this descriptor for us.
+                let owned = unsafe { OwnedFd::from_raw_fd(raw) };
+                fd.get_or_insert(owned);
+            }
+        }
+    }
+    Ok(fd)
+}
+
+/// The helper's main: one job on stdin (a socket), the marker byte (with
+/// the directory descriptor) and the reply on stdout (the same socket).
+pub fn helper_main() -> ! {
+    // SAFETY: fd 0 is the socket the daemon passed; nothing else owns it.
+    let conn = unsafe { UnixStream::from_raw_fd(0) };
+    let job: Job = match read_msg(&mut BufReader::new(&conn)) {
+        Ok(Some(job)) => job,
+        _ => std::process::exit(2),
+    };
+    let (fd, reply): (Option<OwnedFd>, Reply) = match inspect(&job.request, &job.owners) {
+        Ok((inspection, fd)) => (Some(fd), Ok(inspection)),
+        Err(e) => (None, Err(e)),
+    };
+    let sent = send_marker(&conn, fd.as_ref());
+    if sent.is_err() || write_msg(&mut &conn, &reply).is_err() {
+        std::process::exit(3);
+    }
+    std::process::exit(0)
+}
+
+fn send_marker(conn: &UnixStream, fd: Option<&OwnedFd>) -> std::io::Result<()> {
+    use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, UnixAddr};
+    let raw: Vec<RawFd> = fd.iter().map(|f| f.as_raw_fd()).collect();
+    let cmsgs: Vec<ControlMessage> = if raw.is_empty() {
+        Vec::new()
+    } else {
+        vec![ControlMessage::ScmRights(&raw)]
+    };
+    sendmsg::<UnixAddr>(
+        conn.as_raw_fd(),
+        &[IoSlice::new(b"F")],
+        &cmsgs,
+        MsgFlags::empty(),
+        None,
+    )?;
+    Ok(())
+}
+
+fn path_str(p: &Path) -> Result<String, String> {
+    p.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", p.display()))
+}
+
+fn basename(p: &str) -> &str {
+    p.rsplit('/').next().unwrap_or(p)
+}
+
+/// A directory descriptor usable with fchdir (O_PATH is Linux-only).
+#[cfg(target_os = "linux")]
+const DIR_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const DIR_FLAGS: i32 = libc::O_DIRECTORY | libc::O_CLOEXEC;
+
+/// The directory the command runs in, opened once: the process changes into
+/// this very directory (by descriptor), not whatever the path names later.
+fn open_workdir(
+    requested: &str,
+    owners: &[u32],
+) -> Result<(String, OwnedFd, Option<String>), String> {
+    let canon = Path::new(requested)
+        .canonicalize()
+        .map_err(|e| format!("working directory {requested}: {e}"))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(DIR_FLAGS)
+        .open(&canon)
+        .map_err(|e| format!("working directory {}: {e}", canon.display()))?;
+    let path = path_str(&canon)?;
+    // Programs load code and settings from the directory they run in
+    // (git hooks and config, Python modules, Makefiles, ...).
+    let warning = trust::check(&canon, owners).err().map(|why| {
+        format!(
+            "Runs inside {path}, which root does not control ({why}). Programs may load \
+             code or settings from it (git, python, make, npm...)."
+        )
+    });
+    Ok((path, OwnedFd::from(file), warning))
+}
+
+/// The interpreter for a script: its `#!` line (resolved and trusted;
+/// `/usr/bin/env NAME` is looked up in SAFE_PATH), else /bin/sh.
+pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<String>), String> {
+    let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
+    let Some(shebang) = first.strip_prefix(b"#!") else {
+        let sh = trust::resolve_program("sh", "/", owners)?;
+        return Ok((path_str(&sh)?, None));
+    };
+    let line = std::str::from_utf8(shebang)
+        .map_err(|_| "the #! line is not valid UTF-8".to_string())?
+        .trim();
+    let (prog, arg) = match line.split_once(char::is_whitespace) {
+        Some((p, a)) => (p, Some(a.trim().to_string()).filter(|a| !a.is_empty())),
+        None => (line, None),
+    };
+    if !prog.starts_with('/') {
+        return Err(format!(
+            "the #! interpreter must be an absolute path, got {prog:?}"
+        ));
+    }
+    if basename(prog) == "env" {
+        let name = arg.ok_or("`#!/usr/bin/env` needs a program name")?;
+        if name.contains(char::is_whitespace) || name.starts_with('-') {
+            return Err(format!("unsupported #!/usr/bin/env arguments: {name:?}"));
+        }
+        let resolved = trust::resolve_program(&name, "/", owners)?;
+        return Ok((path_str(&resolved)?, None));
+    }
+    let resolved = trust::resolve_program(prog, "/", owners)?;
+    let resolved = path_str(&resolved)?;
+    if let Some(a) = &arg {
+        if !shebang_flag_ok(basename(&resolved), a) {
+            return Err(format!(
+                "the #! line passes {a:?} to {resolved}. Allowed: simple shell flags \
+                 (-e, -eu, -x...), python -I/-s/-E..., perl -w/-T, and -f for awk, sed and \
+                 make. Other flags can make an interpreter run code the human never sees"
+            ));
+        }
+    }
+    Ok((resolved, arg))
+}
+
+/// `#!` arguments go to the interpreter before the script, so they must not
+/// name files, modules or code, and their meaning depends on the
+/// interpreter (`-e` is "exit on error" to sh, "run this code" to perl or
+/// awk). So each family has its own set; `interp` is the resolved binary's
+/// name (`dash`, `python3.10`, `gawk`).
+fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
+    let Some(flags) = arg.strip_prefix('-') else {
+        return false;
+    };
+    let family = interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    let allowed = match family {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash" => "aeEfuvxBCTl",
+        "python" => "IsSEBuO",
+        "perl" => "wWXTt",
+        // `-f FILE`: read the program from the script itself, as the kernel
+        // would for `#!/usr/bin/awk -f`.
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "make" | "gmake" => return flags == "f",
+        _ => return false,
+    };
+    !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
+}
+
+/// Arguments naming an existing file that root does not control
+/// (`sh ~/x.sh`, `cp /tmp/f /etc/`, `--config=/home/u/c`): the program may
+/// read or run it, but its content is not shown and can change after
+/// approval. One note for all of them.
+fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
+    let mut hits = Vec::new();
+    for a in args {
+        let value = a.split_once('=').map_or(a.as_str(), |(_, v)| v);
+        if !value.contains('/') {
+            continue;
+        }
+        let path = Path::new(cwd).join(value);
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if trust::check(&path, owners).is_err() && !hits.contains(&value) {
+            hits.push(value);
+        }
+    }
+    (!hits.is_empty()).then(|| {
+        let shown: Vec<String> = hits.iter().take(3).map(|h| display_line(h, 100)).collect();
+        let more = hits.len().saturating_sub(3);
+        format!(
+            "Names {}{}, which root does not control: if the program reads or runs it, that \
+             content is not shown here and can change after approval. To run your own script \
+             use `peekexec script`; to put a file in place, `peekexec install`.",
+            shown.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    })
+}
+
+/// Final destination of an install: `dest`, or `dest/basename(src)` if
+/// `dest` is a directory. Its directory must be trusted; an existing target
+/// must be a regular file.
+fn install_target(dest: &str, src: &str, owners: &[u32]) -> Result<PathBuf, String> {
+    let mut target = PathBuf::from(dest);
+    if target.is_dir() {
+        let name = Path::new(src)
+            .file_name()
+            .ok_or_else(|| format!("cannot take a file name from {src}"))?;
+        target.push(name);
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
+    let parent = trust::check(parent, owners)
+        .map_err(|e| format!("install destination not allowed: {e}"))?;
+    let target = parent.join(target.file_name().ok_or("destination has no file name")?);
+    match std::fs::symlink_metadata(&target) {
+        Ok(m) if !m.file_type().is_file() => Err(format!(
+            "{} exists and is not a regular file (directory, symlink or device)",
+            target.display()
+        )),
+        Ok(m) if m.nlink() > 1 => Err(format!("{} has other hard links", target.display())),
+        Ok(_) => Ok(target),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(target),
+        Err(e) => Err(format!("{}: {e}", target.display())),
+    }
+}
+
+/// The file an install would replace, read as far as this process may.
+fn existing(target: &Path) -> Option<Existing> {
+    let m = std::fs::metadata(target).ok()?;
+    let content = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(target)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                "you cannot read it without root, so it is not shown".to_string()
+            }
+            _ => format!("cannot be read: {e}"),
+        })
+        .and_then(|f| {
+            let mut buf = Vec::new();
+            f.take(DIFF_MAX + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("cannot be read: {e}"))?;
+            if buf.len() as u64 > DIFF_MAX {
+                return Err(format!(
+                    "larger than {} MiB, so it is not compared",
+                    DIFF_MAX >> 20
+                ));
+            }
+            Ok(buf)
+        });
+    Some(Existing {
+        len: m.len(),
+        mode: m.permissions().mode() & 0o777,
+        owner: owner_name(m.uid(), m.gid()),
+        content,
+    })
+}
+
+/// `user:group`, by name where the user database has one.
+fn owner_name(uid: u32, gid: u32) -> String {
+    use nix::unistd::{Gid, Group, Uid, User};
+    let user = User::from_uid(Uid::from_raw(uid))
+        .ok()
+        .flatten()
+        .map_or_else(|| uid.to_string(), |u| u.name);
+    let group = Group::from_gid(Gid::from_raw(gid))
+        .ok()
+        .flatten()
+        .map_or_else(|| gid.to_string(), |g| g.name);
+    format!("{user}:{group}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shebang_flags_are_allowlisted() {
+        for (interp, ok) in [
+            ("dash", "-e"),
+            ("bash", "-eu"),
+            ("bash", "-eux"),
+            ("python3.10", "-I"),
+            ("python3", "-Is"),
+            ("perl", "-w"),
+            ("gawk", "-f"),
+            ("sed", "-f"),
+        ] {
+            assert!(shebang_flag_ok(interp, ok), "{interp} {ok}");
+        }
+        for bad in [
+            "-mfoo",
+            "-c",
+            "-r/home/u/x",
+            "--rcfile",
+            "-e /tmp/x",
+            "x",
+            "-",
+            "-Mstrict",
+        ] {
+            assert!(!shebang_flag_ok("bash", bad), "{bad}");
+        }
+        // `-e`/`-E` means "the next argument is code" to these.
+        for (interp, bad) in [
+            ("gawk", "-e"),
+            ("mawk", "-e"),
+            ("perl", "-e"),
+            ("perl", "-E"),
+            ("ruby", "-e"),
+            ("node", "-e"),
+            ("php", "-B"),
+            ("busybox", "-e"),
+            ("gawk", "-fe"),
+        ] {
+            assert!(!shebang_flag_ok(interp, bad), "{interp} {bad}");
+        }
+        let owners = trust::trusted_owners();
+        assert!(interpreter(b"#!/bin/sh -c\n", &owners).is_err());
+    }
+
+    #[test]
+    fn interpreter_from_shebang() {
+        let owners = trust::trusted_owners();
+        let (sh, arg) = interpreter(b"echo hi\n", &owners).unwrap();
+        assert!(sh.starts_with('/') && arg.is_none());
+        let (bash, _) = interpreter(b"#!/usr/bin/env bash\necho\n", &owners).unwrap();
+        assert!(bash.ends_with("bash"));
+        let (_, arg) = interpreter(b"#!/bin/sh -e\n", &owners).unwrap();
+        assert_eq!(arg.as_deref(), Some("-e"));
+        assert!(interpreter(b"#!relative\n", &owners).is_err());
+        assert!(interpreter(b"#!/usr/bin/env -S bash -x\n", &owners).is_err());
+    }
+
+    #[test]
+    fn arguments_naming_user_files_are_flagged() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pe-argfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("job.sh");
+        std::fs::write(&script, "echo hi\n").unwrap();
+        let s = script.to_str().unwrap();
+        // Trusted owners are root only, as in production.
+        let note = untrusted_file_args(&[s.into()], "/", &[0]).unwrap();
+        assert!(note.contains("job.sh"), "{note}");
+        let opt = format!("--config={s}");
+        assert!(untrusted_file_args(&[opt], "/", &[0]).is_some());
+        // System files and plain words are not flagged.
+        assert!(untrusted_file_args(&["/etc/hostname".into(), "-y".into()], "/", &[0]).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_existing_files_are_not_read() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pe-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("secret.conf");
+        std::fs::write(&f, "secret-line\n").unwrap();
+        assert_eq!(existing(&f).unwrap().content.unwrap(), b"secret-line\n");
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let e = existing(&f).unwrap();
+        assert!(e.content.unwrap_err().contains("cannot read it"));
+        assert_eq!(e.len, 12, "what stat shows anyone who can reach it");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

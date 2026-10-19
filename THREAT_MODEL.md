@@ -16,8 +16,12 @@ directory that were shown, with the limits reported in `enforced`.
 **Nothing without a human.** What the daemon answers without a human
 (previews, refusals, errors) tells the requester nothing it could not find
 out without root: no file content the user cannot read, nothing about paths
-the user cannot reach. A request that names such paths can still be
-submitted; then the human sees it.
+the user cannot reach. This holds by construction: before approval, every
+path a request names is resolved, checked and read by a helper process with
+the requesting user's credentials and `no_new_privs`, so the kernel decides
+(`crates/peekexecd/src/inspect.rs`). A request naming a path the user cannot
+reach is refused before approval; such steps go inside `peekexec script`,
+where the human reads them.
 
 It does not promise:
 

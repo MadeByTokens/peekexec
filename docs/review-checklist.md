@@ -18,13 +18,13 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 
 | Input | Pre | Ans | Show | Run | Log |
 |---|---|---|---|---|---|
-| `argv` | R3: NUL refused. argv[0] resolved in SAFE_PATH, root-owned chain, not nosuid (✓). File-like args looked at for the "root does not control" note: ⚠ as root → (a) | ⚠ resolution errors computed as root → (a) | R3: one line per argument, controls escaped (✓) | R2: program by canonical path in a root-owned chain (✓); ⚠ by path, not descriptor → (b) | Debug-quoted (✓) |
+| `argv` | R3: NUL refused. argv[0] resolved in SAFE_PATH, root-owned chain, not nosuid; file-like args checked for the "root does not control" note; all as the user, in the helper (✓ R1) | errors are what the user could learn (✓ R1) | R3: one line per argument, controls escaped (✓) | R2: program by canonical path in a root-owned chain (✓); ⚠ by path, not descriptor → (b) | Debug-quoted (✓) |
 | script `content` | R3: `#!` interpreter resolved and trusted, flags allowlisted per interpreter (✓) | — | Full text, findings marked (✓) | R2: root-only snapshot with a daemon-chosen name (✓) | sha256 (✓) |
 | script `path` (label) | — | — | escaped (✓) | never used (✓) | Debug-quoted (✓) |
 | script `args` | NUL refused (✓) | — | in the header, escaped (✓) | verbatim argv (✓) | Debug-quoted (✓) |
 | install `content` | — | — | text shown, binary described (✓) | written by the daemon, atomic (✓) | sha256 (✓) |
-| install `dest` | Root-owned parent chain, regular single-link target: ⚠ inspected as root → (a) | ⚠ errors and existing-file facts computed as root → (a) | diff only if the user can read the file: ⚠ judged from mode bits → (a) | R6: owner, group, mode, label kept (✓); ⚠ by path → (b) | Debug-quoted (✓) |
-| `cwd` | opened once, by descriptor (✓); ⚠ canonicalized and checked as root → (a) | ⚠ errors as root → (a) | escaped; untrusted directory flagged (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
+| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1) | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1) | R6: owner, group, mode, label kept (✓); ⚠ by path → (b) | Debug-quoted (✓) |
+| `cwd` | canonicalized, checked and opened by the helper as the user; the descriptor is passed back (✓ R1, R2) | errors as the user (✓ R1) | escaped; untrusted directory flagged (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
 | `env` | R allowlist of names, path-free values (✓) | — | listed (✓) | rebuilt from scratch (✓) | — |
 | `write` | absolute, no control characters (✓) | — | in the summary (✓) | declared only, reported as such (✓) | — |
 | `why` | — | — | escaped, labelled unverified, never in the polkit prompt (✓) | — | Debug-quoted (✓) |
@@ -47,8 +47,8 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Its process names, command lines | Show: escaped, labelled as self-reported (✓) | ✓ |
 | Its executable path (mount namespaces) | Show and provenance: must be the same inode as the path in the daemon's view (✓) | ✓ |
 | Its environment | Display fallback only; Wayland socket name and runtime dir checked; marked unverified (✓) | ✓ |
-| Symlinks, files in its own directories | Pre: ⚠ resolved as root → (a). Run: by path → (b) | ⚠ |
-| User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted (✓); a helper as the user can be made to wait on its own FUSE mount → timeout in (a) | ⚠ |
+| Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: program and install target by path → (b) | ⚠ |
+| User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
 | Its own polkit agents, other login sessions | Show (Wayland): guard agent holds the subject's slot; subject must be in the active local session or none (✓) | ✓ |
 | A nested or relaying display server | Show: X11 verified through logind and the Xorg process; otherwise unverified, password goes to the desktop's prompt (✓) | ✓ |
 | Timing: dialog start-up | /proc reopening defeated by a socket pair (✓); ⚠ no `no_new_privs` on the dialog → (d) | ⚠ |
@@ -59,8 +59,9 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 
 ## Planned structural fixes
 
-- **(a)** Pre-approval inspection in a helper with the user's credentials
-  and `no_new_privs`, returning facts and descriptors (`SCM_RIGHTS`). R1 by
+- **(a)** Done: pre-approval inspection in a helper with the user's
+  credentials and `no_new_privs`, returning facts and the working directory
+  (`SCM_RIGHTS`); see `crates/peekexecd/src/inspect.rs`. R1 by
   construction.
 - **(b)** `openat2` with `RESOLVE_NO_MAGICLINKS`; run by descriptor
   (`execveat`), write through the directory descriptor. R2 by construction.

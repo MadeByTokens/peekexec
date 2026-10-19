@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,6 +14,7 @@ use peekexec_core::{Action, Request};
 use peekexec_proto::view::{Approval, ProcLine, PromptView, Provenance, Section, Syntax, ViewKind};
 use peekexec_proto::{Enforced, Level};
 
+use crate::inspect::{Facts, Inspection};
 use crate::platform::{ExecPlan, Peer, ProcessInfo, Sandbox};
 use crate::session::Display;
 use crate::trust::{self, SAFE_PATH};
@@ -38,8 +38,13 @@ pub struct Prepared {
     pub snapshot_dir: Option<PathBuf>,
 }
 
+/// Looks at the filesystem for a request with the requesting user's
+/// authority (see [`crate::inspect`]).
+pub type Inspector = dyn Fn(&Request, &[u32]) -> Result<(Inspection, OwnedFd), String> + Sync;
+
 pub struct Ctx<'a> {
     pub sandbox: &'a dyn Sandbox,
+    pub inspect: &'a Inspector,
     pub wants_password: bool,
     pub dev: bool,
     pub snapshot_root: &'a Path,
@@ -92,15 +97,24 @@ pub fn prepare(
     let env = command_env(user, &req.env, ctx.dev);
     let mut snapshot_dir = None;
     let mut notes = Vec::new();
-    let workdir = WorkDir::open(&req.cwd, &owners)?;
-    if let Some(w) = &workdir.warning {
-        notes.push(w.clone());
-    }
+    // Everything known about the filesystem comes from here: nothing below
+    // looks at a requester-named path itself.
+    let (inspection, cwd_fd) = (ctx.inspect)(req, &owners)?;
+    let workdir = WorkDir {
+        path: inspection.cwd.clone(),
+        fd: Arc::new(cwd_fd),
+    };
+    notes.extend(inspection.cwd_warning.clone());
+    let mismatch = || "internal error: inspection does not match the request".to_string();
 
-    let (sections, exec, enforced) = match &req.action {
-        Action::Run { argv } => {
-            let program = trust::resolve_program(&argv[0], &workdir.path, &owners)?;
-            let program = path_str(&program)?;
+    let (sections, exec, enforced) = match (&req.action, inspection.facts) {
+        (
+            Action::Run { argv },
+            Facts::Run {
+                program,
+                file_args_note,
+            },
+        ) => {
             let plan = ExecPlan {
                 program: program.clone(),
                 argv: argv.clone(),
@@ -112,18 +126,24 @@ pub fn prepare(
                 audit_uid: Some(peer.uid),
             };
             let enforced = ctx.sandbox.enforcement(&plan);
-            notes.extend(untrusted_file_args(&argv[1..], &workdir.path, &owners));
+            notes.extend(file_args_note);
             (
                 vec![run_section(argv, &program)],
                 Execution::Command(plan),
                 enforced,
             )
         }
-        Action::Script {
-            path,
-            content,
-            args,
-        } => {
+        (
+            Action::Script {
+                path,
+                content,
+                args,
+            },
+            Facts::Script {
+                interpreter: interp,
+                interpreter_arg: interp_arg,
+            },
+        ) => {
             let name = Path::new(path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -133,7 +153,6 @@ pub fn prepare(
             // The interpreter receives the snapshot's path as an argument,
             // so none of it may come from the requester.
             let copy = dir.join(snapshot_name(&name));
-            let (interp, interp_arg) = interpreter(content, &owners)?;
             if materialize {
                 write_snapshot(&dir, &copy, content)?;
                 snapshot_dir = Some(dir);
@@ -175,29 +194,18 @@ pub fn prepare(
             let enforced = ctx.sandbox.enforcement(&plan);
             (vec![section], Execution::Command(plan), enforced)
         }
-        Action::Install { src, content, dest } => {
-            let dest = install_target(dest, src, &owners)?;
-            let dest_s = path_str(&dest)?;
-            let existing = std::fs::metadata(&dest).ok();
-            // The view goes to the requester (preview) and to a dialog
-            // running as the user: it may only show what the user could
-            // read without root.
-            let readable = trust::readable_by(&dest, user.uid, &user.groups);
+        (Action::Install { src, content, .. }, Facts::Install { dest, existing }) => {
+            let dest_s = dest;
+            let dest = PathBuf::from(&dest_s);
             let header = match &existing {
-                Some(_) if !readable => format!(
-                    "replaces an existing file that you cannot read yourself, with {} bytes \
-                     the requester calls {src}; its owner and mode stay (setuid/setgid/sticky \
-                     bits are always cleared)",
-                    content.len()
-                ),
-                Some(m) => format!(
+                Some(e) => format!(
                     "replaces an existing file ({} bytes) with {} bytes the requester calls {src}; \
                      owner stays {}, mode stays {:o} (setuid/setgid/sticky bits are always \
                      cleared)",
-                    m.len(),
+                    e.len,
                     content.len(),
-                    owner_name(m.uid(), m.gid()),
-                    m.permissions().mode() & 0o777
+                    e.owner,
+                    e.mode
                 ),
                 None => format!(
                     "new file, owner root, mode {:o}, {} bytes the requester calls {src}",
@@ -206,17 +214,16 @@ pub fn prepare(
                 ),
             };
             let mut sections = vec![install_section(&dest_s, &header, content, &mut notes)];
-            if existing.is_some() && !readable {
-                notes.push(format!(
-                    "Replaces {dest_s}, which you cannot read without root: what it contains \
-                     now is not shown, and is lost."
-                ));
-            } else if let Some(diff) = existing
-                .is_some()
-                .then(|| install_diff(&dest, content))
-                .flatten()
-            {
-                sections.insert(0, diff);
+            match existing.map(|e| e.content) {
+                Some(Ok(old)) => {
+                    if let Some(diff) = install_diff(&old, content) {
+                        sections.insert(0, diff);
+                    }
+                }
+                Some(Err(why)) => notes.push(format!(
+                    "Replaces {dest_s}, whose current content {why}; it is lost."
+                )),
+                None => {}
             }
             let enforced = Enforced {
                 write: Some(vec![dest_s]),
@@ -230,6 +237,7 @@ pub fn prepare(
             };
             (sections, exec, enforced)
         }
+        _ => return Err(mismatch()),
     };
 
     notes.extend(sensitive_targets(&sections, &enforced));
@@ -465,6 +473,8 @@ pub struct User {
     pub name: String,
     pub home: String,
     pub uid: u32,
+    /// Primary group, from the user database.
+    pub gid: u32,
     /// Primary and supplementary groups, from the user database.
     pub groups: Vec<u32>,
 }
@@ -593,84 +603,6 @@ fn run_section(argv: &[String], program: &str) -> Section {
     }
 }
 
-/// The interpreter for a script: its `#!` line (resolved and trusted;
-/// `/usr/bin/env NAME` is looked up in SAFE_PATH), else /bin/sh.
-fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<String>), String> {
-    let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
-    let Some(shebang) = first.strip_prefix(b"#!") else {
-        let sh = trust::resolve_program("sh", "/", owners)?;
-        return Ok((path_str(&sh)?, None));
-    };
-    let line = std::str::from_utf8(shebang)
-        .map_err(|_| "the #! line is not valid UTF-8".to_string())?
-        .trim();
-    let (prog, arg) = match line.split_once(char::is_whitespace) {
-        Some((p, a)) => (p, Some(a.trim().to_string()).filter(|a| !a.is_empty())),
-        None => (line, None),
-    };
-    if !prog.starts_with('/') {
-        return Err(format!(
-            "the #! interpreter must be an absolute path, got {prog:?}"
-        ));
-    }
-    if basename(prog) == "env" {
-        let name = arg.ok_or("`#!/usr/bin/env` needs a program name")?;
-        if name.contains(char::is_whitespace) || name.starts_with('-') {
-            return Err(format!("unsupported #!/usr/bin/env arguments: {name:?}"));
-        }
-        let resolved = trust::resolve_program(&name, "/", owners)?;
-        return Ok((path_str(&resolved)?, None));
-    }
-    let resolved = trust::resolve_program(prog, "/", owners)?;
-    let resolved = path_str(&resolved)?;
-    if let Some(a) = &arg {
-        if !shebang_flag_ok(basename(&resolved), a) {
-            return Err(format!(
-                "the #! line passes {a:?} to {resolved}. Allowed: simple shell flags \
-                 (-e, -eu, -x...), python -I/-s/-E..., perl -w/-T, and -f for awk, sed and \
-                 make. Other flags can make an interpreter run code the human never sees"
-            ));
-        }
-    }
-    Ok((resolved, arg))
-}
-
-/// `#!` arguments go to the interpreter before the script, so they must not
-/// name files, modules or code, and their meaning depends on the
-/// interpreter (`-e` is "exit on error" to sh, "run this code" to perl or
-/// awk). So each family has its own set; `interp` is the resolved binary's
-/// name (`dash`, `python3.10`, `gawk`).
-fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
-    let Some(flags) = arg.strip_prefix('-') else {
-        return false;
-    };
-    let family = interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    let allowed = match family {
-        "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash" => "aeEfuvxBCTl",
-        "python" => "IsSEBuO",
-        "perl" => "wWXTt",
-        // `-f FILE`: read the program from the script itself, as the kernel
-        // would for `#!/usr/bin/awk -f`.
-        "awk" | "gawk" | "mawk" | "nawk" | "sed" | "make" | "gmake" => return flags == "f",
-        _ => return false,
-    };
-    !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
-}
-
-/// `user:group`, by name where the user database has one.
-fn owner_name(uid: u32, gid: u32) -> String {
-    use nix::unistd::{Gid, Group, Uid, User as PwUser};
-    let user = PwUser::from_uid(Uid::from_raw(uid))
-        .ok()
-        .flatten()
-        .map_or_else(|| uid.to_string(), |u| u.name);
-    let group = Group::from_gid(Gid::from_raw(gid))
-        .ok()
-        .flatten()
-        .map_or_else(|| gid.to_string(), |g| g.name);
-    format!("{user}:{group}")
-}
-
 /// The snapshot's file name: fixed, keeping a short alphanumeric extension
 /// (`deploy.py` → `script.py`) for interpreters that care.
 fn snapshot_name(requested: &str) -> String {
@@ -684,45 +616,10 @@ fn snapshot_name(requested: &str) -> String {
     }
 }
 
-/// A directory descriptor usable with fchdir (O_PATH is Linux-only).
-#[cfg(target_os = "linux")]
-const DIR_FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
-#[cfg(not(target_os = "linux"))]
-const DIR_FLAGS: i32 = libc::O_DIRECTORY | libc::O_CLOEXEC;
-
-/// The directory the command runs in, opened once: the process changes into
-/// this very directory (by descriptor), not whatever the path names later.
+/// The working directory as inspected, and its descriptor.
 struct WorkDir {
     path: String,
     fd: Arc<OwnedFd>,
-    warning: Option<String>,
-}
-
-impl WorkDir {
-    fn open(requested: &str, owners: &[u32]) -> Result<WorkDir, String> {
-        let canon = Path::new(requested)
-            .canonicalize()
-            .map_err(|e| format!("working directory {requested}: {e}"))?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(DIR_FLAGS)
-            .open(&canon)
-            .map_err(|e| format!("working directory {}: {e}", canon.display()))?;
-        let path = path_str(&canon)?;
-        // Programs load code and settings from the directory they run in
-        // (git hooks and config, Python modules, Makefiles, ...).
-        let warning = trust::check(&canon, owners).err().map(|why| {
-            format!(
-                "Runs inside {path}, which root does not control ({why}). Programs may load \
-                 code or settings from it (git, python, make, npm...)."
-            )
-        });
-        Ok(WorkDir {
-            path,
-            fd: Arc::new(OwnedFd::from(file)),
-            warning,
-        })
-    }
 }
 
 /// Places where a file makes root run commands later, or controls logins.
@@ -769,83 +666,6 @@ const SENSITIVE: &[&str] = &[
     "/etc/shadow",
     "/etc/group",
 ];
-
-/// Every path the request names that the daemon looks at as root: the
-/// working directory, a program or `#!` interpreter given by path, path-like
-/// arguments, and an install destination. Relative ones are taken from the
-/// working directory.
-pub fn named_paths(req: &Request) -> Vec<PathBuf> {
-    let cwd = Path::new(&req.cwd);
-    let mut out = vec![cwd.to_path_buf()];
-    let mut push = |p: &str| {
-        if p.contains('/') {
-            out.push(cwd.join(p));
-        }
-    };
-    match &req.action {
-        Action::Run { argv } => {
-            for a in argv {
-                push(a.split_once('=').map_or(a.as_str(), |(_, v)| v));
-            }
-        }
-        Action::Script { content, .. } => {
-            let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
-            if let Some(line) = first.strip_prefix(b"#!") {
-                let line = String::from_utf8_lossy(line);
-                if let Some(prog) = line.split_whitespace().next() {
-                    push(prog);
-                }
-            }
-        }
-        Action::Install { dest, .. } => push(dest),
-    }
-    out
-}
-
-/// The named paths that `user` could not find out about without root.
-pub fn unreachable_paths(req: &Request, user: &User) -> Vec<String> {
-    named_paths(req)
-        .into_iter()
-        .filter(|p| !trust::reachable_by(p, user.uid, &user.groups))
-        .map(|p| display_line(&p.to_string_lossy(), 200))
-        .collect()
-}
-
-/// Arguments naming an existing file that root does not control
-/// (`sh ~/x.sh`, `cp /tmp/f /etc/`, `--config=/home/u/c`): the program may
-/// read or run it, but its content is not shown and can change after
-/// approval. One note for all of them.
-fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
-    let mut hits = Vec::new();
-    for a in args {
-        let value = a.split_once('=').map_or(a.as_str(), |(_, v)| v);
-        if !value.contains('/') {
-            continue;
-        }
-        let path = Path::new(cwd).join(value);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
-            continue;
-        }
-        if trust::check(&path, owners).is_err() && !hits.contains(&value) {
-            hits.push(value);
-        }
-    }
-    (!hits.is_empty()).then(|| {
-        let shown: Vec<String> = hits.iter().take(3).map(|h| display_line(h, 100)).collect();
-        let more = hits.len().saturating_sub(3);
-        format!(
-            "Names {}{}, which root does not control: if the program reads or runs it, that \
-             content is not shown here and can change after approval. To run your own script \
-             use `peekexec script`; to put a file in place, `peekexec install`.",
-            shown.join(", "),
-            if more > 0 {
-                format!(" and {more} more")
-            } else {
-                String::new()
-            }
-        )
-    })
-}
 
 /// One note for all hits, so naming many paths cannot push other warnings
 /// out of the desktop prompt's summary.
@@ -906,10 +726,9 @@ fn install_section(dest: &str, header: &str, content: &[u8], notes: &mut Vec<Str
 }
 
 /// What changes in an existing text file, as a unified diff.
-fn install_diff(dest: &Path, content: &[u8]) -> Option<Section> {
-    let old = std::fs::read(dest).ok()?;
+fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
     let (old, new) = (
-        std::str::from_utf8(&old).ok()?,
+        std::str::from_utf8(old).ok()?,
         std::str::from_utf8(content).ok()?,
     );
     let diff = similar::TextDiff::from_lines(old, new)
@@ -954,37 +773,6 @@ fn write_snapshot(dir: &Path, file: &Path, content: &[u8]) -> Result<(), String>
     std::io::Write::write_all(&mut f, content).map_err(err)
 }
 
-/// Final destination of an install: `dest`, or `dest/basename(src)` if
-/// `dest` is a directory. Its directory must be trusted; an existing target
-/// must be a regular file.
-fn install_target(dest: &str, src: &str, owners: &[u32]) -> Result<PathBuf, String> {
-    let mut target = PathBuf::from(dest);
-    if target.is_dir() {
-        let name = Path::new(src)
-            .file_name()
-            .ok_or_else(|| format!("cannot take a file name from {src}"))?;
-        target.push(name);
-    }
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
-    let parent = trust::check(parent, owners)
-        .map_err(|e| format!("install destination not allowed: {e}"))?;
-    let target = parent.join(target.file_name().ok_or("destination has no file name")?);
-    if let Ok(m) = std::fs::symlink_metadata(&target) {
-        if !m.file_type().is_file() {
-            return Err(format!(
-                "{} exists and is not a regular file (directory, symlink or device)",
-                target.display()
-            ));
-        }
-        if m.nlink() > 1 {
-            return Err(format!("{} has other hard links", target.display()));
-        }
-    }
-    Ok(target)
-}
-
 /// Process details are under the control of whoever runs the process, so
 /// they are escaped, and `trusted` says whether the executable is a
 /// root-owned file that only root could have put there.
@@ -1004,6 +792,7 @@ pub fn proc_line(p: &ProcessInfo) -> ProcLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn req(action: Action) -> Request {
         Request {
@@ -1058,26 +847,6 @@ mod tests {
     }
 
     #[test]
-    fn arguments_naming_user_files_are_flagged() {
-        if nix::unistd::geteuid().is_root() {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("pe-argfile-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("job.sh");
-        std::fs::write(&script, "echo hi\n").unwrap();
-        let s = script.to_str().unwrap();
-        // Trusted owners are root only, as in production.
-        let note = untrusted_file_args(&[s.into()], "/", &[0]).unwrap();
-        assert!(note.contains("job.sh"), "{note}");
-        let opt = format!("--config={s}");
-        assert!(untrusted_file_args(&[opt], "/", &[0]).is_some());
-        // System files and plain words are not flagged.
-        assert!(untrusted_file_args(&["/etc/hostname".into(), "-y".into()], "/", &[0]).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn an_argument_cannot_pass_for_several() {
         let r = req(Action::Run {
             argv: ["chmod", "0755", "/usr/local/bin\nargv[3] /tmp/harmless"]
@@ -1105,50 +874,6 @@ mod tests {
         assert_eq!(s.raw, "a && b");
         assert_eq!(s.formatted.len(), 2);
         assert!(s.header.unwrap().contains("sh → /usr/bin/dash"));
-    }
-
-    #[test]
-    fn shebang_flags_are_allowlisted() {
-        for (interp, ok) in [
-            ("dash", "-e"),
-            ("bash", "-eu"),
-            ("bash", "-eux"),
-            ("python3.10", "-I"),
-            ("python3", "-Is"),
-            ("perl", "-w"),
-            ("gawk", "-f"),
-            ("sed", "-f"),
-        ] {
-            assert!(shebang_flag_ok(interp, ok), "{interp} {ok}");
-        }
-        for bad in [
-            "-mfoo",
-            "-c",
-            "-r/home/u/x",
-            "--rcfile",
-            "-e /tmp/x",
-            "x",
-            "-",
-            "-Mstrict",
-        ] {
-            assert!(!shebang_flag_ok("bash", bad), "{bad}");
-        }
-        // `-e`/`-E` means "the next argument is code" to these.
-        for (interp, bad) in [
-            ("gawk", "-e"),
-            ("mawk", "-e"),
-            ("perl", "-e"),
-            ("perl", "-E"),
-            ("ruby", "-e"),
-            ("node", "-e"),
-            ("php", "-B"),
-            ("busybox", "-e"),
-            ("gawk", "-fe"),
-        ] {
-            assert!(!shebang_flag_ok(interp, bad), "{interp} {bad}");
-        }
-        let owners = trust::trusted_owners();
-        assert!(interpreter(b"#!/bin/sh -c\n", &owners).is_err());
     }
 
     #[test]
@@ -1188,24 +913,22 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let dest = dir.join("secret.conf");
         std::fs::write(&dest, "secret-line\n").unwrap();
-        let install = |dest: &Path| {
-            req(Action::Install {
-                src: "new.conf".into(),
-                content: b"new\n".to_vec(),
-                dest: dest.to_str().unwrap().into(),
-            })
-        };
+        let install = req(Action::Install {
+            src: "new.conf".into(),
+            content: b"new\n".to_vec(),
+            dest: dest.to_str().unwrap().into(),
+        });
         // Readable by the requester: the diff is shown.
-        let shown = prepare_for_tests(&install(&dest));
+        let shown = prepare_for_tests(&install);
         assert!(shown
             .view
             .sections
             .iter()
             .any(|s| s.raw.contains("secret-line")));
-        // Not readable (the daemon is this process, so it still can be read
-        // here, the way root reads anything): nothing of it is shown.
+        // Not readable by the requester (this test process, whose authority
+        // inspection uses): nothing of it is shown.
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let hidden = prepare_for_tests_as(&install(&dest), 4242, vec![4242]);
+        let hidden = prepare_for_tests(&install);
         std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600)).unwrap();
         let text = serde_json::to_string(&hidden.view).unwrap();
         assert!(!text.contains("secret-line"), "{text}");
@@ -1215,22 +938,19 @@ mod tests {
     }
 
     fn prepare_for_tests(r: &Request) -> Prepared {
-        let me = nix::unistd::getuid().as_raw();
+        let uid = nix::unistd::getuid().as_raw();
         let gid = nix::unistd::getgid().as_raw();
-        prepare_for_tests_as(r, me, vec![gid])
-    }
-
-    fn prepare_for_tests_as(r: &Request, uid: u32, groups: Vec<u32>) -> Prepared {
         let sandbox = crate::platform::linux::Namespaces;
         let ctx = Ctx {
             sandbox: &sandbox,
+            inspect: &crate::inspect::inspect,
             wants_password: true,
             dev: true,
             snapshot_root: Path::new("/nonexistent/peekexec-tests"),
         };
         let peer = Peer {
             uid,
-            gid: groups[0],
+            gid,
             process: ProcessInfo {
                 pid: 1,
                 exe: None,
@@ -1245,7 +965,8 @@ mod tests {
             name: "u".into(),
             home: "/home/u".into(),
             uid,
-            groups,
+            gid,
+            groups: vec![gid],
         };
         let display = Display {
             vars: vec![],
@@ -1371,18 +1092,5 @@ mod tests {
         );
         assert!(s.raw.starts_with("Not text: an executable program"));
         assert_eq!(notes.len(), 1);
-    }
-
-    #[test]
-    fn interpreter_from_shebang() {
-        let owners = trust::trusted_owners();
-        let (sh, arg) = interpreter(b"echo hi\n", &owners).unwrap();
-        assert!(sh.starts_with('/') && arg.is_none());
-        let (bash, _) = interpreter(b"#!/usr/bin/env bash\necho\n", &owners).unwrap();
-        assert!(bash.ends_with("bash"));
-        let (_, arg) = interpreter(b"#!/bin/sh -e\n", &owners).unwrap();
-        assert_eq!(arg.as_deref(), Some("-e"));
-        assert!(interpreter(b"#!relative\n", &owners).is_err());
-        assert!(interpreter(b"#!/usr/bin/env -S bash -x\n", &owners).is_err());
     }
 }

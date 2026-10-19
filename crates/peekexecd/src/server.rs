@@ -3,8 +3,9 @@
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -14,6 +15,7 @@ use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::{ClientMsg, DisplayTier, PreviewReply, Response, Status};
 
 use crate::exec;
+use crate::inspect::{self, Creds, Inspection};
 use crate::platform::{Peer, Platform, ProcessInfo};
 use crate::prepare::{self, display_line, proc_line, Ctx, Execution, Prepared, User};
 use crate::prompt::{self, Decision, Dialog};
@@ -38,6 +40,9 @@ pub struct Options {
 const DENIAL_TTL: Duration = Duration::from_secs(3600);
 const RESULT_TTL: Duration = Duration::from_secs(900);
 const ADMIN_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
+/// This very binary, for the inspection helper (even if the file on disk
+/// was replaced since the daemon started).
+const SELF_EXE: &str = "/proc/self/exe";
 /// Requests a user may have waiting at once; more are refused.
 const MAX_PENDING_PER_USER: usize = 3;
 /// A dialog appearing this soon after the previous one closed gets a longer
@@ -313,12 +318,31 @@ impl Daemon {
         (id, entry)
     }
 
-    fn ctx(&self) -> Ctx<'_> {
+    fn ctx<'a>(&'a self, inspect: &'a prepare::Inspector) -> Ctx<'a> {
         Ctx {
             sandbox: self.platform.sandbox.as_ref(),
+            inspect,
             wants_password: self.platform.auth.wants_password(),
             dev: self.opts.dev,
             snapshot_root: &self.opts.snapshot_root,
+        }
+    }
+
+    /// Inspection with the requesting user's authority (design rule 1): in
+    /// a helper process as that user, or in-process in development mode,
+    /// where the daemon is that user already.
+    fn inspector(
+        &self,
+        user: &User,
+    ) -> impl Fn(&Request, &[u32]) -> Result<(Inspection, OwnedFd), String> + Sync {
+        let creds = (!self.opts.dev).then(|| Creds {
+            uid: user.uid,
+            gid: user.gid,
+            groups: user.groups.clone(),
+        });
+        move |request: &Request, owners: &[u32]| match &creds {
+            Some(c) => inspect::inspect_as(Path::new(SELF_EXE), Some(c), request, owners),
+            None => inspect::inspect(request, owners),
         }
     }
 
@@ -336,23 +360,14 @@ impl Daemon {
                 ADMIN_GROUPS.join(", ")
             ));
         }
-        // Preview answers without a human: it must not tell the requester
-        // anything about paths the user could not look at without root.
-        let hidden = prepare::unreachable_paths(request, &user);
-        if !hidden.is_empty() {
-            return Err(format!(
-                "preview does not inspect paths you cannot access yourself ({}); submit the \
-                 request instead, and the human will see it",
-                hidden.join(", ")
-            ));
-        }
         let display = self.display_for(peer).unwrap_or(Display {
             vars: Vec::new(),
             tier: DisplayTier::X11,
             verified: false,
         });
+        let inspect = self.inspector(&user);
         prepare::prepare(
-            &self.ctx(),
+            &self.ctx(&inspect),
             peer,
             &user,
             request,
@@ -678,23 +693,11 @@ impl Daemon {
             tier: DisplayTier::X11,
             verified: false,
         });
-        let prepared = match prepare::prepare(&self.ctx(), peer, &user, request, id, &display, true)
-        {
+        let inspect = self.inspector(&user);
+        let ctx = self.ctx(&inspect);
+        let prepared = match prepare::prepare(&ctx, peer, &user, request, id, &display, true) {
             Ok(p) => p,
-            Err(e) => {
-                // The reason would tell the requester, with no human
-                // involved, about paths the user cannot look at.
-                let hidden = prepare::unreachable_paths(request, &user);
-                if hidden.is_empty() {
-                    return fail(e);
-                }
-                eprintln!("peekexecd: request {id} refused: {e:?}");
-                return fail(format!(
-                    "refused. The request names paths you cannot access yourself ({}), so \
-                     the reason is only in the daemon log",
-                    hidden.join(", ")
-                ));
-            }
+            Err(e) => return fail(e),
         };
         if found.is_none() {
             if let Some(dir) = &prepared.snapshot_dir {
@@ -910,6 +913,7 @@ fn user_of(uid: u32) -> Result<User, String> {
         name: u.name,
         home: u.dir.to_string_lossy().into_owned(),
         uid,
+        gid: u.gid.as_raw(),
         groups,
     })
 }

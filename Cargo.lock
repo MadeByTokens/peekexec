@@ -2146,6 +2146,7 @@ dependencies = [
  "peekexec-core",
  "peekexec-proto",
  "proptest",
+ "serde",
  "serde_json",
  "similar",
  "thiserror 2.0.21",

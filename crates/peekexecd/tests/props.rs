@@ -53,6 +53,7 @@ proptest! {
         let sandbox = peekexecd::platform::linux::Namespaces;
         let ctx = Ctx {
             sandbox: &sandbox,
+            inspect: &peekexecd::inspect::inspect,
             wants_password: true,
             dev: true,
             snapshot_root: std::path::Path::new("/nonexistent/peekexec-props"),
@@ -65,7 +66,7 @@ proptest! {
             ancestry: vec![],
             pinned: false,
         };
-        let user = User { name: "u".into(), home: "/home/u".into(), uid: 1000, groups: vec![1000] };
+        let user = User { name: "u".into(), home: "/home/u".into(), uid: 1000, gid: 1000, groups: vec![1000] };
         let display = Display { vars: vec![], tier: DisplayTier::X11, verified: false };
         let req = Request {
             action: Action::Run { argv },

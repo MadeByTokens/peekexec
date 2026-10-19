@@ -5,6 +5,7 @@
 //! backend directory, not touching the daemon logic.
 
 pub mod exec;
+pub mod inspect;
 pub mod platform;
 pub mod prepare;
 pub mod prompt;

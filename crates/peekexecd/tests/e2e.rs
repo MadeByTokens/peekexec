@@ -338,6 +338,9 @@ fn nothing_is_revealed_about_paths_the_user_cannot_reach() {
             dest: closed.join(name).to_str().unwrap().into(),
         })
     };
+    // The kernel answers for the user: "there" and "absent" look alike, in
+    // a preview and in a submission.
+    let mut answers = Vec::new();
     for name in ["there", "absent"] {
         let reply: PreviewReply = call(
             &d.socket,
@@ -349,16 +352,21 @@ fn nothing_is_revealed_about_paths_the_user_cannot_reach() {
         let PreviewReply::Error { error } = reply else {
             panic!("{reply:?}")
         };
-        assert!(error.contains("cannot access yourself"), "{error}");
+        assert!(error.contains("You cannot access this yourself"), "{error}");
+        let r = d.run(install(name));
+        assert_eq!(r.status, Status::Error, "{r:?}");
+        answers.push((
+            error.replace(name, "X"),
+            r.error.unwrap().replace(name, "X"),
+        ));
     }
-    // A submission that fails its checks there does not say why: the
-    // reason ("no such directory", "not a regular file"...) would tell.
+    assert_eq!(answers[0], answers[1]);
     let mut req = sh("true");
     req.cwd = closed.join("sub").to_str().unwrap().into();
     let r = d.run(req);
     assert_eq!(r.status, Status::Error, "{r:?}");
     let error = r.error.unwrap_or_default();
-    assert!(error.contains("only in the daemon log"), "{error}");
+    assert!(error.contains("You cannot access this yourself"), "{error}");
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 

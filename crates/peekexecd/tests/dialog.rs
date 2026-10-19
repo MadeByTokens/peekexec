@@ -49,6 +49,7 @@ fn dialog_channel_is_a_socket_with_only_stdio() {
     let sandbox = peekexecd::platform::linux::Namespaces;
     let ctx = Ctx {
         sandbox: &sandbox,
+        inspect: &peekexecd::inspect::inspect,
         wants_password: true,
         dev: true,
         snapshot_root: std::path::Path::new("/nonexistent/peekexec-dialog"),
@@ -70,6 +71,7 @@ fn dialog_channel_is_a_socket_with_only_stdio() {
         name: "u".into(),
         home: "/home/u".into(),
         uid: 1000,
+        gid: 1000,
         groups: vec![1000],
     };
     let display = Display {
