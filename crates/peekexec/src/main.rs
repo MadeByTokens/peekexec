@@ -253,7 +253,17 @@ fn preview(req: Request, json: bool) -> ExitCode {
         request: req.clone(),
     }) {
         Ok(PreviewReply::Ok { view }) => {
-            let found: Vec<Finding> = view.sections.iter().flat_map(|s| scan(&s.raw)).collect();
+            // Counted as the daemon and the dialog count them
+            // (PromptView::findings): the content and the invocation lines.
+            let found: Vec<Finding> = view
+                .sections
+                .iter()
+                .flat_map(|s| {
+                    let invocation = s.invocation.iter().flat_map(|l| scan(l));
+                    scan(&s.raw).into_iter().chain(invocation)
+                })
+                .collect();
+            debug_assert_eq!(found.len(), view.findings());
             if json {
                 let out = serde_json::json!({ "view": view, "findings": found });
                 println!("{out}");

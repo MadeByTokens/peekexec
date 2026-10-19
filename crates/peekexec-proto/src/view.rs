@@ -311,7 +311,7 @@ impl PromptView {
         line(format!("  in      : {}", self.cwd));
         line(format!("  run as  : {}", self.run_as));
         if let Some(why) = &self.why {
-            line(format!("  says    : {why:?}  (unverified)"));
+            line(format!("  says    : “{why}”  (unverified)"));
         }
         let summary: Vec<String> = self
             .summary(findings)
