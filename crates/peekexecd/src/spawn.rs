@@ -56,9 +56,26 @@ pub fn command(spec: Spec) -> Command {
     unsafe {
         cmd.pre_exec(move || {
             // Nothing but stdio reaches the program, whatever another
-            // thread had open without O_CLOEXEC. Ignored if unsupported.
+            // thread had open without O_CLOEXEC. Before Linux 5.11 there is
+            // no CLOSE_RANGE_CLOEXEC: mark each descriptor instead. If
+            // neither works, the process is not started (design rule 5).
             #[cfg(target_os = "linux")]
-            libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC);
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, CLOSE_RANGE_CLOEXEC) != 0 {
+                let mut limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let max = limit.rlim_cur.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
+                for fd in 3..max {
+                    let flags = libc::fcntl(fd, libc::F_GETFD);
+                    if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
             if let Some((uid, gid, groups)) = &creds {
                 // Groups first (root's group 0 must not leak), then gid,
                 // then uid; then make sure none of it can be undone.
