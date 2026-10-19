@@ -208,7 +208,10 @@ has a seat and is its active one"), never the absence of a warning sign
    the authentication agent registered at login (GNOME Shell itself), which a
    requester cannot reroute, and it shows a summary written by the daemon: the
    command (up to 12 lines per section, long lines wrapped rather than cut,
-   and a warning at the top whenever anything is left out), where it came
+   and a warning at the top whenever anything is left out; the prompt has no
+   colour or markers, so every character outside printable ASCII is written
+   as `⟨U+XXXX⟩`, runs of spaces collapse into a count, and the number of
+   suspicious characters comes first), where it came
    from, the working directory, the limits and every warning. The summary is
    passed so that polkit inserts it verbatim (no `$(...)` expansion). The
    subject is the requesting process (`unix-process`: pid, start time, uid).

