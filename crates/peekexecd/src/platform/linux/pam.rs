@@ -12,6 +12,8 @@ const PAM_BUF_ERR: c_int = 5;
 const PAM_CONV_ERR: c_int = 19;
 const PAM_PROMPT_ECHO_OFF: c_int = 1;
 const PAM_PROMPT_ECHO_ON: c_int = 2;
+const PAM_ERROR_MSG: c_int = 3;
+const PAM_TEXT_INFO: c_int = 4;
 const PAM_DISALLOW_NULL_AUTHTOK: c_int = 0x1;
 
 #[repr(C)]
@@ -106,7 +108,9 @@ extern "C" fn conversation(
             // from the dialog: fail closed rather than guess.
             PAM_PROMPT_ECHO_ON | PAM_PROMPT_ECHO_OFF => None,
             // Error and info messages need no reply.
-            _ => continue,
+            PAM_ERROR_MSG | PAM_TEXT_INFO => continue,
+            // Anything else (a binary prompt): fail closed.
+            _ => None,
         };
         let Some(text) = reply else {
             free_replies(replies, n);
