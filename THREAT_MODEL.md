@@ -118,8 +118,9 @@ It does not promise:
    action (admin authentication, never remembered). That prompt is drawn by
    the authentication agent registered at login (GNOME Shell itself), which a
    requester cannot reroute, and it shows a summary written by the daemon: the
-   command (or each section's first lines and length), where it came from,
-   the working directory, the limits, warnings and the hash. The summary is
+   command (up to 12 lines per section, long lines wrapped rather than cut,
+   and a warning at the top whenever anything is left out), where it came
+   from, the working directory, the limits and every warning. The summary is
    passed so that polkit inserts it verbatim (no `$(...)` expansion). The
    subject is the requesting process (`unix-process`: pid, start time, uid).
    polkit would prefer an agent registered for that very process over the
@@ -147,7 +148,7 @@ It does not promise:
 |---|---|---|
 | 1 | X11, verified X server | Buggy, overeager or prompt-injected requesters. **Not** a malicious same-user program: X11 lets any client draw fake windows, read keys, and synthesize input (including clicking Approve after reading a typed password, or forging a Deny reason). sudo and pkexec share this limit. |
 | 1- | Unverified display, polkit action not installed | As tier 1, and the dialog may be relayed through another display server. Flagged on every request. |
-| 2 | Wayland: password in the desktop's own polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts. |
+| 2 | Wayland: password in the desktop's own polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and for content longer than it can show (it says so) only the unverifiable window has the rest. |
 | 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. |
 
 ## Things a hurried human might assume

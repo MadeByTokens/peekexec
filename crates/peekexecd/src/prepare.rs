@@ -247,6 +247,8 @@ pub fn prepare(
             "ptrace_scope is 0: other programs of yours may be able to read this dialog.".into(),
         );
     }
+    // Some notes quote requester-chosen paths.
+    let notes: Vec<String> = notes.iter().map(|n| display_line(n, 1000)).collect();
 
     let requester = std::iter::once(&peer.process)
         .chain(&peer.ancestry)
@@ -316,6 +318,21 @@ pub fn display_line(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Control characters as visible `⟨U+XXXX⟩` tokens, everything else as is
+/// (the dialog marks other hidden characters itself). The tokens are not
+/// ASCII, so they also count as findings and Enter does not approve.
+fn escape_controls(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                format!("⟨U+{:04X}⟩", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Prefix of the note added when the display cannot be verified.
 pub const UNVERIFIED_NOTE: &str = "Could not verify which display server shows this dialog";
 const SYSTEM_PROMPT_NOTE: &str = "You will confirm in your desktop's own password dialog";
@@ -337,30 +354,46 @@ pub fn use_system_prompt(view: &mut PromptView) {
 /// The text the desktop's prompt shows: the decisive facts on their own,
 /// since a decoy window could sit next to it.
 pub fn system_prompt_message(view: &PromptView) -> String {
-    const LINES: usize = 4;
+    // Lines per section, and characters per line (longer ones wrap, they
+    // are never cut): the prompt is the only trustworthy view, so what it
+    // leaves out it says it leaves out.
+    const LINES: usize = 12;
+    const WIDTH: usize = 120;
+    let mut body = String::new();
+    let mut omitted = 0;
+    for s in &view.sections {
+        let lines: Vec<String> = s
+            .formatted
+            .iter()
+            .map(|l| display_line(l.text.trim(), usize::MAX))
+            .filter(|l| !l.is_empty())
+            .flat_map(|l| wrap(&l, WIDTH))
+            .collect();
+        body.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
+        for l in lines.iter().take(LINES) {
+            body.push_str(&format!("    {l}\n"));
+        }
+        if lines.len() > LINES {
+            omitted += lines.len() - LINES;
+            body.push_str(&format!(
+                "    … {} more lines NOT shown here\n",
+                lines.len() - LINES
+            ));
+        }
+    }
     let mut m = String::new();
     m.push_str(match view.kind {
         ViewKind::Root => "peekexec: run this as root?\n",
         ViewKind::Register => "peekexec: register an agent session?\n",
     });
-    for s in &view.sections {
-        let lines: Vec<String> = s
-            .formatted
-            .iter()
-            .map(|l| display_line(l.text.trim(), 100))
-            .filter(|l| !l.is_empty())
-            .collect();
-        m.push_str(&format!("\n{}:\n", display_line(&s.title, 80)));
-        for l in lines.iter().take(LINES) {
-            m.push_str(&format!("    {l}\n"));
-        }
-        if lines.len() > LINES {
-            m.push_str(&format!(
-                "    … {} lines in total, see the peekexec window\n",
-                lines.len()
-            ));
-        }
+    if omitted > 0 {
+        m.push_str(&format!(
+            "⚠ INCOMPLETE: {omitted} lines are not shown here. They appear only in the \
+             peekexec window, which cannot be verified. Approve only if you expected exactly \
+             this request.\n"
+        ));
     }
+    m.push_str(&body);
     // Every value below is already escaped where the view is built; escaping
     // again here keeps the prompt safe even if that ever changes.
     let from = match &view.provenance {
@@ -404,14 +437,24 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         .notes
         .iter()
         .filter(|n| !n.starts_with(SYSTEM_PROMPT_NOTE));
-    for n in warnings.take(3) {
-        m.push_str(&format!("⚠ {}\n", display_line(n, 120)));
+    // All of them: each kind of note appears at most once.
+    for n in warnings {
+        m.push_str(&format!("⚠ {}\n", display_line(n, 300)));
     }
     m.push_str(&format!(
-        "sha256 {}… (as in the peekexec window)",
+        "request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
     m
+}
+
+/// `s` in pieces of at most `width` characters.
+fn wrap(s: &str, width: usize) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    chars
+        .chunks(width.max(1))
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 pub struct User {
@@ -444,6 +487,12 @@ fn validate(req: &Request) -> Result<(), String> {
     for path in req.write.iter().flatten() {
         if !path.starts_with('/') {
             return Err(format!("--write path must be absolute: {path}"));
+        }
+        // Shown in the one-line summary: a line break would fake its lines.
+        if path.chars().any(char::is_control) {
+            return Err(format!(
+                "--write path may not contain control characters: {path:?}"
+            ));
         }
     }
     for (k, v) in &req.env {
@@ -502,10 +551,13 @@ fn path_str(p: &Path) -> Result<String, String> {
 }
 
 fn run_section(argv: &[String], program: &str) -> Section {
+    // One argument per line: line breaks and other control characters
+    // inside an argument become visible tokens, or one argument could pass
+    // for several.
     let raw: String = argv
         .iter()
         .enumerate()
-        .map(|(i, a)| format!("argv[{i}] {a}\n"))
+        .map(|(i, a)| format!("argv[{i}] {}\n", escape_controls(a)))
         .collect();
     let resolved = if basename(program) == basename(&argv[0]) && argv[0].starts_with('/') {
         String::new()
@@ -682,7 +734,9 @@ const SENSITIVE: &[&str] = &[
     "/etc/group",
 ];
 
-fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Vec<String> {
+/// One note for all hits, so naming many paths cannot push other warnings
+/// out of the desktop prompt's summary.
+fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String> {
     let mut hits: Vec<&str> = Vec::new();
     let texts = sections
         .iter()
@@ -695,11 +749,13 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Vec<String> {
             }
         }
     }
-    hits.into_iter()
-        .map(|p| {
-            format!("Touches {p}*: files there can run commands as root later or control logins.")
-        })
-        .collect()
+    (!hits.is_empty()).then(|| {
+        let paths: Vec<String> = hits.iter().map(|p| format!("{p}*")).collect();
+        format!(
+            "Touches {}: files there can run commands as root later or control logins.",
+            paths.join(", ")
+        )
+    })
 }
 
 fn install_section(dest: &str, header: &str, content: &[u8], notes: &mut Vec<String>) -> Section {
@@ -881,6 +937,27 @@ mod tests {
         );
         assert_eq!(display_line("abcdef", 3), "abc…");
         assert_eq!(display_line("café", 300), "café");
+    }
+
+    #[test]
+    fn an_argument_cannot_pass_for_several() {
+        let r = req(Action::Run {
+            argv: ["chmod", "0755", "/usr/local/bin\nargv[3] /tmp/harmless"]
+                .map(String::from)
+                .to_vec(),
+        });
+        let p = prepare_for_tests(&r);
+        let s = &p.view.sections[0];
+        assert_eq!(s.raw.lines().count(), 3, "{}", s.raw);
+        assert!(s.raw.contains("⟨U+000A⟩"), "{}", s.raw);
+        assert_eq!(s.formatted.len(), 1);
+        assert!(!p.view.enter_approves);
+
+        let mut r = req(Action::Run {
+            argv: vec!["true".into()],
+        });
+        r.write = Some(vec!["/etc/motd\nnetwork: blocked".into()]);
+        assert!(validate(&r).unwrap_err().contains("control characters"));
     }
 
     #[test]
@@ -1084,15 +1161,38 @@ mod tests {
         let m = system_prompt_message(&v);
         assert!(m.starts_with("peekexec: run this as root?"));
         assert!(m.contains("    a &&"), "{m}");
-        assert!(m.contains("6 lines in total"), "{m}");
+        assert!(m.contains("    f $("), "all six lines fit: {m}");
+        assert!(!m.contains("INCOMPLETE"), "{m}");
         assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
         assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
         assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
         assert!(!m.contains("ignored"), "why must not be in the prompt: {m}");
-        assert!(
-            m.ends_with("sha256 3f9a1c000000… (as in the peekexec window)"),
-            "{m}"
-        );
+        assert!(m.ends_with("request sha256 3f9a1c000000…"), "{m}");
+
+        // Too long for the prompt: it says so, before the content.
+        let script: String = (0..30).map(|i| format!("step{i}\n")).collect();
+        v.sections = vec![run_section(
+            &["sh".into(), "-c".into(), script],
+            "/usr/bin/dash",
+        )];
+        let m = system_prompt_message(&v);
+        let warn = m.find("INCOMPLETE: 18 lines").expect(&m);
+        assert!(warn < m.find("step0").unwrap(), "{m}");
+        assert!(!m.contains("step12"), "{m}");
+
+        // A long line wraps; nothing is cut off.
+        let long = format!("apt-get install -y {}evil-tail", "pkg ".repeat(60));
+        v.sections = vec![run_section(
+            &["sh".into(), "-c".into(), long],
+            "/usr/bin/dash",
+        )];
+        let m = system_prompt_message(&v);
+        assert!(m.contains("evil-tail"), "{m}");
+
+        // Every warning is listed.
+        v.notes = (0..6).map(|i| format!("warning {i}")).collect();
+        let m = system_prompt_message(&v);
+        assert!(m.contains("⚠ warning 5"), "{m}");
     }
 
     #[test]
@@ -1103,9 +1203,15 @@ mod tests {
             network: false,
             network_level: Level::Builtin,
         };
-        let notes = sensitive_targets(&[], &e);
-        assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("/etc/sudoers"));
+        let note = sensitive_targets(&[], &e).unwrap();
+        assert!(note.contains("/etc/sudoers"));
+        // Many hits are still one note.
+        let e = Enforced {
+            write: Some(vec!["/etc/sudoers.d/x".into(), "/etc/cron.d/y".into()]),
+            ..e
+        };
+        let note = sensitive_targets(&[], &e).unwrap();
+        assert!(note.contains("/etc/sudoers*, /etc/cron*"), "{note}");
     }
 
     #[test]
