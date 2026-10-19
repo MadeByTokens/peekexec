@@ -14,6 +14,16 @@ use peekexecd::inspect::{inspect_as, Facts};
 
 const HELPER: &str = env!("CARGO_BIN_EXE_peekexecd");
 
+/// One test at a time: a test writing its stand-in helper holds the file
+/// open for writing, and a fork in another test's thread copies that
+/// descriptor until its exec, so the stand-in could fail to start with
+/// ETXTBSY.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn request(cwd: &str) -> Request {
     Request {
         action: Action::Run {
@@ -34,6 +44,7 @@ fn owners() -> Vec<u32> {
 
 #[test]
 fn helper_returns_facts_and_the_directory_descriptor() {
+    let _serial = serial();
     let (inspection, fd) =
         inspect_as(Path::new(HELPER), None, &request("/usr"), &owners()).unwrap();
     assert_eq!(inspection.cwd, "/usr");
@@ -49,6 +60,7 @@ fn helper_returns_facts_and_the_directory_descriptor() {
 
 #[test]
 fn helper_errors_come_back_as_errors() {
+    let _serial = serial();
     let err = inspect_as(
         Path::new(HELPER),
         None,
@@ -61,6 +73,7 @@ fn helper_errors_come_back_as_errors() {
 
 #[test]
 fn helper_runs_with_no_new_privs() {
+    let _serial = serial();
     let dir = std::env::temp_dir().join(format!("pe-nnp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let report = dir.join("status");
@@ -82,6 +95,7 @@ fn helper_runs_with_no_new_privs() {
 
 #[test]
 fn a_helper_that_never_answers_is_cut_off() {
+    let _serial = serial();
     // Stands in for a helper stuck on a filesystem that never answers.
     let dir = std::env::temp_dir().join(format!("pe-stuck-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
