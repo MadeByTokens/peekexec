@@ -30,6 +30,59 @@ pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
     check_with(path, owners, false)
 }
 
+/// Like [`check`], for a directory already open: it walks up from the
+/// object held, never by name, so moving or re-pointing a path meanwhile
+/// changes nothing. `shown` names it in the errors.
+pub fn check_dir(dir: &std::fs::File, shown: &str, owners: &[u32]) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let err = |e: std::io::Error| format!("{shown}: {e}");
+    let mut cur = dir.try_clone().map_err(err)?;
+    let mut leaf = true;
+    // Deeper than PATH_MAX allows: something is wrong.
+    for _ in 0..2048 {
+        let m = cur.metadata().map_err(err)?;
+        let what = if leaf {
+            shown.to_string()
+        } else {
+            format!("a directory above {shown}")
+        };
+        if !owners.contains(&m.uid()) {
+            return Err(format!(
+                "{what} is owned by uid {}, which is not trusted: it could change after approval",
+                m.uid()
+            ));
+        }
+        let nosuid = nix::sys::statvfs::fstatvfs(&cur).map_or(true, |s| {
+            s.flags().contains(nix::sys::statvfs::FsFlags::ST_NOSUID)
+        });
+        if nosuid {
+            return Err(format!(
+                "{what} is on a filesystem mounted nosuid: whoever mounted it controls its files"
+            ));
+        }
+        let mode = m.permissions().mode();
+        if mode & 0o022 != 0 && (leaf || mode & S_ISVTX == 0) {
+            return Err(format!(
+                "{what} is writable by other users: it could change after approval"
+            ));
+        }
+        // `..` of the object itself, through its descriptor.
+        let parent = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(format!("/proc/self/fd/{}/..", cur.as_raw_fd()))
+            .map_err(err)?;
+        let p = parent.metadata().map_err(err)?;
+        if (p.dev(), p.ino()) == (m.dev(), m.ino()) {
+            return Ok(());
+        }
+        cur = parent;
+        leaf = false;
+    }
+    Err(format!("{shown}: too many directories above it"))
+}
+
 /// Whether the user could change what `path` names, as the program will
 /// look it up after approval: every existing prefix of the path *as
 /// written* must be root-controlled, so a symlink, a missing file or a
@@ -165,6 +218,20 @@ mod tests {
             .unwrap_err()
             .contains("writable by other"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_directories_are_checked_by_object() {
+        let open = |p: &str| std::fs::File::open(p).unwrap();
+        assert!(check_dir(&open("/usr/share"), "/usr/share", &[0]).is_ok());
+        // Sticky and world-writable: fine above a directory, not as it.
+        let err = check_dir(&open("/tmp"), "/tmp", &[0]).unwrap_err();
+        assert!(err.contains("writable by other"), "{err}");
+        if !nix::unistd::geteuid().is_root() {
+            let home = std::env::var("HOME").unwrap();
+            let err = check_dir(&open(&home), &home, &[0]).unwrap_err();
+            assert!(err.contains("not trusted"), "{err}");
+        }
     }
 
     #[test]

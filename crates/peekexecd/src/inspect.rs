@@ -254,7 +254,9 @@ pub fn verify(
             inspection.cwd
         ));
     }
-    Ok(trust::check(Path::new(&inspection.cwd), owners)
+    // From the descriptor the command will run in, not the path again.
+    let held = std::fs::File::from(cwd_fd.try_clone().map_err(|e| format!("cwd: {e}"))?);
+    Ok(trust::check_dir(&held, &inspection.cwd, owners)
         .err()
         .map(|why| {
             format!(
