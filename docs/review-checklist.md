@@ -55,6 +55,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Timing: between showing and running | R2: cwd by descriptor, snapshot by copy (✓); program and install target by path → (b) | ⚠ |
 | Timing: pid reuse | pidfds for the requester and agents (✓); ⚠ approved command tracked by pid → (d) | ⚠ |
 | Processes the approved command starts | killed with its process group; detached ones cannot hold the request (✓) | ✓ |
+| The inspection helper's answer (it runs as the user) | Pre: program, interpreter and install directory re-checked as root; destination must be the requested one; descriptor must be the directory shown; cwd warning recomputed; failures are generic (✓). The helper is non-dumpable from exec (binary mode 0711) and by `prctl` (✓). Residual: with ptrace_scope 0 (already noted in the dialog) a tampered helper could misstate an existing file's old content; the new content is always shown in full | ✓ |
 | Panics it can trigger | release builds abort; socket activation restarts (✓) | ✓ |
 
 ## Planned structural fixes

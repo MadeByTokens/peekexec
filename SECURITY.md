@@ -38,7 +38,7 @@ interfaces, each with a `SAFETY:` comment:
 | `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `close_range`, `loginuid`, `unshare(CLONE_NEWNET)` |
 | `crates/peekexecd/src/prompt.rs` | 2 | `pre_exec` for the dialog: `close_range`, `setgroups`, `setgid`, `setuid` |
 | `crates/peekexecd/src/server.rs` | 2 | `localtime_r` (time shown on agent sessions) |
-| `crates/peekexecd/src/inspect.rs` | 3 | `pre_exec` for the inspection helper (`close_range`, `setgroups`/`setgid`/`setuid`, `PR_SET_NO_NEW_PRIVS`); adopting the descriptor received with `SCM_RIGHTS`; the helper adopting its socket (fd 0) |
+| `crates/peekexecd/src/inspect.rs` | 4 | `pre_exec` for the inspection helper (`close_range`, `setgroups`/`setgid`/`setuid`, `PR_SET_NO_NEW_PRIVS`); adopting the descriptor received with `SCM_RIGHTS`; the helper adopting its socket (fd 0) and making itself non-dumpable |
 
 ## Release integrity
 

@@ -190,7 +190,85 @@ pub fn inspect_as(
     let result = exchange(&mut conn, req, owners);
     let _ = child.kill();
     let _ = child.wait();
-    result
+    let (inspection, fd) = result?;
+    // The helper runs as the user, so its answer is input like any other.
+    // Facts root relies on are checked again here. Failures say nothing
+    // specific: a forged answer must not become a way to probe as root.
+    match verify(req, &inspection, &fd, owners) {
+        Ok(cwd_warning) => Ok((
+            Inspection {
+                cwd_warning,
+                ..inspection
+            },
+            fd,
+        )),
+        Err(why) => {
+            eprintln!("peekexecd: inspection helper answer rejected: {why}");
+            Err("the inspection helper's answer did not verify; see the daemon log".into())
+        }
+    }
+}
+
+/// Check what the daemon relies on in a helper's answer, as root: the
+/// program or interpreter and the install directory are root-controlled
+/// (checking them reveals nothing private), the destination is the one
+/// requested, and the descriptor is the directory shown. Returns the
+/// working-directory warning, recomputed.
+pub fn verify(
+    req: &Request,
+    inspection: &Inspection,
+    cwd_fd: &OwnedFd,
+    owners: &[u32],
+) -> Result<Option<String>, String> {
+    let trusted = |p: &str| {
+        Path::new(p).is_absolute()
+            && trust::check(Path::new(p), owners).is_ok_and(|c| c == Path::new(p))
+    };
+    match (&req.action, &inspection.facts) {
+        (Action::Run { .. }, Facts::Run { program, .. }) => {
+            if !trusted(program) {
+                return Err(format!("program {program:?} is not root-controlled"));
+            }
+        }
+        (Action::Script { .. }, Facts::Script { interpreter, .. }) => {
+            if !trusted(interpreter) {
+                return Err(format!(
+                    "interpreter {interpreter:?} is not root-controlled"
+                ));
+            }
+        }
+        (Action::Install { src, dest, .. }, Facts::Install { dest: got, .. }) => {
+            let got = Path::new(got);
+            let parent_ok = got.parent().is_some_and(|p| trusted(&p.to_string_lossy()));
+            let name = got.file_name();
+            let name_ok = name.is_some()
+                && (name == Path::new(dest).file_name() || name == Path::new(src).file_name());
+            if !got.is_absolute() || !parent_ok || !name_ok {
+                return Err(format!(
+                    "install destination {got:?} does not match {dest:?}"
+                ));
+            }
+        }
+        _ => return Err("facts do not match the request".into()),
+    }
+    let held = nix::sys::stat::fstat(cwd_fd.as_raw_fd()).map_err(|e| format!("fstat: {e}"))?;
+    let shown = std::fs::metadata(&inspection.cwd).map_err(|e| format!("cwd: {e}"))?;
+    let is_dir = held.st_mode & libc::S_IFMT == libc::S_IFDIR;
+    if !is_dir || (held.st_dev as u64, held.st_ino as u64) != (shown.dev(), shown.ino()) {
+        return Err(format!(
+            "the directory descriptor is not {:?}",
+            inspection.cwd
+        ));
+    }
+    Ok(trust::check(Path::new(&inspection.cwd), owners)
+        .err()
+        .map(|why| {
+            format!(
+                "Runs inside {}, which root does not control ({why}). Programs may load \
+             code or settings from it (git, python, make, npm...).",
+                inspection.cwd
+            )
+        }))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -269,6 +347,14 @@ fn recv_marker(conn: &UnixStream) -> std::io::Result<Option<OwnedFd>> {
 /// The helper's main: one job on stdin (a socket), the marker byte (with
 /// the directory descriptor) and the reply on stdout (the same socket).
 pub fn helper_main() -> ! {
+    // Other programs of the user must not be able to drive this process.
+    // Installed mode 0711 (not readable by users), it is non-dumpable from
+    // exec on; this covers other installs.
+    // SAFETY: plain prctl call with constant arguments.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
+    };
     // SAFETY: fd 0 is the socket the daemon passed; nothing else owns it.
     let conn = unsafe { UnixStream::from_raw_fd(0) };
     let job: Job = match read_msg(&mut BufReader::new(&conn)) {
@@ -602,6 +688,100 @@ mod tests {
         // System files and plain words are not flagged.
         assert!(untrusted_file_args(&["/etc/hostname".into(), "-y".into()], "/", &[0]).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn req(action: Action, cwd: &str) -> Request {
+        Request {
+            action,
+            why: None,
+            write: None,
+            no_net: false,
+            env: Default::default(),
+            cwd: cwd.into(),
+            timeout_secs: 30,
+        }
+    }
+
+    fn dir_fd(p: &str) -> OwnedFd {
+        OwnedFd::from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(DIR_FLAGS)
+                .open(p)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn helper_answers_are_verified() {
+        let owners = [0];
+        let run = req(
+            Action::Run {
+                argv: vec!["true".into()],
+            },
+            "/",
+        );
+        let program = path_str(&trust::resolve_program("true", "/", &owners).unwrap()).unwrap();
+        let honest = Inspection {
+            cwd: "/".into(),
+            cwd_warning: None,
+            facts: Facts::Run {
+                program,
+                file_args_note: None,
+            },
+        };
+        assert!(verify(&run, &honest, &dir_fd("/"), &owners).is_ok());
+
+        // A forged program: a file the user controls.
+        let dir = std::env::temp_dir().join(format!("pe-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("true");
+        std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let forged = Inspection {
+            facts: Facts::Run {
+                program: fake.to_str().unwrap().into(),
+                file_args_note: None,
+            },
+            ..honest.clone()
+        };
+        if !nix::unistd::geteuid().is_root() {
+            assert!(verify(&run, &forged, &dir_fd("/"), &owners).is_err());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // The descriptor must be the directory shown.
+        let moved = Inspection {
+            cwd: "/usr".into(),
+            ..honest.clone()
+        };
+        assert!(verify(&run, &moved, &dir_fd("/"), &owners).is_err());
+
+        // An install must land where it was asked to.
+        let install = req(
+            Action::Install {
+                src: "a.conf".into(),
+                content: vec![],
+                dest: "/etc/a.conf".into(),
+            },
+            "/",
+        );
+        let elsewhere = Inspection {
+            facts: Facts::Install {
+                dest: "/etc/sudoers.d/zz".into(),
+                existing: None,
+            },
+            ..honest.clone()
+        };
+        assert!(verify(&install, &elsewhere, &dir_fd("/"), &owners).is_err());
+        let right = Inspection {
+            facts: Facts::Install {
+                dest: "/etc/a.conf".into(),
+                existing: None,
+            },
+            ..honest
+        };
+        assert!(verify(&install, &right, &dir_fd("/"), &owners).is_ok());
     }
 
     #[test]

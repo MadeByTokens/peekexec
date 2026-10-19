@@ -19,7 +19,12 @@ out without root: no file content the user cannot read, nothing about paths
 the user cannot reach. This holds by construction: before approval, every
 path a request names is resolved, checked and read by a helper process with
 the requesting user's credentials and `no_new_privs`, so the kernel decides
-(`crates/peekexecd/src/inspect.rs`). A request naming a path the user cannot
+(`crates/peekexecd/src/inspect.rs`). Because the helper runs as the user,
+its answer is input too: what root relies on (program, interpreter, install
+directory, the directory descriptor) is checked again as root, with generic
+errors, and the helper cannot be driven by other programs of the user (its
+binary is not readable by them, so it is non-dumpable from exec). A request
+naming a path the user cannot
 reach is refused before approval; such steps go inside `peekexec script`,
 where the human reads them.
 
