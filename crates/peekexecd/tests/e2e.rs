@@ -325,6 +325,44 @@ fn writable_cwd_is_flagged_and_disables_enter() {
 }
 
 #[test]
+fn nothing_is_revealed_about_paths_the_user_cannot_reach() {
+    let d = Daemon::start("approve");
+    let closed = d.dir.join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    std::fs::write(closed.join("there"), "x").unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let install = |name: &str| {
+        request(Action::Install {
+            src: "f".into(),
+            content: b"new\n".to_vec(),
+            dest: closed.join(name).to_str().unwrap().into(),
+        })
+    };
+    for name in ["there", "absent"] {
+        let reply: PreviewReply = call(
+            &d.socket,
+            &ClientMsg::Preview {
+                request: install(name),
+            },
+        )
+        .unwrap();
+        let PreviewReply::Error { error } = reply else {
+            panic!("{reply:?}")
+        };
+        assert!(error.contains("cannot access yourself"), "{error}");
+    }
+    // A submission that fails its checks there does not say why: the
+    // reason ("no such directory", "not a regular file"...) would tell.
+    let mut req = sh("true");
+    req.cwd = closed.join("sub").to_str().unwrap().into();
+    let r = d.run(req);
+    assert_eq!(r.status, Status::Error, "{r:?}");
+    let error = r.error.unwrap_or_default();
+    assert!(error.contains("only in the daemon log"), "{error}");
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
 fn shebang_arguments_are_restricted() {
     let d = Daemon::start("approve");
     let r = d.run(request(Action::Script {

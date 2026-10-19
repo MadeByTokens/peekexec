@@ -770,6 +770,47 @@ const SENSITIVE: &[&str] = &[
     "/etc/group",
 ];
 
+/// Every path the request names that the daemon looks at as root: the
+/// working directory, a program or `#!` interpreter given by path, path-like
+/// arguments, and an install destination. Relative ones are taken from the
+/// working directory.
+pub fn named_paths(req: &Request) -> Vec<PathBuf> {
+    let cwd = Path::new(&req.cwd);
+    let mut out = vec![cwd.to_path_buf()];
+    let mut push = |p: &str| {
+        if p.contains('/') {
+            out.push(cwd.join(p));
+        }
+    };
+    match &req.action {
+        Action::Run { argv } => {
+            for a in argv {
+                push(a.split_once('=').map_or(a.as_str(), |(_, v)| v));
+            }
+        }
+        Action::Script { content, .. } => {
+            let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
+            if let Some(line) = first.strip_prefix(b"#!") {
+                let line = String::from_utf8_lossy(line);
+                if let Some(prog) = line.split_whitespace().next() {
+                    push(prog);
+                }
+            }
+        }
+        Action::Install { dest, .. } => push(dest),
+    }
+    out
+}
+
+/// The named paths that `user` could not find out about without root.
+pub fn unreachable_paths(req: &Request, user: &User) -> Vec<String> {
+    named_paths(req)
+        .into_iter()
+        .filter(|p| !trust::reachable_by(p, user.uid, &user.groups))
+        .map(|p| display_line(&p.to_string_lossy(), 200))
+        .collect()
+}
+
 /// Arguments naming an existing file that root does not control
 /// (`sh ~/x.sh`, `cp /tmp/f /etc/`, `--config=/home/u/c`): the program may
 /// read or run it, but its content is not shown and can change after

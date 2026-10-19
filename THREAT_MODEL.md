@@ -13,6 +13,12 @@ or policy-based delegation; use sudo, doas or polkit rules there.
 argv, script bytes, environment, install content and target, and working
 directory that were shown, with the limits reported in `enforced`.
 
+**Nothing without a human.** What the daemon answers without a human
+(previews, refusals, errors) tells the requester nothing it could not find
+out without root: no file content the user cannot read, nothing about paths
+the user cannot reach. A request that names such paths can still be
+submitted; then the human sees it.
+
 It does not promise:
 
 - that the approved command is safe (the human decides; flags help);

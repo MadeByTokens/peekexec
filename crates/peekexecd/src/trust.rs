@@ -91,6 +91,40 @@ fn on_nosuid_mount(p: &Path) -> bool {
     statvfs(p).map_or(true, |s| s.flags().contains(FsFlags::ST_NOSUID))
 }
 
+/// Whether `uid` could find out about `path` itself: every existing
+/// directory above it must let the user pass (search permission). Below the
+/// first missing one there is nothing to find out. Symbolic links are
+/// followed, as root's checks follow them. Judged from mode bits, and
+/// conservatively with ACLs (then only the bits for everyone count).
+pub fn reachable_by(path: &Path, uid: u32, groups: &[u32]) -> bool {
+    if uid == 0 {
+        return true;
+    }
+    let ancestors: Vec<&Path> = path.ancestors().skip(1).collect();
+    for dir in ancestors.into_iter().rev() {
+        let Ok(m) = std::fs::metadata(dir) else {
+            return true;
+        };
+        if !m.is_dir() {
+            return true;
+        }
+        let mode = m.permissions().mode();
+        let can = if mode & 0o001 != 0 {
+            true
+        } else if has_acl(dir) {
+            false
+        } else if m.uid() == uid {
+            mode & 0o100 != 0
+        } else {
+            groups.contains(&m.gid()) && mode & 0o010 != 0
+        };
+        if !can {
+            return false;
+        }
+    }
+    true
+}
+
 /// Whether `uid` (with `groups`) could read `path` itself, judged from the
 /// mode bits. Conservative: with a POSIX ACL the group bits are only a mask,
 /// so such a file counts as readable only if everyone may read it.
@@ -196,6 +230,23 @@ mod tests {
         let err = check(run, &[0]).unwrap_err();
         assert!(err.contains("nosuid"), "{err}");
         assert!(!on_nosuid_mount(Path::new("/usr/bin")));
+    }
+
+    #[test]
+    fn reachability_needs_search_permission_on_every_directory() {
+        let dir = std::env::temp_dir().join(format!("pe-reach-{}", std::process::id()));
+        let inner = dir.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        let me = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        let target = inner.join("secret");
+        assert!(reachable_by(&target, me, &[gid]));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(reachable_by(&target, me, &[gid]));
+        assert!(!reachable_by(&target, me + 1, &[gid + 1]));
+        // Missing directories: nothing to find out below them.
+        assert!(reachable_by(Path::new("/no/such/dir/x"), me + 1, &[]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

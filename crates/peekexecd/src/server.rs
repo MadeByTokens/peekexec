@@ -336,6 +336,16 @@ impl Daemon {
                 ADMIN_GROUPS.join(", ")
             ));
         }
+        // Preview answers without a human: it must not tell the requester
+        // anything about paths the user could not look at without root.
+        let hidden = prepare::unreachable_paths(request, &user);
+        if !hidden.is_empty() {
+            return Err(format!(
+                "preview does not inspect paths you cannot access yourself ({}); submit the \
+                 request instead, and the human will see it",
+                hidden.join(", ")
+            ));
+        }
         let display = self.display_for(peer).unwrap_or(Display {
             vars: Vec::new(),
             tier: DisplayTier::X11,
@@ -671,7 +681,20 @@ impl Daemon {
         let prepared = match prepare::prepare(&self.ctx(), peer, &user, request, id, &display, true)
         {
             Ok(p) => p,
-            Err(e) => return fail(e),
+            Err(e) => {
+                // The reason would tell the requester, with no human
+                // involved, about paths the user cannot look at.
+                let hidden = prepare::unreachable_paths(request, &user);
+                if hidden.is_empty() {
+                    return fail(e);
+                }
+                eprintln!("peekexecd: request {id} refused: {e:?}");
+                return fail(format!(
+                    "refused. The request names paths you cannot access yourself ({}), so \
+                     the reason is only in the daemon log",
+                    hidden.join(", ")
+                ));
+            }
         };
         if found.is_none() {
             if let Some(dir) = &prepared.snapshot_dir {
