@@ -238,12 +238,12 @@ pub fn verify(
             }
         }
         (Action::Install { src, dest, .. }, Facts::Install { dest: got, .. }) => {
+            // Derived here, independently, and required to match exactly.
+            // Only compared, never reported: it reveals nothing.
             let got = Path::new(got);
+            let expected = expected_install_target(dest, src);
             let parent_ok = got.parent().is_some_and(|p| trusted(&p.to_string_lossy()));
-            let name = got.file_name();
-            let name_ok = name.is_some()
-                && (name == Path::new(dest).file_name() || name == Path::new(src).file_name());
-            if !got.is_absolute() || !parent_ok || !name_ok {
+            if expected.as_deref() != Some(got) || !parent_ok {
                 return Err(format!(
                     "install destination {got:?} does not match {dest:?}"
                 ));
@@ -561,6 +561,18 @@ fn install_target(dest: &str, src: &str, owners: &[u32]) -> Result<PathBuf, Stri
     }
 }
 
+/// Where an install of `src` to `dest` lands, by the same rule as
+/// [`install_target`] (a directory gets `basename(src)`), with the parent
+/// canonical. `None` if it cannot be worked out.
+fn expected_install_target(dest: &str, src: &str) -> Option<PathBuf> {
+    let mut target = PathBuf::from(dest);
+    if target.is_dir() {
+        target.push(Path::new(src).file_name()?);
+    }
+    let parent = target.parent()?.canonicalize().ok()?;
+    Some(parent.join(target.file_name()?))
+}
+
 /// The file an install would replace, read as far as this process may.
 fn existing(target: &Path) -> Option<Existing> {
     let m = std::fs::metadata(target).ok()?;
@@ -774,6 +786,33 @@ mod tests {
             ..honest.clone()
         };
         assert!(verify(&install, &elsewhere, &dir_fd("/"), &owners).is_err());
+        // Same file name, another trusted directory: still not the request.
+        let same_name = Inspection {
+            facts: Facts::Install {
+                dest: "/etc/sudoers.d/a.conf".into(),
+                existing: None,
+            },
+            ..honest.clone()
+        };
+        assert!(verify(&install, &same_name, &dir_fd("/"), &owners).is_err());
+        // A directory as the destination gets the source's name, and only that.
+        let into_dir = req(
+            Action::Install {
+                src: "/home/u/a.conf".into(),
+                content: vec![],
+                dest: "/etc".into(),
+            },
+            "/",
+        );
+        let named = |d: &str| Inspection {
+            facts: Facts::Install {
+                dest: d.into(),
+                existing: None,
+            },
+            ..honest.clone()
+        };
+        assert!(verify(&into_dir, &named("/etc/a.conf"), &dir_fd("/"), &owners).is_ok());
+        assert!(verify(&into_dir, &named("/etc/b.conf"), &dir_fd("/"), &owners).is_err());
         let right = Inspection {
             facts: Facts::Install {
                 dest: "/etc/a.conf".into(),
