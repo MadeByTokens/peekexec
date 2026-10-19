@@ -532,7 +532,14 @@ fn validate(req: &Request) -> Result<(), String> {
         !s.chars()
             .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
     };
-    if let Action::Install { src, dest, .. } = &req.action {
+    if let Action::Install { src, dest, content } = &req.action {
+        // A Python program installed is run later, decoded by Python's rules.
+        let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
+        let python = [src, dest].iter().any(|p| p.ends_with(".py"))
+            || (first.starts_with(b"#!") && first.windows(6).any(|w| w == b"python"));
+        if python {
+            crate::inspect::python_runs_as_shown(content)?;
+        }
         // Into a directory, the file is named after `src`.
         let name = Path::new(src).file_name().and_then(|n| n.to_str());
         if let Some(bad) = [Some(dest.as_str()), name]
@@ -949,6 +956,12 @@ mod tests {
             });
             assert!(validate(&r).unwrap_err().contains("hidden"), "{dest:?}");
         }
+        let r = req(Action::Install {
+            src: "tool".into(),
+            content: b"#!/usr/bin/python3\n# coding: utf-7\n# +AAo-import os\n".to_vec(),
+            dest: "/usr/local/bin/tool".into(),
+        });
+        assert!(validate(&r).unwrap_err().contains("utf-7"));
         // Into a directory the name comes from `src`: held to the same rule.
         let r = req(Action::Install {
             src: "/home/u/evil\u{202E}hs.txt\nline".into(),

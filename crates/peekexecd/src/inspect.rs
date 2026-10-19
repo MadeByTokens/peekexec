@@ -448,11 +448,17 @@ pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<Str
         if name.contains(char::is_whitespace) || name.starts_with('-') {
             return Err(format!("unsupported #!/usr/bin/env arguments: {name:?}"));
         }
-        let resolved = trust::resolve_program(&name, "/", owners)?;
-        return Ok((path_str(&resolved)?, None));
+        let resolved = path_str(&trust::resolve_program(&name, "/", owners)?)?;
+        if family(basename(&resolved)) == "python" {
+            python_runs_as_shown(content)?;
+        }
+        return Ok((resolved, None));
     }
     let resolved = trust::resolve_program(prog, "/", owners)?;
     let resolved = path_str(&resolved)?;
+    if family(basename(&resolved)) == "python" {
+        python_runs_as_shown(content)?;
+    }
     if let Some(a) = &arg {
         if !shebang_flag_ok(basename(&resolved), a) {
             return Err(format!(
@@ -474,8 +480,7 @@ fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
     let Some(flags) = arg.strip_prefix('-') else {
         return false;
     };
-    let family = interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
-    let allowed = match family {
+    let allowed = match family(interp) {
         "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash" => "aeEfuvxBCTl",
         "python" => "IsSEBuO",
         "perl" => "wWXTt",
@@ -485,6 +490,56 @@ fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
         _ => return false,
     };
     !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
+}
+
+/// An interpreter's name without its version (`python3.10` is `python`).
+fn family(interp: &str) -> &str {
+    interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
+}
+
+/// Python does not always run the text that is shown: a PEP 263 coding
+/// cookie (`utf-7`, `unicode_escape`) decodes the file into other code, and
+/// a zip archive inside it is run instead of the text. So the cookie must
+/// name UTF-8 or ASCII, and no zip signature may appear.
+pub fn python_runs_as_shown(content: &[u8]) -> Result<(), String> {
+    for line in content.split(|&b| b == b'\n').take(2) {
+        if let Some(name) = coding_cookie(line) {
+            let name = name.to_ascii_lowercase().replace('_', "-");
+            if !matches!(name.as_str(), "utf-8" | "utf8" | "ascii" | "us-ascii") {
+                return Err(format!(
+                    "the script declares the source encoding {name:?}: Python would decode \
+                     it into code other than what is shown. Use UTF-8"
+                ));
+            }
+        }
+    }
+    let zip = [b"PK\x03\x04", b"PK\x05\x06", b"PK\x01\x02"];
+    if content.windows(4).any(|w| zip.iter().any(|z| w == *z)) {
+        return Err(
+            "the script contains a zip archive, which Python would run instead of the text \
+             shown"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The encoding a line declares, by Python's rule
+/// `^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)`.
+fn coding_cookie(line: &[u8]) -> Option<String> {
+    let line = std::str::from_utf8(line).ok()?;
+    let comment = line
+        .trim_start_matches([' ', '\t', '\x0c'])
+        .strip_prefix('#')?;
+    comment.match_indices("coding").find_map(|(i, _)| {
+        let rest = comment[i + "coding".len()..].strip_prefix([':', '='])?;
+        let name: String = rest
+            .trim_start_matches([' ', '\t'])
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        (!name.is_empty()).then_some(name)
+    })
 }
 
 /// Arguments naming an existing file that root does not control
@@ -675,6 +730,16 @@ mod tests {
         assert_eq!(arg.as_deref(), Some("-e"));
         assert!(interpreter(b"#!relative\n", &owners).is_err());
         assert!(interpreter(b"#!/usr/bin/env -S bash -x\n", &owners).is_err());
+        if trust::resolve_program("python3", "/", &owners).is_ok() {
+            let utf7 = b"#!/usr/bin/python3 -I\n# coding: utf-7\n# x +AAo-print(1)\n";
+            assert!(interpreter(utf7, &owners).unwrap_err().contains("utf-7"));
+            let esc = b"#!/usr/bin/env python3\n# -*- coding: unicode_escape -*-\n";
+            assert!(interpreter(esc, &owners).is_err());
+            let zip = b"#!/usr/bin/python3\nprint(1)\nPK\x03\x04\x14\x00";
+            assert!(interpreter(zip, &owners).unwrap_err().contains("zip"));
+            let ok = b"#!/usr/bin/python3\n# -*- coding: utf-8 -*-\nprint(1)\n";
+            assert!(interpreter(ok, &owners).is_ok());
+        }
     }
 
     #[test]
