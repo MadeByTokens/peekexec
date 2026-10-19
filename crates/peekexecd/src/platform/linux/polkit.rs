@@ -67,6 +67,16 @@ fn subject_details(pid: u32, start_time: u64, uid: u32) -> HashMap<&'static str,
 
 type Reply = zbus::Result<(bool, bool, HashMap<String, String>)>;
 
+/// polkit expands `$(name)` inside messages, and an unterminated `$(`
+/// would swallow the rest. Passing the text as a detail and the message as
+/// a single reference makes polkit insert it verbatim, unparsed.
+fn details(message: &str) -> HashMap<&'static str, &str> {
+    HashMap::from([
+        ("polkit.message", "$(peekexec.message)"),
+        ("peekexec.message", message),
+    ])
+}
+
 impl SystemPrompt for Polkit {
     fn available(&self) -> bool {
         Path::new(POLICY).exists()
@@ -105,7 +115,7 @@ impl SystemPrompt for Polkit {
         // requester runs itself, so polkit must be what involves the human:
         // if it would grant with no one asked (a local rule, a remembered
         // authorization), refuse.
-        match self.decide_silently(&conn, subject.pid, start_time, uid)? {
+        match self.decide_silently(&conn, subject.pid, start_time, uid, message)? {
             (true, _) => {
                 return Err(PlatformError::Other(
                     "refusing: polkit would allow this without asking anyone (a local rule or \
@@ -187,8 +197,10 @@ impl Polkit {
         pid: u32,
         start_time: u64,
         uid: u32,
+        message: &str,
     ) -> Result<(bool, bool), PlatformError> {
-        let details: HashMap<&str, &str> = HashMap::new();
+        // The same details as the real check: a rule may look at them.
+        let details = details(message);
         let reply: Reply = conn
             .call_method(
                 Some(DEST),
@@ -228,14 +240,7 @@ impl Polkit {
         let (pid, id, text) = (subject.pid, cancellation_id.clone(), message.to_string());
         std::thread::spawn(move || {
             let subject_details = subject_details(pid, start_time, uid);
-            // polkit expands `$(name)` inside messages, and an unterminated
-            // `$(` would swallow the rest. Passing the text as a detail and
-            // the message as a single reference makes polkit insert it
-            // verbatim, unparsed.
-            let details: HashMap<&str, &str> = HashMap::from([
-                ("polkit.message", "$(peekexec.message)"),
-                ("peekexec.message", text.as_str()),
-            ]);
+            let details = details(&text);
             let reply = worker
                 .call_method(
                     Some(DEST),
