@@ -112,6 +112,7 @@ pub fn prepare(
                 audit_uid: Some(peer.uid),
             };
             let enforced = ctx.sandbox.enforcement(&plan);
+            notes.extend(untrusted_file_args(&argv[1..], &workdir.path, &owners));
             (
                 vec![run_section(argv, &program)],
                 Execution::Command(plan),
@@ -727,7 +728,25 @@ impl WorkDir {
 /// Places where a file makes root run commands later, or controls logins.
 const SENSITIVE: &[&str] = &[
     "/etc/sudoers",
+    "/etc/sudo.conf",
     "/etc/cron",
+    "/etc/anacrontab",
+    "/etc/init.d",
+    "/etc/rc.local",
+    "/etc/modprobe.d",
+    "/etc/modules-load.d",
+    "/etc/logrotate",
+    "/etc/xdg/autostart",
+    "/etc/X11/Xsession",
+    "/etc/update-motd.d",
+    "/etc/NetworkManager/dispatcher.d",
+    "/etc/kernel",
+    "/etc/default/grub",
+    "/boot",
+    "/usr/share/polkit-1",
+    // Before /usr/bin in root's PATH: a program here shadows the system one.
+    "/usr/local/bin",
+    "/usr/local/sbin",
     "/var/spool/cron",
     "/etc/systemd",
     "/lib/systemd",
@@ -751,6 +770,42 @@ const SENSITIVE: &[&str] = &[
     "/etc/group",
 ];
 
+/// Arguments naming an existing file that root does not control
+/// (`sh ~/x.sh`, `cp /tmp/f /etc/`, `--config=/home/u/c`): the program may
+/// read or run it, but its content is not shown and can change after
+/// approval. One note for all of them.
+fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<String> {
+    let mut hits = Vec::new();
+    for a in args {
+        let value = a.split_once('=').map_or(a.as_str(), |(_, v)| v);
+        if !value.contains('/') {
+            continue;
+        }
+        let path = Path::new(cwd).join(value);
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if trust::check(&path, owners).is_err() && !hits.contains(&value) {
+            hits.push(value);
+        }
+    }
+    (!hits.is_empty()).then(|| {
+        let shown: Vec<String> = hits.iter().take(3).map(|h| display_line(h, 100)).collect();
+        let more = hits.len().saturating_sub(3);
+        format!(
+            "Names {}{}, which root does not control: if the program reads or runs it, that \
+             content is not shown here and can change after approval. To run your own script \
+             use `peekexec script`; to put a file in place, `peekexec install`.",
+            shown.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    })
+}
+
 /// One note for all hits, so naming many paths cannot push other warnings
 /// out of the desktop prompt's summary.
 fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String> {
@@ -760,6 +815,11 @@ fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String
         .map(|s| s.raw.as_str())
         .chain(enforced.write.iter().flatten().map(String::as_str));
     for text in texts {
+        // `/etc//cron.d` and `/etc/./cron.d` name /etc/cron.d too.
+        let mut text = text.to_string();
+        while text.contains("//") || text.contains("/./") {
+            text = text.replace("//", "/").replace("/./", "/");
+        }
         for &p in SENSITIVE {
             if text.contains(p) && !hits.contains(&p) {
                 hits.push(p);
@@ -954,6 +1014,26 @@ mod tests {
         );
         assert_eq!(display_line("abcdef", 3), "abc…");
         assert_eq!(display_line("café", 300), "café");
+    }
+
+    #[test]
+    fn arguments_naming_user_files_are_flagged() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pe-argfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("job.sh");
+        std::fs::write(&script, "echo hi\n").unwrap();
+        let s = script.to_str().unwrap();
+        // Trusted owners are root only, as in production.
+        let note = untrusted_file_args(&[s.into()], "/", &[0]).unwrap();
+        assert!(note.contains("job.sh"), "{note}");
+        let opt = format!("--config={s}");
+        assert!(untrusted_file_args(&[opt], "/", &[0]).is_some());
+        // System files and plain words are not flagged.
+        assert!(untrusted_file_args(&["/etc/hostname".into(), "-y".into()], "/", &[0]).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1229,6 +1309,14 @@ mod tests {
         };
         let note = sensitive_targets(&[], &e).unwrap();
         assert!(note.contains("/etc/sudoers*, /etc/cron*"), "{note}");
+        // Redundant slashes and dots do not hide a path.
+        for p in ["/etc//cron.d/x", "/etc/./cron.d/x", "/usr/local/bin/apt"] {
+            let e = Enforced {
+                write: Some(vec![p.into()]),
+                ..e.clone()
+            };
+            assert!(sensitive_targets(&[], &e).is_some(), "{p}");
+        }
     }
 
     #[test]

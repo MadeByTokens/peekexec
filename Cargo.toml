@@ -20,3 +20,9 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 proptest = "=1.11"
+
+[profile.release]
+# A panic in the root daemon ends the process instead of one thread: no
+# client is left waiting on a request whose worker died, and no lock is left
+# poisoned. Socket activation starts a fresh daemon on the next connection.
+panic = "abort"
