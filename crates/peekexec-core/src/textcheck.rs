@@ -37,11 +37,29 @@ pub fn classify(c: char) -> Option<FindingKind> {
         | '\u{200F}'
         | '\u{202A}'..='\u{202E}'
         | '\u{2066}'..='\u{2069}' => Some(FindingKind::BidiControl),
+        // Unicode's Default_Ignorable_Code_Point (drawn with no width, or
+        // not at all), plus the combining-mark blocks, which change the
+        // character before them and may have no glyph in the dialog's font.
         '\u{00AD}'
-        | '\u{180E}'
+        | '\u{034F}'
+        | '\u{115F}'..='\u{1160}'
+        | '\u{17B4}'..='\u{17B5}'
+        | '\u{180B}'..='\u{180F}'
         | '\u{200B}'..='\u{200D}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{FEFF}' => Some(FindingKind::Invisible),
+        | '\u{2060}'..='\u{2065}'
+        | '\u{206A}'..='\u{206F}'
+        | '\u{3164}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}'
+        | '\u{FFA0}'
+        | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}'
+        | '\u{E0000}'..='\u{E0FFF}'
+        | '\u{0300}'..='\u{036F}'
+        | '\u{1AB0}'..='\u{1AFF}'
+        | '\u{1DC0}'..='\u{1DFF}'
+        | '\u{20D0}'..='\u{20FF}'
+        | '\u{FE20}'..='\u{FE2F}' => Some(FindingKind::Invisible),
         c if c.is_control() => Some(FindingKind::ControlChar),
         c if !c.is_ascii() => Some(FindingKind::NonAscii),
         _ => None,
@@ -103,6 +121,31 @@ mod tests {
                 FindingKind::NonAscii
             ]
         );
+    }
+
+    #[test]
+    fn zero_width_characters_are_invisible() {
+        // Each measured with no advance in the dialog's font.
+        for c in [
+            '\u{206A}',
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{FE0F}',
+            '\u{034F}',
+            '\u{17B4}',
+            '\u{180B}',
+            '\u{1D173}',
+            '\u{1AB0}',
+            '\u{0301}',
+        ] {
+            assert_eq!(
+                classify(c),
+                Some(FindingKind::Invisible),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        assert_eq!(classify('é'), Some(FindingKind::NonAscii));
     }
 
     #[test]

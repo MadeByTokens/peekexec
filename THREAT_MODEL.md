@@ -171,7 +171,7 @@ has a seat and is its active one"), never the absence of a warning sign
      directory root does not control is flagged, because programs load code and
      settings from it (git, Python, make...).
    - Install destinations must sit in a root-owned directory chain, and their
-     names may not contain control or hidden characters (nor may the
+     names may contain only printable ASCII (nor may the
      source's name, which a file installed into a directory takes). The
      full destination is a counted line of the dialog and the desktop
      prompt, never only the cut title. The file is

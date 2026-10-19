@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
-use peekexec_core::textcheck::{classify, FindingKind};
 use peekexec_core::{Action, Request};
 use peekexec_proto::view::{
     Approval, ProcLine, PromptView, Provenance, Section, Shown, Syntax, ViewKind,
@@ -574,11 +573,9 @@ fn validate(req: &Request) -> Result<(), String> {
     }
     // Paths root writes to are shown in the one-line summary: a line break
     // would fake its lines, a bidi or invisible character would hide part
-    // of it. Such a name is never needed, so it is refused, not escaped.
-    let plain = |s: &str| {
-        !s.chars()
-            .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
-    };
+    // of it, a look-alike would pass for another name. An allowlist:
+    // printable ASCII and spaces.
+    let plain = |s: &str| s.chars().all(|c| c.is_ascii_graphic() || c == ' ');
     if let Action::Install { src, dest, content } = &req.action {
         // A Python program installed is run later, decoded by Python's rules.
         let first = content.split(|&b| b == b'\n').next().unwrap_or_default();
@@ -596,7 +593,7 @@ fn validate(req: &Request) -> Result<(), String> {
         {
             return Err(format!(
                 "install destination may not contain control characters or hidden \
-                 characters: {}",
+                 characters (only printable ASCII): {}",
                 display_line(bad, 300)
             ));
         }
@@ -607,7 +604,9 @@ fn validate(req: &Request) -> Result<(), String> {
         }
         if !plain(path) {
             return Err(format!(
-                "--write path may not contain control characters or hidden characters: {path:?}"
+                "--write path may not contain control characters or hidden characters \
+                 (only printable ASCII): {}",
+                display_line(path, 300)
             ));
         }
     }
