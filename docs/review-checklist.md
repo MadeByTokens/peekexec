@@ -50,9 +50,9 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 
 | Input | Where it matters | Status |
 |---|---|---|
-| Its process names, command lines | Dialog: escaped, labelled as self-reported (✓). ⚠ the ancestry walk has no depth limit | ⚠ |
+| Its process names, command lines | Dialog: escaped, labelled as self-reported (✓); at most 64 ancestors are read, and an agent beyond that is not found, so the request counts as unregistered (✓) | ✓ |
 | Its executable path (mount namespaces) | Dialog and provenance: must be the same inode as the path in the daemon's view (✓) | ✓ |
-| Its environment | Display fallback only; Wayland socket name and runtime dir checked; marked unverified (✓). ⚠ root reads the environment of every ancestor, other users' included | ⚠ |
+| Its environment | Display fallback only; read only from processes the requester's uid owns (the opened file's owner); Wayland socket name and runtime dir checked; marked unverified (✓ R1) | ✓ |
 | Its egid (`newgrp`, `sg`) | ignored: the admin check and the dialog's gid come from the user database (✓ R2) | ✓ |
 | Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: only canonical paths inside root-controlled chains are used, where the user can place no symlink (✓) | ✓ |
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |

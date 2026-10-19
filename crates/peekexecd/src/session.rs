@@ -35,7 +35,7 @@ pub fn find(info: &dyn PeerInfo, peer: &Peer) -> Option<Display> {
     let rest = info.processes_of(peer.uid);
     chain
         .chain(rest)
-        .filter_map(|pid| info.environ(pid))
+        .filter_map(|pid| info.environ(pid, peer.uid))
         .find_map(|env| from_environ(&env, peer.uid))
 }
 

@@ -81,9 +81,11 @@ pub struct XServer {
 
 pub trait PeerInfo: Send + Sync {
     fn identify(&self, conn: &UnixStream) -> Result<Peer, PlatformError>;
-    /// Environment of a process the daemon may read (to find the user's
-    /// display). `None` if it is gone or unreadable.
-    fn environ(&self, pid: u32) -> Option<Vec<(String, String)>>;
+    /// Environment of a process owned by `uid` (to find the user's
+    /// display). `None` if it is gone, unreadable, or someone else's: before
+    /// approval the daemon reads only the requester's own processes
+    /// (design rule 1).
+    fn environ(&self, pid: u32, uid: u32) -> Option<Vec<(String, String)>>;
     /// Processes owned by `uid` (fallback when looking for a display).
     fn processes_of(&self, uid: u32) -> Vec<u32>;
     /// The X server of `uid`'s active local graphical session, identified

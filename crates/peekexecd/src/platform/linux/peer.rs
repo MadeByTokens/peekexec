@@ -6,6 +6,10 @@ use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 
 use crate::platform::{Peer, PeerInfo, Pinned, PlatformError, ProcessInfo, XServer};
 
+/// Ancestors read for a request, at most (a process can nest itself
+/// arbitrarily deep).
+const MAX_ANCESTRY: usize = 64;
+
 /// SO_PEERCRED for the identity, /proc for the description, and a pidfd
 /// (SO_PEERPIDFD, Linux 6.5+) to prove the description is of that process.
 pub struct ProcPeerInfo;
@@ -22,6 +26,11 @@ impl PeerInfo for ProcPeerInfo {
         let mut ancestry = Vec::new();
         let mut next = parent_pid(pid);
         while let Some(ppid) = next.filter(|&p| p > 1) {
+            if ancestry.len() == MAX_ANCESTRY {
+                // Cut, not followed: an agent session beyond this depth is
+                // not found, so the request counts as unregistered.
+                break;
+            }
             ancestry.push(process_info(ppid));
             next = parent_pid(ppid);
         }
@@ -37,8 +46,15 @@ impl PeerInfo for ProcPeerInfo {
         })
     }
 
-    fn environ(&self, pid: u32) -> Option<Vec<(String, String)>> {
-        let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    fn environ(&self, pid: u32, uid: u32) -> Option<Vec<(String, String)>> {
+        // The owner of the opened file, not of a path looked up again: the
+        // kernel gives /proc/<pid>/environ the process's uid.
+        let mut f = std::fs::File::open(format!("/proc/{pid}/environ")).ok()?;
+        if f.metadata().ok()?.uid() != uid {
+            return None;
+        }
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut raw).ok()?;
         Some(
             raw.split(|&b| b == 0)
                 .filter_map(|kv| std::str::from_utf8(kv).ok()?.split_once('='))
@@ -253,8 +269,13 @@ mod tests {
 
     #[test]
     fn reads_own_environ() {
-        let env = ProcPeerInfo.environ(std::process::id()).unwrap();
+        let me = nix::unistd::geteuid().as_raw();
+        let env = ProcPeerInfo.environ(std::process::id(), me).unwrap();
         assert!(env.iter().any(|(k, _)| k == "PATH"));
+        // Not as anyone else's.
+        assert!(ProcPeerInfo
+            .environ(std::process::id(), me.wrapping_add(1))
+            .is_none());
     }
 
     #[test]

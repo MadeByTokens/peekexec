@@ -32,7 +32,7 @@ impl PeerInfo for Unported {
         ))
     }
 
-    fn environ(&self, _pid: u32) -> Option<Vec<(String, String)>> {
+    fn environ(&self, _pid: u32, _uid: u32) -> Option<Vec<(String, String)>> {
         None
     }
 
