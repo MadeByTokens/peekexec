@@ -106,13 +106,11 @@ are there, so build and install from a tree only you can write, and run it
 yourself: an agent asking to run it through `peekexec script` would show
 you the script, not the root daemon it installs. Packages are planned.
 
-Administrators are the members of the first of `sudo`, `wheel`, `admin`
-that exists, whatever sudoers or polkit grant them: on a system where one
-of these groups means something else, peekexec gives its members root.
-
-Only members of the system's administrator group can connect to the daemon
-at all: the first of `sudo`, `wheel`, `admin` that exists. They approve with
-their own password, the same model as sudo.
+Only administrators can connect to the daemon at all: the members of the
+first of `sudo`, `wheel`, `admin` that exists, whatever sudoers or polkit
+grant them (on a system where one of these groups means something else,
+peekexec gives its members root). They approve with their own password, the
+same model as sudo.
 
 ## Develop
 
