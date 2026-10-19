@@ -88,6 +88,14 @@ pub fn command(spec: Spec) -> Command {
                 if libc::getegid() != *gid || (*uid != 0 && libc::setuid(0) == 0) {
                     return Err(std::io::Error::from_raw_os_error(libc::EPERM));
                 }
+                // After setuid the kernel makes the process dumpable again
+                // (per fs.suid_dumpable), so until exec the user could
+                // attach to it: a copy of the daemon's memory, holding all
+                // of its descriptors. exec of a 0711 binary keeps it so.
+                #[cfg(target_os = "linux")]
+                if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             #[cfg(target_os = "linux")]
             if no_new_privs && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {

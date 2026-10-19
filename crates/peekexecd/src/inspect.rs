@@ -286,7 +286,10 @@ fn exchange(
         ),
         _ => format!("inspection helper: {e}"),
     };
+    // Both ways: a helper stopped before reading (SIGSTOP from the user)
+    // must not hold the request's thread forever.
     conn.set_read_timeout(Some(HELPER_TIMEOUT))
+        .and_then(|()| conn.set_write_timeout(Some(HELPER_TIMEOUT)))
         .map_err(timeout)?;
     write_msg(
         conn,
