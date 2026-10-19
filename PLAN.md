@@ -28,9 +28,10 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
    (a root process can undo a network namespace). Each response says which
    level applied; nothing is called enforced unless it is. Real containment
    via systemd's sandboxing is planned.
-4. **Honest display tiers.** X11 with a verified X server, unverified displays
-   (Wayland today) flagged on every request, then the desktop's own polkit
-   prompt (M2) and a dedicated VT or FIDO2 (later).
+4. **Honest display tiers.** X11 with a verified X server; on displays it
+   cannot verify (Wayland), the password goes into the desktop's own polkit
+   prompt, which repeats the decisive facts (flagged on every request only
+   where the polkit action is not installed); a dedicated VT or FIDO2 later.
 
 ## The dialog
 
@@ -54,8 +55,9 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
   (each line is an exact slice of the original, checked in code); a Raw toggle
   shows the exact bytes.
 - **Marked, not hidden:** every non-ASCII and control character (bidi
-  overrides, invisible characters, look-alikes), runs of spaces, and runs of
-  blank lines are shown as visible markers.
+  overrides, invisible characters, look-alikes), runs of spaces or tabs, and
+  runs of blank lines are shown as visible markers. Each argument root
+  passes is a line of its own (`argv[i] ...`), in full.
 - **Flags:** a working directory root does not control, targets that make root
   run things later (sudoers, cron, systemd, udev, pam.d, profile, ld.so...),
   unverified display, executables in the install.
@@ -74,13 +76,16 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
 ## Built for agents
 
 - `--help` teaches everything. `peekexec help agents` is the full guide,
-  `peekexec help schema` is the JSON Schema of `--json` output. Both are
-  generated from the code; tests keep them and [docs/cli.md](docs/cli.md) in sync.
+  `peekexec help schema` is the JSON Schema of `--json` output. The schema
+  and the exit codes are generated from the code; tests check that the
+  guide names every status and level, and keep [docs/cli.md](docs/cli.md)
+  in sync.
 - Commands: `run`, `script`, `install` (content and diff shown), `preview`
   (shows what the human will see, without asking), `submit` / `wait` /
   `cancel` for long waits.
 - `--json` output: `status`, `exit_code`, `stdout`, `stderr`, `deny_reason`,
-  `enforced`, `sha256`, `request_id`, `error`.
+  `enforced`, `sha256`, `request_id`, `error`, `display_tier`,
+  `display_verified`, `dev_mode`, `session`.
 - Exit codes: 0–125 the command's own; 130 cancelled, 131 denied, 132 auth
   failed, 133 timeout, 134 error, 135 pending.
 - Resending an identical request (same sha256) within an hour of a denial is
@@ -92,9 +97,12 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
 
 ```
 peekexec (CLI, unprivileged) ──Unix socket + kernel peer creds──▶ peekexecd (root)
+                                                                   ├─ inspection helper (peekexecd --inspect-helper,
+                                                                   │    as the user, no_new_privs: every path, before approval)
                                                                    ├─ snapshot + sha256
-                                                                   ├─ peekexec-ui (dialog, separate process, non-dumpable)
-                                                                   ├─ authenticate
+                                                                   ├─ peekexec-ui (dialog, as the user, non-dumpable)
+                                                                   │    or the desktop's polkit prompt (Wayland)
+                                                                   ├─ authenticate (PAM, or polkit)
                                                                    └─ exec (snapshot, pinned cwd) + audit log
 ```
 
@@ -103,7 +111,7 @@ crates/
   peekexec-core   request model, hashing, display helpers, text checks   (no OS code)
   peekexec-proto  client ⇄ daemon ⇄ dialog messages, Status, Response    (no OS code)
   peekexec-ui     the dialog (egui), a normal window (no keyboard grab)
-  peekexec        the CLI (binary `peekexec`, optional alias `pkx`)
+  peekexec        the CLI (binary `peekexec`)
   peekexecd       daemon logic + platform traits:
                     PeerInfo       linux: SO_PEERCRED + /proc  | macos: getpeereid + LOCAL_PEERPID
                     Authenticator  linux: PAM                  | macos: LocalAuthentication / Touch ID
@@ -119,7 +127,8 @@ crates/
 - `peekexec-core` and `peekexec-proto` must never use OS APIs. CI checks the
   whole workspace on a macOS runner from day one.
 - Every `Sandbox` reports what it really enforces (`kernel` / `best_effort` /
-  `declared_only` / `not_requested`). Weaker platforms show weaker guarantees
+  `declared_only` / `not_requested`; `builtin` when peekexec itself did the
+  work, as `install` does). Weaker platforms show weaker guarantees
   with no special-casing in the UI.
 - The dialog is a separate process speaking `peekexec-proto`, so a native
   SwiftUI dialog can replace it later. In M1 it runs as the approving user
@@ -137,12 +146,14 @@ Crates: `nix`, `libc`, `egui`/`eframe`, `syntect`, `similar`, `clap`, `serde`,
 
 - Today: `packaging/install.sh` from a release build. Planned: `.deb`, `.rpm`,
   AUR, static musl tarball.
-- CI today: fmt, clippy, shellcheck, docs freshness, tests on Ubuntu
-  22.04/24.04, macOS compile check. Planned: Debian, Fedora, Arch, Alpine.
-- Planned: reproducible builds, signed releases, SBOM, pinned CI actions,
-  `cargo audit` / `cargo deny`.
+- CI today: fmt, clippy, shellcheck, docs freshness, `cargo deny` and
+  `cargo audit`, tests on Ubuntu 22.04/24.04, and on macOS a workspace check
+  plus the portable crates' tests; actions pinned to commits, read-only
+  token. Planned: Debian, Fedora, Arch, Alpine.
+- Planned: reproducible builds, signed releases, SBOM.
 - A fake approver for tests exists only behind a cargo feature that is
-  compile-time excluded from release builds; CI checks it is absent.
+  compile-time excluded from release builds; `packaging/install.sh` refuses
+  a daemon binary that contains it.
 - macOS later: Homebrew formula built from source (no notarization needed).
 - Windows: out of scope (UAC already provides an elevation prompt); WSL works.
 - License: MIT OR Apache-2.0.
@@ -217,7 +228,8 @@ itself "claude"). Plan:
 - Done: per-uid caps on connections (16) and pending requests (3);
   non-admins rejected before reading. Left: smaller message limit for
   wait/cancel/preview; bounded worker pool; `LimitNOFILE` in the unit.
-- Catch worker panics so a `run` client never blocks forever.
+- Done: worker panics cannot leave a `run` client blocked; release builds
+  abort on panic and socket activation starts a fresh daemon.
 - Cap script/argv size shown in the dialog and virtualise its scrolling.
 - Root mode: refuse instead of warning when the display is unverified (once
   the Wayland work gives verified paths there).

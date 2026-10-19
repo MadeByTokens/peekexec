@@ -25,9 +25,10 @@ answer back.
 
 pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
 
-- the command's argv, the script's bytes, or the installed file's content
-  (with a diff when it replaces a file), highlighted, with every non-ASCII and
-  control character, long space runs and blank-line padding marked;
+- the command's argv (each argument on a line of its own), the script's bytes,
+  or the installed file's content (with a diff when it replaces a file),
+  highlighted, with every non-ASCII and control character, long runs of
+  spaces or tabs, and blank-line padding marked;
 - who connected (uid from the kernel; the process chain, with processes whose
   executable root does not own marked as such) and the reason they give
   (labelled unverified);
@@ -89,13 +90,23 @@ pkexec "$PWD/packaging/install.sh" --uninstall
 ```
 
 The script copies the built binaries into a root-only staging directory,
-refuses a test build, then installs `/usr/local/bin/peekexec`,
-`/usr/libexec/peekexec/{peekexecd,peekexec-ui}`, `peekexecd.socket` and
-`/etc/pam.d/peekexec`. It still runs as root from your checkout, so build and
-install from a tree only you can write. Packages are planned.
+refuses a test build, then installs:
 
-Only members of `sudo`, `wheel` or `admin` can connect to the daemon at all,
-and they approve with their own password, the same model as sudo.
+- `/usr/local/bin/peekexec`;
+- `/usr/libexec/peekexec/{peekexecd,peekexec-ui}`, mode 0711 (executable but
+  not readable by users, so the copies that run as you are non-dumpable);
+- `peekexecd.socket` and `peekexecd.service` in `/etc/systemd/system`, with
+  a drop-in that sets the socket's group;
+- `/usr/share/polkit-1/actions/org.peekexec.approve.policy`, which the
+  Wayland path needs (skipped if polkit is not installed);
+- `/etc/pam.d/peekexec`, unless it exists.
+
+It still runs as root from your checkout, so build and install from a tree
+only you can write. Packages are planned.
+
+Only members of the system's administrator group can connect to the daemon
+at all: the first of `sudo`, `wheel`, `admin` that exists. They approve with
+their own password, the same model as sudo.
 
 ## Develop
 
