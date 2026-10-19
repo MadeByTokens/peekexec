@@ -79,3 +79,22 @@ fn helper_runs_with_no_new_privs() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(status.split_whitespace().last(), Some("1"), "{status}");
 }
+
+#[test]
+fn a_helper_that_never_answers_is_cut_off() {
+    // Stands in for a helper stuck on a filesystem that never answers.
+    let dir = std::env::temp_dir().join(format!("pe-stuck-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stuck = dir.join("helper");
+    std::fs::write(&stuck, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let err = inspect_as(&stuck, None, &request("/"), &owners()).unwrap_err();
+    let took = started.elapsed();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(err.contains("took longer than"), "{err}");
+    assert!(
+        took >= peekexecd::inspect::HELPER_TIMEOUT && took < std::time::Duration::from_secs(20),
+        "{took:?}"
+    );
+}
