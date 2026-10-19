@@ -12,8 +12,9 @@ use crate::spawn::{self, Spec};
 /// well-behaved program from using the network, but it is not containment:
 /// a root process can rejoin the host namespace or ask a system service to
 /// act for it, so it is reported as best effort. Write limits are declared
-/// only. Real containment (dropped capabilities, seccomp, systemd sandboxing)
-/// is planned.
+/// only. Real containment (approved commands as transient systemd units
+/// with a capability bounding set and `ReadWritePaths=`, see PLAN.md) is
+/// planned.
 pub struct Namespaces;
 
 fn is_root() -> bool {

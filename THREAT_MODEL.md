@@ -144,10 +144,12 @@ has a seat and is its active one"), never the absence of a warning sign
      root-only snapshot whose name the daemon picks (`script`, keeping a short
      alphanumeric extension), so no part of the interpreter's arguments comes
      from the requester; the caller's file is never re-read.
-   - `run` resolves argv[0] in a fixed system PATH and requires the program and
-     every directory above it to be root-owned and not writable by others, and
-     not on a nosuid mount: removable media, disk images and FUSE mounted for
-     a user are nosuid, and their files may claim any owner. A
+   - `run` looks a bare argv[0] up in a fixed system PATH (a path is used as
+     given, relative to the working directory) and requires the program and
+     every directory above it to be root-owned and not writable by others
+     (a root-owned sticky directory such as `/tmp` may sit above it, not be
+     it), and not on a nosuid mount: removable media, disk images and FUSE
+     mounted for a user are nosuid, and their files may claim any owner. A
      script's `#!` interpreter is held to the same rule, and may receive only
      flags allowlisted for that interpreter (`-e` is harmless to sh but means
      "run this code" to perl or awk).
@@ -163,7 +165,8 @@ has a seat and is its active one"), never the absence of a warning sign
      (`fchdir`), so moving or replacing the path afterwards has no effect. A
      directory root does not control is flagged, because programs load code and
      settings from it (git, Python, make...).
-   - Install destinations must sit in a root-owned directory chain. The file is
+   - Install destinations must sit in a root-owned directory chain, and their
+     names may not contain control or hidden characters. The file is
      written atomically (temp file and rename). Symlinks, directories and
      hard-linked targets are refused, and setuid, setgid and sticky bits are
      never carried over.

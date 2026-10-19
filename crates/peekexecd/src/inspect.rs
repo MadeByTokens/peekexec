@@ -137,7 +137,8 @@ fn explain_denied(e: String) -> String {
 
 /// Run [`inspect`] in a helper process: `helper` is this daemon's own
 /// binary, started with [`HELPER_ARG`], with `creds` (or unchanged, in
-/// tests), `no_new_privs`, an empty environment and only its stdio.
+/// tests), `no_new_privs`, an environment of only `LANG=C.UTF-8`, and only
+/// its stdio.
 pub fn inspect_as(
     helper: &Path,
     creds: Option<&Creds>,

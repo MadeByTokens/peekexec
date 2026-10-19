@@ -1,5 +1,6 @@
 //! Linux backends: kernel peer credentials + /proc, PAM, network namespace
-//! for `--no-net`, systemd socket activation. Landlock write limits: M2.
+//! for `--no-net`, systemd socket activation. Real containment (approved
+//! commands as transient systemd units, see PLAN.md): M2.
 
 mod display;
 mod pam;
@@ -44,8 +45,6 @@ impl Listener for SystemdSocket {
             .and_then(|n| n.parse().ok())
             .unwrap_or(0);
         if ours && fds >= 1 {
-            // SAFETY: systemd guarantees fd 3 is an open listening socket
-            // passed to this pid; nothing else in this process owns it.
             // Not inherited by the dialog or by approved commands.
             // SAFETY: fcntl on an fd we own; failure is reported.
             if unsafe { libc::fcntl(SD_LISTEN_FDS_START, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
@@ -54,6 +53,8 @@ impl Listener for SystemdSocket {
                     std::io::Error::last_os_error(),
                 ));
             }
+            // SAFETY: systemd guarantees fd 3 is an open listening socket
+            // passed to this pid; nothing else in this process owns it.
             return Ok(unsafe { UnixListener::from_raw_fd(SD_LISTEN_FDS_START) });
         }
 
