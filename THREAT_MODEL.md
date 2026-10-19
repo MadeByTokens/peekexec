@@ -24,8 +24,7 @@ its answer is input too: what root relies on (program, interpreter, install
 directory, the directory descriptor) is checked again as root, with generic
 errors, and the helper cannot be driven by other programs of the user (its
 binary is not readable by them, so it is non-dumpable from exec). A request
-naming a path the user cannot
-reach is refused before approval; such steps go inside `peekexec script`,
+naming a path the user cannot reach is refused before approval; such steps go inside `peekexec script`,
 where the human reads them.
 
 It does not promise:
@@ -95,9 +94,9 @@ has a seat and is its active one"), never the absence of a warning sign
 
 | Actor | Trust |
 |---|---|
-| Human approver | Trusted. An administrator (member of `sudo`, `wheel` or `admin`) typing **their own** password; usually the same account as the requester, as with sudo. |
+| Human approver | Trusted. An administrator (member of the first of `sudo`, `wheel`, `admin` that exists) typing **their own** password; usually the same account as the requester, as with sudo. |
 | Requester (agent, script) | **Untrusted.** Controls argv, file contents, env (within an allowlist), working directory, `--why`, and its own process names. May be buggy, overeager or prompt-injected; on X11 a malicious one is out of reach (see tiers). |
-| Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group (`sudo`, `wheel` or `admin`). The daemon checks membership again. |
+| Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group (the first of `sudo`, `wheel`, `admin` that exists). The daemon checks membership again. |
 | `peekexecd` (root) | Trusted computing base. |
 | `peekexec-ui` (the dialog) | Started by the daemon from a root-owned path with a clean environment, as the approving user with no supplementary groups; non-dumpable. Trusted to render honestly, but it runs as the user, so on X11 other programs of that user can drive it. |
 | Kernel, PAM, display server | Trusted, with the display caveats below. |
@@ -242,8 +241,9 @@ has a seat and is its active one"), never the absence of a warning sign
    set to the requester. Processes that leave its process group (a new
    session with `setsid`, or a background job of a shell with job control,
    `set -m`) are not killed and can outlive it: they are part of what the
-   human approved, but they are not bounded by the request. `enforced` reports `kernel`, `best_effort`, `builtin` (no command
-   ran: peekexec wrote the file), `declared_only` or `not_requested` per limit.
+   human approved, but they are not bounded by the request. `enforced`
+   reports `kernel`, `best_effort`, `builtin` (no command ran: peekexec
+   wrote the file), `declared_only` or `not_requested` per limit.
 
 ## Display tiers
 
@@ -259,8 +259,9 @@ has a seat and is its active one"), never the absence of a warning sign
 - **The working directory's contents are not shown.** Running in a directory
   the user owns is flagged for this reason.
 - **A write scope is not containment.** A udev rule, systemd unit, cron entry,
-  sudoers fragment or profile script can run commands as root later; targets
-  under such paths are flagged.
+  sudoers fragment or profile script can run commands as root later, and so
+  can a file put in `/usr/bin`, `/usr/lib` or `/root`; targets under such
+  paths are flagged (a denylist: it warns, it does not decide).
 - **Formatted is a rendering.** Its line texts are exact slices of the
   original, but indentation and colours are hints and can mislead; Raw is the
   ground truth.
@@ -278,12 +279,11 @@ has a seat and is its active one"), never the absence of a warning sign
 ## Denial of service
 
 Accepted for a single-seat desktop: an administrator's own processes can
-queue requests (at most 3 pending and 1 registration, 16 connections) and occupy the single
-dialog. On an unverified display the requester may answer the dialog
-itself, so its wrong passwords (3 per request) can count toward a lockout
-such as pam_faillock; it could do the same with `su`. Other users cannot
-connect. Any local user can
-crash polkitd on affected versions (a polkit bug, Launchpad #1562721; see
+queue requests (at most 3 pending and 1 registration, 16 connections) and
+occupy the single dialog. On an unverified display the requester may answer
+the dialog itself, so its wrong passwords (3 per request) can count toward a
+lockout such as pam_faillock; it could do the same with `su`. Other users
+cannot connect. Any local user can crash polkitd on affected versions (a polkit bug, Launchpad #1562721; see
 [docs/notes/polkit-unix-session-crash.md](docs/notes/polkit-unix-session-crash.md)); this
 does not affect peekexec's X11 path.
 

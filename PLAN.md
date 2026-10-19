@@ -35,15 +35,18 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
 
 ## The dialog
 
+A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
+
 ```
 ┌─ Root access requested ─────────────────────────────────────────┐
-│ claude (pid 4121) ← bash ← claude-code     in ~/proj/stm32      │
-│ Says: "install STM32 udev rule"                     (unverified)│
-│ ⚠ writes /etc/udev/rules.d   ✓ no network   ⚠ 1 risk flag       │
-├─────────────────────────────────────────── [Formatted|Raw] ─────┤
-│  1  cp 49-stlink.rules \                                        │
-│  2     /etc/udev/rules.d/                                       │
-│  3  && udevadm control --reload-rules                           │
+│ From  claude (pid 4121) ← bash ← claude-code                    │
+│ In    ~/proj/stm32                             Runs as  root    │
+│ writes: none declared   ✓ no network   ⚠ 1 risk flag            │
+│ The requester says: "reload udev rules"             (unverified)│
+├─ script setup.sh ───────────────────────── [Formatted|Raw] ─────┤
+│  1  #!/bin/sh -e                                                │
+│  2  udevadm control --reload-rules                              │
+│  3  udevadm trigger --subsystem-match=usb                       │
 ├─────────────────────────────────────────────────────────────────┤
 │ Password: [••••••••_________]                 [Cancel] [Approve]│
 │ sha256 3f9a…c21e                       Deny with reason…        │
@@ -70,8 +73,10 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
   `deny_reason`. The requester cannot write to that channel directly; on X11
   another program of the same user could drive the dialog, so agents should
   treat it as the human's advice.
-- **Safety details:** 3 password attempts; keystrokes ignored for ~400 ms after
-  the dialog appears so typing aimed elsewhere doesn't land in it.
+- **Safety details:** 3 password attempts; keystrokes ignored for 400 ms after
+  the dialog appears (1.5 s when it follows another dialog) so typing aimed
+  elsewhere doesn't land in it, and a key pressed in that time turns off
+  Enter-to-approve for this dialog.
 
 ## Built for agents
 
@@ -112,9 +117,10 @@ crates/
   peekexec-proto  client ⇄ daemon ⇄ dialog messages, Status, Response    (no OS code)
   peekexec-ui     the dialog (egui), a normal window (no keyboard grab)
   peekexec        the CLI (binary `peekexec`)
-  peekexecd       daemon logic + platform traits:
+  peekexecd       daemon logic + platform traits (macos: planned for M4;
+                  today `platform/macos.rs` is a stub that refuses everything):
                     PeerInfo       linux: SO_PEERCRED + /proc  | macos: getpeereid + LOCAL_PEERPID
-                    Authenticator  linux: PAM                  | macos: LocalAuthentication / Touch ID
+                    Authenticator  linux: PAM, or polkit       | macos: LocalAuthentication / Touch ID
                     Sandbox        linux: netns (best effort)  | macos: sandbox-exec (best effort)
                     Listener       linux: systemd socket / bind| macos: launchd
 ```
@@ -122,7 +128,7 @@ crates/
 ### Porting rules (Linux first, macOS-ready)
 
 - All OS-specific code lives behind the traits in
-  `crates/peekexecd/src/platform/` and `peekexec-ui`. A port adds
+  `crates/peekexecd/src/platform/` and `peekexec-ui`. A port fills in
   `platform/macos.rs`; daemon logic does not change.
 - `peekexec-core` and `peekexec-proto` must never use OS APIs. CI checks the
   whole workspace on a macOS runner from day one.
@@ -140,7 +146,7 @@ Rust. Memory safety removes one class of bugs (not logic bugs: sudo-rs had
 CVEs too); `unsafe` is confined to FFI sites listed in
 [SECURITY.md](SECURITY.md), most of them a small hand-written PAM binding.
 Crates: `nix`, `libc`, `egui`/`eframe`, `syntect`, `similar`, `clap`, `serde`,
-`schemars`, `sha2`.
+`schemars`, `sha2`, `zbus` (polkit, for the Wayland path).
 
 ## Distribution
 
@@ -189,9 +195,9 @@ such displays are reported as unverified. Work, in a Ubuntu 24.04 desktop VM:
    VM: read-only peekexec window, Continue, GNOME's prompt with the daemon's
    summary, approve / dismiss / no-agent paths). The agent is
    registered with polkitd at login (in GNOME it is drawn by the shell itself),
-   so a requester cannot reroute it. The peekexec window shows the code and
-   Approve/Deny; the agent's prompt must carry the summary (who, what, writes),
-   not only a hash.
+   so a requester cannot reroute it. The peekexec window shows the code,
+   read-only, with Continue and Deny; the agent's prompt carries the summary
+   (who, what, writes, every warning), not only a hash.
 3. **Option C: dedicated VT (tier 3)**, opt-in high-assurance mode and the
    fallback whenever the display is unverified: the daemon switches to its
    own console, shows the request (colours, scrolling), takes the password
@@ -225,7 +231,8 @@ itself "claude"). Plan:
 
 ### M2 detail: hardening from the pre-install review
 
-- Done: per-uid caps on connections (16) and pending requests (3);
+- Done: per-uid caps on connections (16), pending requests (3) and
+  registrations (one at a time); one 30 s deadline per message;
   non-admins rejected before reading. Left: smaller message limit for
   wait/cancel/preview; bounded worker pool; `LimitNOFILE` in the unit.
 - Done: worker panics cannot leave a `run` client blocked; release builds
