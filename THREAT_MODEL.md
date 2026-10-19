@@ -237,8 +237,10 @@ has a seat and is its active one"), never the absence of a warning sign
    unverified window, flagged on every request.
 5. **Executed command → system.** It runs as full root. The process group is
    killed when the command exits, the umask is 022, and the audit login uid is
-   set to the requester. Programs that detach into their own session can
-   outlive it. `enforced` reports `kernel`, `best_effort`, `builtin` (no command
+   set to the requester. Processes that leave its process group (a new
+   session with `setsid`, or a background job of a shell with job control,
+   `set -m`) are not killed and can outlive it: they are part of what the
+   human approved, but they are not bounded by the request. `enforced` reports `kernel`, `best_effort`, `builtin` (no command
    ran: peekexec wrote the file), `declared_only` or `not_requested` per limit.
 
 ## Display tiers

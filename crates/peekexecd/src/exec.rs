@@ -20,7 +20,7 @@ pub struct Outcome {
 }
 
 /// How long output is still read after the command exits. A background
-/// process it started in its own session (so not killed with its group) may
+/// process it moved out of its process group (so not killed with it) may
 /// hold stdout open; without a limit the request would wait for it.
 pub const LINGER: Duration = Duration::from_secs(2);
 
@@ -34,7 +34,8 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
         std::thread::spawn(move || capture([Box::new(out), Box::new(err)], &deadline))
     };
     // When the command exits, end everything it left behind in its process
-    // group (no root processes outlive the request). Waiting with WNOWAIT
+    // group. Processes it moved to another group or session survive (see
+    // THREAT_MODEL.md, boundary 5). Waiting with WNOWAIT
     // keeps the exited child's pid, and so its group id, from being reused
     // before the kill.
     wait_exited(child.id());
