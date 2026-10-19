@@ -500,10 +500,13 @@ impl Daemon {
             Ok(u) => u,
             Err(e) => return fail(e),
         };
-        let name = match display_line(name.trim(), 40).into_string() {
-            n if n.is_empty() => "agent".to_string(),
-            n => n,
-        };
+        // A label shown in every later dialog: plain text only, so it is
+        // the same wherever it is escaped again.
+        let name = name.trim();
+        if !name.chars().all(|c| c.is_ascii_graphic() || c == ' ') || name.chars().count() > 40 {
+            return fail("the agent name must be at most 40 printable ASCII characters".into());
+        }
+        let name = if name.is_empty() { "agent" } else { name }.to_string();
         let chain = Self::chain(peer);
         let agent = match agent_pid {
             Some(pid) => chain.iter().find(|p| p.pid == pid),

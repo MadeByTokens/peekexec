@@ -25,7 +25,6 @@ use peekexec_core::{Action, Request};
 use peekexec_proto::wire::{read_msg, write_msg};
 use serde::{Deserialize, Serialize};
 
-use crate::prepare::display_line;
 use crate::spawn::{self, Spec};
 use crate::trust;
 
@@ -616,7 +615,8 @@ fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<Str
         let shown: Vec<String> = hits
             .iter()
             .take(3)
-            .map(|h| display_line(h, 100).into_string())
+            // Cut only: the whole note is escaped where the view is built.
+            .map(|h| h.chars().take(100).collect::<String>())
             .collect();
         let more = hits.len().saturating_sub(3);
         format!(

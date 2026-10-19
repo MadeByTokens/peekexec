@@ -28,8 +28,11 @@ impl Shown {
                 break;
             }
             // Unlike code, a one-line field must not contain newlines or tabs.
-            let hidden =
-                c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii));
+            // The token brackets themselves are escaped, so a token cannot
+            // be forged.
+            let hidden = c.is_control()
+                || matches!(c, '⟨' | '⟩')
+                || !matches!(classify(c), None | Some(FindingKind::NonAscii));
             if hidden {
                 out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
             } else {

@@ -398,12 +398,12 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         }
     };
     for s in &view.sections {
-        body.push_str(&format!("\n{}:\n", ascii(&display_line(&s.title, 80))));
+        body.push_str(&format!("\n{}:\n", ascii(&cut(&s.title, 80))));
         // How it runs (each argument), then what it runs: both counted.
         let invocation = s
             .invocation
             .iter()
-            .flat_map(|l| wrap(&ascii(&display_line(l, usize::MAX)), WIDTH))
+            .flat_map(|l| wrap(&ascii(l), WIDTH))
             .collect();
         add(invocation, "  ", &mut body);
         let lines = s
@@ -435,14 +435,11 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         ));
     }
     m.push_str(&body);
-    // Every value below is already escaped where the view is built; escaping
-    // again here keeps the prompt safe even if that ever changes.
+    // Every value below is a `Shown`, already escaped where the view was
+    // built: only cut here (escaping again would mangle its tokens).
     let from = match &view.provenance {
         Provenance::InSession { agent, since, .. } => {
-            format!(
-                "{}'s session (registered {since})",
-                ascii(&display_line(agent, 60))
-            )
+            format!("{}'s session (registered {since})", ascii(&cut(agent, 60)))
         }
         Provenance::Unregistered => view
             .requester
@@ -450,7 +447,7 @@ pub fn system_prompt_message(view: &PromptView) -> String {
             .map(|p| {
                 format!(
                     "{} (pid {}), not a registered agent",
-                    ascii(&display_line(&p.name(), 40)),
+                    ascii(&cut(&p.name(), 40)),
                     p.pid
                 )
             })
@@ -458,27 +455,27 @@ pub fn system_prompt_message(view: &PromptView) -> String {
     };
     m.push_str(&format!(
         "\nfrom: {from}\nin: {}\n",
-        ascii(&display_line(&view.cwd, 120))
+        ascii(&cut(&view.cwd, 120))
     ));
     // Every variable: the allowlist bounds how many there can be.
     for (k, v) in &view.env {
         m.push_str(&format!(
             "env: {}={}\n",
-            ascii(&display_line(k, 64)),
-            ascii(&display_line(v, 256))
+            ascii(&cut(k, 64)),
+            ascii(&cut(v, 256))
         ));
     }
     if view.kind == ViewKind::Root {
         let facts: Vec<String> = view
             .summary(0)
             .into_iter()
-            .map(|(_, t)| ascii(&display_line(&t, 160)))
+            .map(|(_, t)| ascii(&cut(&t, 160)))
             .collect();
         m.push_str(&format!("{}\n", facts.join(" · ")));
     }
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
-            let others: Vec<String> = others.iter().map(|o| ascii(&display_line(o, 40))).collect();
+            let others: Vec<String> = others.iter().map(|o| ascii(&cut(o, 40))).collect();
             m.push_str(&format!(
                 "⚠ a script or program it started may be asking: {}\n",
                 others.join(", ")
@@ -491,13 +488,22 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         .filter(|n| !n.starts_with(SYSTEM_PROMPT_NOTE));
     // All of them: each kind of note appears at most once.
     for n in warnings {
-        m.push_str(&format!("⚠ {}\n", ascii(&display_line(n, 300))));
+        m.push_str(&format!("⚠ {}\n", ascii(&cut(n, 300))));
     }
     m.push_str(&format!(
         "request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
     m
+}
+
+/// At most `max` characters of already-escaped text.
+fn cut(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.chars().nth(max).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Text for the desktop's prompt, which has no colour or markers of its
@@ -1195,11 +1201,21 @@ mod tests {
             " ".repeat(3000)
         );
         let r = req(Action::Run {
-            argv: vec!["sh".into(), "-c".into(), script, "a\u{E0041}b".into()],
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                script,
+                "a\u{E0041}b".into(),
+                "x\ny".into(),
+                "⟨U+0041⟩".into(),
+            ],
         });
         let m = system_prompt_message(&prepare_for_tests(&r).view);
         assert!(m.contains("g⟨U+0456⟩thub"), "{m}");
         assert!(m.contains("a⟨U+E0041⟩b"), "{m}");
+        // Escaped once, and a typed token is not a token.
+        assert!(m.contains("x⟨U+000A⟩y"), "{m}");
+        assert!(m.contains("⟨U+27E8⟩U+0041⟨U+27E9⟩"), "{m}");
         assert!(
             m.contains("⟨3000 spaces⟩") && m.contains("rm -rf /x"),
             "{m}"
