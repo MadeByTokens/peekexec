@@ -4,6 +4,12 @@ Ubuntu 24.04 with GNOME on Wayland, for developing peekexec's Wayland support
 (PLAN.md, M2). Runs as your user with plain QEMU + KVM: no root, nothing on the
 host's system services. Files live in `$VM_DIR` (default `~/vms/peekexec-noble`).
 
+Not for a shared host: the VM has password ssh (`tester`/`tester`) on
+127.0.0.1:2222, passwordless sudo, and VNC with no password on
+127.0.0.1:5905, so any local user of the host gets root in the VM. The image
+is checked against `SHA256SUMS` from the same server; for more, verify
+`SHA256SUMS.gpg` with Ubuntu's cloud image key as well.
+
 ```bash
 mkdir -p ~/vms/peekexec-noble && cd ~/vms/peekexec-noble
 curl -LO https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
