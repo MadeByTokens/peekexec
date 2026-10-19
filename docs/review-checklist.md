@@ -43,7 +43,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 |---|---|---|---|---|---|---|
 | `wait`/`cancel` id | owner checked; others' ids look nonexistent (✓) | own results only (✓) | — | — | — | — |
 | `register` name, pid | name escaped; pid must be the caller or an ancestor (✓) | — | escaped (✓) | escaped (✓) | nothing runs (✓) | Debug-quoted (✓) |
-| connection itself | SO_PEERCRED uid; admin group before reading (✓). ⚠ membership is computed from the caller's egid, not the account's primary group | — | — | — | — | uid, pid (✓) |
+| connection itself | SO_PEERCRED uid; admin group before reading, from the account's groups in the user database, never the caller's egid (✓ R2) | — | — | — | — | uid, pid (✓) |
 | volume | 32 MiB/message, 16 connections, 3 pending (✓) | — | — | — | output capped at 16 MiB/stream (✓) | — |
 
 ## What the requester can arrange around a request
@@ -53,7 +53,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Its process names, command lines | Dialog: escaped, labelled as self-reported (✓). ⚠ the ancestry walk has no depth limit | ⚠ |
 | Its executable path (mount namespaces) | Dialog and provenance: must be the same inode as the path in the daemon's view (✓) | ✓ |
 | Its environment | Display fallback only; Wayland socket name and runtime dir checked; marked unverified (✓). ⚠ root reads the environment of every ancestor, other users' included | ⚠ |
-| Its egid (`newgrp`, `sg`) | ⚠ used for the admin check and as the dialog's gid | ⚠ |
+| Its egid (`newgrp`, `sg`) | ignored: the admin check and the dialog's gid come from the user database (✓ R2) | ✓ |
 | Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: only canonical paths inside root-controlled chains are used, where the user can place no symlink (✓) | ✓ |
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
 | Its own polkit agents, other login sessions | Prompt (Wayland): guard agent holds the subject's slot (✓); subject must be in a session with a seat that is the seat's active one, or in none: positive evidence, so `ssh localhost` (seatless, hence "active", and not "remote") is refused (✓) | ✓ |

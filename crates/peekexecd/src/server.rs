@@ -172,7 +172,7 @@ impl Daemon {
         // Only administrators can ever be asked, so nobody else gets to send
         // (and make the daemon buffer) a request at all.
         if !self.opts.dev {
-            let admin = user_of(peer.uid).is_ok_and(|u| is_admin(&u.name, peer.gid));
+            let admin = user_of(peer.uid).is_ok_and(|u| is_admin(&u));
             if !admin {
                 eprintln!(
                     "peekexecd: audit rejected uid={} pid={} exe={:?} reason=\"not an administrator\"",
@@ -354,8 +354,9 @@ impl Daemon {
         request: &Request,
     ) -> Result<peekexec_proto::view::PromptView, String> {
         let user = user_of(peer.uid)?;
-        // Preview runs as root (it inspects install targets): admins only.
-        if !self.opts.dev && !is_admin(&user.name, peer.gid) {
+        // Preview builds the real view, with the inspection helper's
+        // findings: admins only, like any request.
+        if !self.opts.dev && !is_admin(&user) {
             return Err(format!(
                 "user {} is not in an administrator group ({})",
                 user.name,
@@ -676,7 +677,7 @@ impl Daemon {
             Ok(u) => u,
             Err(e) => return fail(e),
         };
-        if !self.opts.dev && !is_admin(&user.name, peer.gid) {
+        if !self.opts.dev && !is_admin(&user) {
             return fail(format!(
                 "user {} is not in an administrator group ({}); peekexec only asks administrators",
                 user.name,
@@ -792,7 +793,8 @@ impl Daemon {
         }
         let dialog = Dialog {
             program: self.opts.dialog.clone(),
-            run_as: (!self.opts.dev).then_some((peer.uid, peer.gid)),
+            // The account's own primary group, not the caller's egid.
+            run_as: (!self.opts.dev).then_some((user.uid, user.gid)),
         };
         let approver = match self.system_prompt_for(display) {
             Some(prompt) if prepared.view.approval == Approval::SystemPrompt => {
@@ -951,21 +953,21 @@ fn admin_gid() -> Option<u32> {
     })
 }
 
+/// Membership from the user database (the account's primary and
+/// supplementary groups), never from the caller's egid: a shell started
+/// with `newgrp sudo` before the user left the group must not count
+/// (design rule 2).
 #[cfg(target_os = "linux")]
-fn is_admin(user: &str, gid: u32) -> bool {
-    use nix::unistd::{getgrouplist, Gid, Group};
-    let Ok(name) = std::ffi::CString::new(user) else {
-        return false;
-    };
-    getgrouplist(&name, Gid::from_raw(gid))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|g| Group::from_gid(g).ok().flatten())
+fn is_admin(user: &User) -> bool {
+    use nix::unistd::{Gid, Group};
+    user.groups
+        .iter()
+        .filter_map(|&g| Group::from_gid(Gid::from_raw(g)).ok().flatten())
         .any(|g| ADMIN_GROUPS.contains(&g.name.as_str()))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn is_admin(_user: &str, _gid: u32) -> bool {
+fn is_admin(_user: &User) -> bool {
     false // M4: the macOS `admin` group via the platform layer
 }
 
