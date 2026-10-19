@@ -159,8 +159,11 @@ fn default_fg(dark: bool) -> Color32 {
 }
 
 pub const DANGER: Color32 = Color32::from_rgb(220, 50, 47);
-/// Spaces in a row before they are shown as a marker instead.
+/// Columns of blank space in a row (spaces, and tabs as [`TAB_WIDTH`])
+/// before they are shown as a marker instead.
 const SPACE_RUN: usize = 12;
+/// Columns a tab takes when drawn.
+const TAB_WIDTH: usize = 4;
 pub const WARN: Color32 = Color32::from_rgb(203, 120, 0);
 
 /// Build the layout for one line, with the line number gutter.
@@ -194,25 +197,26 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
     job.append(&"  ".repeat(line.indent), 0.0, plain(dim));
     for (color, text) in &line.spans {
         let mut run = String::new();
-        let mut spaces = 0usize;
+        let mut blank = String::new();
         let chars: Vec<char> = text.chars().collect();
         for (idx, &c) in chars.iter().enumerate() {
-            // Long runs of spaces become a visible marker: whitespace must
-            // not push code out of view.
-            if c == ' ' {
-                spaces += 1;
-                if chars.get(idx + 1) == Some(&' ') {
+            // Long runs of spaces and tabs become a visible marker:
+            // whitespace must not push code out of view (design rule 4).
+            if c == ' ' || c == '\t' {
+                blank.push(c);
+                if matches!(chars.get(idx + 1), Some(' ' | '\t')) {
                     continue;
                 }
-                if spaces >= SPACE_RUN {
-                    if !run.is_empty() {
-                        job.append(&std::mem::take(&mut run), 0.0, plain(*color));
+                match blank_marker(&blank) {
+                    Some(marker) => {
+                        if !run.is_empty() {
+                            job.append(&std::mem::take(&mut run), 0.0, plain(*color));
+                        }
+                        job.append(&marker, 0.0, alert(&font));
                     }
-                    job.append(&format!("⟨{spaces} spaces⟩"), 0.0, alert(&font));
-                } else {
-                    run.push_str(&" ".repeat(spaces));
+                    None => run.push_str(&blank),
                 }
-                spaces = 0;
+                blank.clear();
                 continue;
             }
             match classify(c) {
@@ -230,6 +234,21 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
         }
     }
     job
+}
+
+/// The marker for a run of spaces and tabs, if it is wide enough to need
+/// one: `⟨20 spaces⟩`, `⟨4000 tabs⟩`, `⟨3 spaces, 9 tabs⟩`.
+fn blank_marker(blank: &str) -> Option<String> {
+    let tabs = blank.chars().filter(|&c| c == '\t').count();
+    let spaces = blank.chars().count() - tabs;
+    if spaces + tabs * TAB_WIDTH < SPACE_RUN {
+        return None;
+    }
+    Some(match (spaces, tabs) {
+        (s, 0) => format!("⟨{s} spaces⟩"),
+        (0, t) => format!("⟨{t} tabs⟩"),
+        (s, t) => format!("⟨{s} spaces, {t} tabs⟩"),
+    })
 }
 
 fn append_marked(job: &mut LayoutJob, c: char, kind: FindingKind, font: &FontId) {
@@ -261,5 +280,36 @@ fn append_marked(job: &mut LayoutJob, c: char, kind: FindingKind, font: &FontId)
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_blank_runs_become_markers() {
+        assert_eq!(blank_marker("  \t"), None);
+        assert_eq!(blank_marker(&" ".repeat(20)).unwrap(), "⟨20 spaces⟩");
+        assert_eq!(blank_marker(&"\t".repeat(4000)).unwrap(), "⟨4000 tabs⟩");
+        assert_eq!(blank_marker("\t\t\t").unwrap(), "⟨3 tabs⟩");
+        assert_eq!(blank_marker(" \t\t\t").unwrap(), "⟨1 spaces, 3 tabs⟩");
+    }
+
+    #[test]
+    fn tabs_cannot_push_code_out_of_view() {
+        let line = DisplayLine {
+            number: 1,
+            indent: 0,
+            continued: false,
+            spans: vec![(
+                Color32::WHITE,
+                format!("print(1){};evil()", "\t".repeat(4000)),
+            )],
+            collapsed: None,
+        };
+        let job = layout(&line, 1, true, '>');
+        assert!(!job.text.contains('\t'), "tabs drawn as themselves");
+        assert!(job.text.contains("⟨4000 tabs⟩;evil()"), "{}", job.text);
     }
 }
