@@ -185,19 +185,22 @@ pub fn prepare(
             let header = match &existing {
                 Some(_) if !readable => format!(
                     "replaces an existing file that you cannot read yourself, with {} bytes \
-                     the requester calls {src}; its mode stays (setuid/setgid/sticky bits are \
-                     always cleared)",
+                     the requester calls {src}; its owner and mode stay (setuid/setgid/sticky \
+                     bits are always cleared)",
                     content.len()
                 ),
                 Some(m) => format!(
                     "replaces an existing file ({} bytes) with {} bytes the requester calls {src}; \
-                     mode stays {:o} (setuid/setgid/sticky bits are always cleared)",
+                     owner stays {}, mode stays {:o} (setuid/setgid/sticky bits are always \
+                     cleared)",
                     m.len(),
                     content.len(),
+                    owner_name(m.uid(), m.gid()),
                     m.permissions().mode() & 0o777
                 ),
                 None => format!(
-                    "new file, mode 644, {} bytes the requester calls {src}",
+                    "new file, owner root, mode {:o}, {} bytes the requester calls {src}",
+                    crate::exec::new_file_mode(content),
                     content.len()
                 ),
             };
@@ -651,6 +654,20 @@ fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
         _ => return false,
     };
     !flags.is_empty() && flags.len() <= 6 && flags.chars().all(|c| allowed.contains(c))
+}
+
+/// `user:group`, by name where the user database has one.
+fn owner_name(uid: u32, gid: u32) -> String {
+    use nix::unistd::{Gid, Group, Uid, User as PwUser};
+    let user = PwUser::from_uid(Uid::from_raw(uid))
+        .ok()
+        .flatten()
+        .map_or_else(|| uid.to_string(), |u| u.name);
+    let group = Group::from_gid(Gid::from_raw(gid))
+        .ok()
+        .flatten()
+        .map_or_else(|| gid.to_string(), |g| g.name);
+    format!("{user}:{group}")
 }
 
 /// The snapshot's file name: fixed, keeping a short alphanumeric extension

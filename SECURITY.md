@@ -32,7 +32,7 @@ interfaces, each with a `SAFETY:` comment:
 |---|---|---|
 | `crates/peekexecd/src/platform/linux/pam.rs` | 14 | Linux-PAM FFI: `pam_start/authenticate/acct_mgmt/end`, the conversation callback (calloc/strdup contract with libpam) |
 | `crates/peekexecd/src/platform/linux/peer.rs` | 5 | `SO_PEERPIDFD`, `pidfd_open`, pidfd liveness check |
-| `crates/peekexecd/src/exec.rs` | 3 | `waitid(WNOWAIT)`, `killpg` |
+| `crates/peekexecd/src/exec.rs` | 6 | `waitid(WNOWAIT)`, `killpg`, `poll` (output reader), `getxattr`/`fsetxattr` (an installed file keeps its SELinux label and ACL) |
 | `crates/peekexec-ui/src/main.rs` | 3 | `prctl(PR_SET_DUMPABLE)`, euid/egid check, zeroing the password buffer |
 | `crates/peekexecd/src/platform/linux/mod.rs` | 2 | adopting the systemd socket (fd 3), `FD_CLOEXEC` |
 | `crates/peekexecd/src/platform/linux/sandbox.rs` | 1 | `pre_exec`: `fchdir`, `umask`, `close_range`, `loginuid`, `unshare(CLONE_NEWNET)` |

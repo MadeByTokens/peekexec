@@ -358,6 +358,26 @@ fn leftover_processes_are_killed() {
 }
 
 #[test]
+fn detached_processes_do_not_hold_the_request() {
+    let d = Daemon::start("approve");
+    let started = Instant::now();
+    // In its own session, so not killed with the command's process group,
+    // and still holding stdout. The sleep lets setsid run before sh exits.
+    let r = d.run(sh("setsid sleep 30 & sleep 0.3; echo started"));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "waited for the detached process: {:?}",
+        started.elapsed()
+    );
+    let out = r.stdout.unwrap_or_default();
+    assert!(out.starts_with("started\n"), "{out}");
+    assert!(out.contains("stopped reading"), "{out}");
+    let _ = std::process::Command::new("pkill")
+        .args(["-x", "-f", "sleep 30"])
+        .status();
+}
+
+#[test]
 fn too_many_pending_requests_are_refused() {
     let d = Daemon::start("hold");
     let ids: Vec<_> = (0..3)
