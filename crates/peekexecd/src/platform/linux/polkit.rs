@@ -84,8 +84,8 @@ impl SystemPrompt for Polkit {
             .start_time
             .ok_or_else(|| PlatformError::Other("requester start time unknown".into()))?;
         // polkit asks the agent of the subject's login session. A session
-        // the human is not sitting at (ssh, an inactive console) may have an
-        // agent of the requester's choosing.
+        // the human is not sitting at (ssh, ssh localhost, an inactive
+        // console) may have an agent of the requester's choosing.
         let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid))
             .map_err(|e| PlatformError::Other(format!("requester cgroup: {e}")))?;
         if let Some(id) = session_of(&cgroup) {
@@ -263,7 +263,11 @@ fn session_of(cgroup: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// A logind session record of `uid`'s, active and not remote.
+/// A logind session record of `uid`'s that the human is sitting at: it has
+/// a seat and is that seat's active session. Positive evidence only:
+/// logind counts every session without a seat as "active", and pam_systemd
+/// does not mark `ssh localhost` as remote, so "active and not remote"
+/// would let such a session through.
 fn active_local_session(record: &str, uid: u32) -> bool {
     let get = |key: &str| {
         record
@@ -271,7 +275,10 @@ fn active_local_session(record: &str, uid: u32) -> bool {
             .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
     };
     get("UID") == Some(uid.to_string().as_str())
+        && get("SEAT").is_some_and(|s| !s.is_empty())
         && get("ACTIVE") == Some("1")
+        && get("STATE") == Some("active")
+        && get("CLASS") == Some("user")
         && get("REMOTE") != Some("1")
 }
 
@@ -313,8 +320,26 @@ mod tests {
 
     #[test]
     fn only_the_active_local_session_counts() {
-        let rec = "UID=1000\nACTIVE=1\nREMOTE=0\nTYPE=wayland\n";
+        let rec =
+            "UID=1000\nACTIVE=1\nSTATE=active\nREMOTE=0\nTYPE=wayland\nCLASS=user\nSEAT=seat0\n";
         assert!(active_local_session(rec, 1000));
+        // `ssh localhost`: no seat, so "active", and not marked remote.
+        assert!(!active_local_session(
+            &rec.replace("SEAT=seat0\n", ""),
+            1000
+        ));
+        assert!(!active_local_session(
+            &rec.replace("SEAT=seat0", "SEAT="),
+            1000
+        ));
+        assert!(!active_local_session(
+            &rec.replace("STATE=active", "STATE=online"),
+            1000
+        ));
+        assert!(!active_local_session(
+            &rec.replace("CLASS=user", "CLASS=greeter"),
+            1000
+        ));
         assert!(!active_local_session(rec, 1001));
         assert!(!active_local_session(
             &rec.replace("REMOTE=0", "REMOTE=1"),

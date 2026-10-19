@@ -56,7 +56,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Its egid (`newgrp`, `sg`) | ⚠ used for the admin check and as the dialog's gid | ⚠ |
 | Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: only canonical paths inside root-controlled chains are used, where the user can place no symlink (✓) | ✓ |
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
-| Its own polkit agents, other login sessions | Prompt (Wayland): guard agent holds the subject's slot (✓); subject must be in the active local session or none. ⚠ a session without a seat (`ssh localhost`) is "active" and not "remote", so it passes | ⚠ |
+| Its own polkit agents, other login sessions | Prompt (Wayland): guard agent holds the subject's slot (✓); subject must be in a session with a seat that is the seat's active one, or in none: positive evidence, so `ssh localhost` (seatless, hence "active", and not "remote") is refused (✓) | ✓ |
 | A nested or relaying display server | Dialog: X11 verified through logind and the Xorg process; otherwise unverified, password goes to the desktop's prompt (✓) | ✓ |
 | Timing: dialog start-up | /proc reopening defeated by a socket pair; started through `spawn::command` with `no_new_privs`, only stdio, credentials dropped for good (✓). ⚠ `peekexec-ui` is installed 0755, so it is dumpable until `harden()` runs; with ptrace_scope 0 a tracer can attach in that window. ⚠ a failing `close_range` is ignored | ⚠ |
 | Timing: between showing and running | R2: cwd by descriptor, snapshot by copy; program and install directory are root-controlled chains, unchangeable by the requester (✓) | ✓ |

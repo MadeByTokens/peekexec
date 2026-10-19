@@ -202,13 +202,15 @@ has a seat and is its active one"), never the absence of a warning sign
    from registering one, while `fallback` keeps the session's agent in use.
    If the slot is already taken, peekexec refuses (tested with `pkttyagent
    --process`). Because polkit asks the agent of the requester's login
-   session, the requester must be in the user's active, local session, or in
-   none (apps under `user@.service`, where polkit uses the display session);
-   one in an ssh or inactive console session, whose agent the requester
-   could have chosen, is refused before polkit is asked. A requester with no
-   agent in its session gets an error. Residual risk: if the session's agent is not running (e.g.
-   while GNOME Shell restarts), a process in that session could register a
-   session agent of its own.
+   session, the requester must be in a session of the user's that has a
+   seat and is that seat's active session, or in none (apps under
+   `user@.service`, where polkit uses the display session). Any other
+   session (ssh, `ssh localhost`, which logind counts as active and does
+   not mark remote, an inactive console), whose agent the requester could
+   have chosen, is refused before polkit is asked. A requester with no
+   agent in its session gets an error. Residual risk: if the session's
+   agent is not running (e.g. while GNOME Shell restarts), a process in
+   that session could register a session agent of its own.
    Without the polkit action installed, the password falls back to the
    unverified window, flagged on every request.
 5. **Executed command → system.** It runs as full root. The process group is
