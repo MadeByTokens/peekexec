@@ -10,14 +10,17 @@
        remembered: every request asks again. Only for the active local
        session: polkit itself refuses anything else (ssh, an inactive
        console), as peekexecd already does. A process in no session
-       (user@.service apps) is judged by the user's display session. -->
+       (user@.service apps) is judged by the user's display session. The
+       user's own password (auth_self): peekexecd already requires an
+       administrator, as with its own dialog. A local rule that returns yes
+       for this action makes peekexecd refuse: no human would be asked. -->
   <action id="org.peekexec.approve">
     <description>Approve a peekexec request</description>
     <message>Approve a peekexec request (details in the peekexec window)</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
-      <allow_active>auth_admin</allow_active>
+      <allow_active>auth_self</allow_active>
     </defaults>
   </action>
 </policyconfig>

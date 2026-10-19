@@ -101,6 +101,22 @@ impl SystemPrompt for Polkit {
         }
         let conn = zbus::blocking::Connection::system()
             .map_err(|e| PlatformError::Other(format!("system bus: {e}")))?;
+        // The Continue click that leads here may come from a display the
+        // requester runs itself, so polkit must be what involves the human:
+        // if it would grant with no one asked (a local rule, a remembered
+        // authorization), refuse.
+        match self.decide_silently(&conn, subject.pid, start_time, uid)? {
+            (true, _) => {
+                return Err(PlatformError::Other(
+                    "refusing: polkit would allow this without asking anyone (a local rule or \
+                     a remembered authorization for org.peekexec.approve), so no human would \
+                     confirm it"
+                        .into(),
+                ))
+            }
+            (false, false) => return Ok(PromptOutcome::NotAuthorized),
+            (false, true) => {}
+        }
         let cancellation_id = format!("peekexec-{}-{}", subject.pid, start_time);
 
         // Hold the subject's agent slot before asking (see the module docs).
@@ -164,6 +180,35 @@ impl SystemPrompt for Polkit {
 }
 
 impl Polkit {
+    /// polkit's answer without user interaction: (authorized, challenge).
+    fn decide_silently(
+        &self,
+        conn: &zbus::blocking::Connection,
+        pid: u32,
+        start_time: u64,
+        uid: u32,
+    ) -> Result<(bool, bool), PlatformError> {
+        let details: HashMap<&str, &str> = HashMap::new();
+        let reply: Reply = conn
+            .call_method(
+                Some(DEST),
+                PATH,
+                Some(IFACE),
+                "CheckAuthorization",
+                &(
+                    ("unix-process", subject_details(pid, start_time, uid)),
+                    ACTION,
+                    details,
+                    0u32,
+                    "",
+                ),
+            )
+            .and_then(|m| m.body().deserialize());
+        let (authorized, challenge, _) =
+            reply.map_err(|e| PlatformError::Other(format!("polkit: {e}")))?;
+        Ok((authorized, challenge))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn ask(
         &self,

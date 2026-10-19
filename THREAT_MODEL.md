@@ -183,9 +183,12 @@ has a seat and is its active one"), never the absence of a warning sign
    `/proc/<pid>/fd/N`, and a pipe opened that way can be read later. The
    dialog inherits no other descriptors, and its stderr reaches the log
    labelled as the dialog's. An Approve click is always required
-   before PAM runs, so a PAM stack that succeeds without a password still
-   cannot skip the human. PAM prompts the dialog cannot answer (a username, an
-   OTP code) fail closed.
+   before PAM runs, so on a verified display a PAM stack that succeeds
+   without a password still cannot skip the human. On an unverified display
+   the requester may be the one clicking (its own display server), so there
+   the human's involvement must come from elsewhere: polkit's own prompt
+   (boundary 4), which the daemon first checks would actually ask. PAM
+   prompts the dialog cannot answer (a username, an OTP code) fail closed.
 4. **Dialog ↔ human (the display).** Whoever runs the display server sees every
    key typed into the dialog. So the display is never taken from the
    requester's environment when it can be verified. On X11, the daemon accepts
@@ -196,7 +199,12 @@ has a seat and is its active one"), never the absence of a warning sign
    the user's environment and cannot be trusted (`display_verified: false`),
    so it becomes read-only: the human clicks Continue there, and the password
    goes into the desktop's own polkit prompt for the `org.peekexec.approve`
-   action (admin authentication, never remembered). That prompt is drawn by
+   action (the user's own password, `auth_self`, never remembered; only
+   the active local session may be asked at all: `allow_any` and
+   `allow_inactive` are `no`). Since the Continue click may come from a
+   display the requester runs, the daemon first asks polkit without user
+   interaction and refuses if it would allow with no one asked (a local
+   rule granting the action, a remembered authorization). That prompt is drawn by
    the authentication agent registered at login (GNOME Shell itself), which a
    requester cannot reroute, and it shows a summary written by the daemon: the
    command (up to 12 lines per section, long lines wrapped rather than cut,
