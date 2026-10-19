@@ -568,3 +568,32 @@ fn denied_registration_creates_no_session() {
         "neither the caller nor one of its ancestors"
     );
 }
+
+#[test]
+fn a_finished_run_leaves_no_thread_behind() {
+    use peekexec_proto::wire::{read_msg, write_msg};
+    use std::io::BufReader;
+    use std::os::unix::net::UnixStream;
+    let d = Daemon::start("approve");
+    let threads = || {
+        std::fs::read_dir(format!("/proc/{}/task", d.child.id()))
+            .unwrap()
+            .count()
+    };
+    let before = threads();
+    // Refused at once (relative cwd); the client keeps each socket open.
+    let mut held = Vec::new();
+    for _ in 0..20 {
+        let mut s = UnixStream::connect(&d.socket).unwrap();
+        let mut r = sh("true");
+        r.cwd = "relative".into();
+        write_msg(&mut s, &ClientMsg::Run { request: r }).unwrap();
+        let reply: Response = read_msg(&mut BufReader::new(s.try_clone().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.status, Status::Error);
+        held.push(s);
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(threads() <= before + 2, "{before} -> {}", threads());
+}

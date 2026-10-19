@@ -201,10 +201,13 @@ impl Daemon {
         let Ok(read_half) = conn.try_clone() else {
             return;
         };
-        let mut reader = BufReader::new(read_half);
-        // A client gets this long to send its request; then the timeout is
-        // lifted, since `run` keeps the connection open while it waits.
-        let _ = conn.set_read_timeout(Some(Duration::from_secs(30)));
+        // A client gets this long to send its whole request; then the
+        // timeout is lifted, since `run` keeps the connection open while it
+        // waits.
+        let mut reader = BufReader::new(Deadline {
+            conn: read_half,
+            until: Instant::now() + Duration::from_secs(30),
+        });
         let msg: ClientMsg = match read_msg(&mut reader) {
             Ok(Some(m)) => m,
             Ok(None) => return,
@@ -213,7 +216,9 @@ impl Daemon {
                 return;
             }
         };
-        let _ = conn.set_read_timeout(None);
+        let mut read_half = reader.into_inner().conn;
+        let _ = read_half.set_read_timeout(None);
+        let mut watcher = None;
         let reply = match msg {
             ClientMsg::Preview { request } => {
                 let reply = match self.preview(&peer, &request) {
@@ -228,11 +233,13 @@ impl Daemon {
             ClientMsg::Run { request } => {
                 let (_, entry) = self.start(peer, request);
                 // The client hanging up (Ctrl-C) withdraws the request.
-                let watcher = Arc::clone(&entry);
-                let _ = std::thread::Builder::new().spawn(move || {
-                    let _ = reader.read(&mut [0u8; 1]);
-                    watcher.cancel.store(true, Ordering::SeqCst);
-                });
+                let watched = Arc::clone(&entry);
+                watcher = std::thread::Builder::new()
+                    .spawn(move || {
+                        let _ = read_half.read(&mut [0u8; 1]);
+                        watched.cancel.store(true, Ordering::SeqCst);
+                    })
+                    .ok();
                 entry.wait(None).expect("waits until finished")
             }
             ClientMsg::Submit { request } => {
@@ -266,6 +273,12 @@ impl Daemon {
             },
         };
         let _ = write_msg(&mut conn, &reply);
+        // Wakes the watcher, so neither its thread nor its descriptor
+        // outlives the connection slot.
+        let _ = conn.shutdown(std::net::Shutdown::Both);
+        if let Some(w) = watcher {
+            let _ = w.join();
+        }
     }
 
     fn lookup(&self, id: &str, uid: u32) -> Option<Arc<Entry>> {
@@ -864,6 +877,27 @@ impl Daemon {
 }
 
 /// One counted connection of a user; released when dropped.
+/// A connection read against one deadline for the whole message: a
+/// timeout per `read` alone lets a client send a byte every 29 s forever.
+struct Deadline {
+    conn: UnixStream,
+    until: Instant,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "request not sent in time",
+            ));
+        }
+        self.conn.set_read_timeout(Some(left))?;
+        self.conn.read(buf)
+    }
+}
+
 struct ConnectionSlot<'a> {
     table: &'a Mutex<HashMap<u32, usize>>,
     uid: u32,
