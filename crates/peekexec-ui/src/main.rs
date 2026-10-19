@@ -126,6 +126,9 @@ struct Dialog {
     want_focus: bool,
     /// The desktop's own prompt is up (system-prompt approval).
     system_prompt_open: bool,
+    /// Keys arrived while the window was opening: the human was typing
+    /// into something else (perhaps a password), so Enter must not approve.
+    typed_early: bool,
 }
 
 impl Dialog {
@@ -150,6 +153,7 @@ impl Dialog {
             opened_at: None,
             want_focus: true,
             system_prompt_open: false,
+            typed_early: false,
         }
     }
 
@@ -216,8 +220,10 @@ impl eframe::App for Dialog {
         // Keystrokes aimed at another window must not land in the dialog.
         if now - opened < self.view.input_guard_ms as f64 / 1000.0 {
             ctx.input_mut(|i| {
+                let before = i.events.len();
                 i.events
-                    .retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Paste(_)))
+                    .retain(|e| !matches!(e, Event::Key { .. } | Event::Text(_) | Event::Paste(_)));
+                self.typed_early |= i.events.len() != before;
             });
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -569,7 +575,7 @@ impl Dialog {
                         .desired_width(260.0)
                         .hint_text(if self.busy {
                             "checking…"
-                        } else if self.view.enter_approves {
+                        } else if self.view.enter_approves && !self.typed_early {
                             "type it and press Enter"
                         } else {
                             "type it, then click Approve"
@@ -579,8 +585,10 @@ impl Dialog {
                     field.request_focus();
                     self.want_focus = false;
                 }
-                // With warnings on screen, approving takes a deliberate click.
+                // With warnings on screen, or keys that were typed as the
+                // window opened, approving takes a deliberate click.
                 if self.view.enter_approves
+                    && !self.typed_early
                     && field.lost_focus()
                     && ui.input(|i| i.key_pressed(Key::Enter))
                 {
@@ -604,7 +612,12 @@ impl Dialog {
                     verb.to_string()
                 };
                 let approve = egui::Button::new(RichText::new(label).strong());
-                if ui.add_enabled(ready, approve).clicked() {
+                // A pointer click only: Tab then Space or Enter would
+                // otherwise activate it from the keyboard.
+                if ui
+                    .add_enabled(ready, approve)
+                    .clicked_by(egui::PointerButton::Primary)
+                {
                     self.approve(ctx);
                 }
                 if ui.button("Cancel").clicked() {
@@ -614,6 +627,15 @@ impl Dialog {
         });
         if let Some(e) = &self.error {
             ui.label(RichText::new(e).color(DANGER).strong());
+        }
+        if self.typed_early && self.view.enter_approves && self.view.wants_password {
+            ui.label(
+                RichText::new(
+                    "Keys were typed as this window opened, so Enter does not approve: \
+                     click Approve.",
+                )
+                .color(WARN),
+            );
         }
         ui.add_space(2.0);
         ui.horizontal(|ui| {

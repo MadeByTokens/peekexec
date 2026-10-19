@@ -148,6 +148,10 @@ fn wait_for_answer(
     cancel: &AtomicBool,
 ) -> Option<Decision> {
     let deadline = Instant::now() + Duration::from_secs(view.timeout_secs.into());
+    // The dialog itself holds Approve back this long; an earlier one did
+    // not come from a human using it.
+    let earliest = Instant::now()
+        + Duration::from_millis(view.input_guard_ms.max(view.approve_delay_ms).into());
     let mut attempts = ATTEMPTS;
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -159,6 +163,11 @@ fn wait_for_answer(
         }
         let tick = (deadline - now).min(Duration::from_millis(200));
         match rx.recv_timeout(tick) {
+            Ok(FromUi::Approve { .. }) if Instant::now() < earliest => {
+                return Some(Decision::Failed(
+                    "the dialog sent Approve before it allows one; refused".into(),
+                ));
+            }
             Ok(FromUi::Approve { .. }) if matches!(approver, Approver::System { .. }) => {
                 let Approver::System {
                     prompt,

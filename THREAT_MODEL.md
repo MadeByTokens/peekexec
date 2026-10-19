@@ -264,9 +264,12 @@ has a seat and is its active one"), never the absence of a warning sign
   ground truth.
 - **`--why` is the requester's claim**, shown below everything the daemon
   checked and labelled unverified.
-- **Enter-to-approve** works only when there is nothing to warn about; with any
-  note or marked character, approving needs a click. A dialog arriving right
-  after another gets a longer input guard.
+- **Enter-to-approve** works only when there is nothing to warn about and no
+  key was pressed while the window was opening (the human was typing into
+  something else, perhaps a password); otherwise approving needs a pointer
+  click, which the keyboard (Tab, then Space) cannot stand in for. A dialog
+  arriving right after another gets a longer input guard, and the daemon
+  refuses an Approve that comes sooner than the dialog allows one.
 - **The one-hour refusal of a denied request** is a courtesy for well-behaved
   agents (any change makes a new request), not a control.
 
