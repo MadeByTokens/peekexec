@@ -233,7 +233,11 @@ pub fn prepare(
                 )],
             };
             facts.push(format!("the requester calls the new content {src}"));
-            let facts: Vec<Shown> = facts.iter().map(|f| display_line(f, 300)).collect();
+            // The destination in full on a counted line: the title is cut.
+            let facts: Vec<Shown> =
+                std::iter::once(display_line(&format!("writes {dest_s}"), usize::MAX))
+                    .chain(facts.iter().map(|f| display_line(f, 300)))
+                    .collect();
             let mut sections = vec![install_section(&dest_s, facts, content, &mut notes)];
             match existing.map(|e| e.content) {
                 Some(Ok(old)) => {
@@ -528,12 +532,18 @@ fn validate(req: &Request) -> Result<(), String> {
         !s.chars()
             .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
     };
-    if let Action::Install { dest, .. } = &req.action {
-        if !plain(dest) {
+    if let Action::Install { src, dest, .. } = &req.action {
+        // Into a directory, the file is named after `src`.
+        let name = Path::new(src).file_name().and_then(|n| n.to_str());
+        if let Some(bad) = [Some(dest.as_str()), name]
+            .into_iter()
+            .flatten()
+            .find(|s| !plain(s))
+        {
             return Err(format!(
                 "install destination may not contain control characters or hidden \
                  characters: {}",
-                display_line(dest, 300)
+                display_line(bad, 300)
             ));
         }
     }
@@ -939,6 +949,13 @@ mod tests {
             });
             assert!(validate(&r).unwrap_err().contains("hidden"), "{dest:?}");
         }
+        // Into a directory the name comes from `src`: held to the same rule.
+        let r = req(Action::Install {
+            src: "/home/u/evil\u{202E}hs.txt\nline".into(),
+            content: b"hi\n".to_vec(),
+            dest: "/etc/cron.d".into(),
+        });
+        assert!(validate(&r).unwrap_err().contains("hidden"));
     }
 
     #[test]
@@ -1017,6 +1034,25 @@ mod tests {
             "{:?}",
             plan.argv
         );
+    }
+
+    #[test]
+    fn install_destination_is_a_counted_line_in_full() {
+        let dir = std::env::temp_dir().join(format!("pe-dest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.join(format!("README-not-a-rule-{}.rules", "x".repeat(200)));
+        let install = req(Action::Install {
+            src: "r".into(),
+            content: b"new\n".to_vec(),
+            dest: dest.to_str().unwrap().into(),
+        });
+        let p = prepare_for_tests(&install);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let line = format!("writes {}", dest.display());
+        assert_eq!(p.view.sections[0].invocation[0].as_str(), line);
+        let m = system_prompt_message(&p.view);
+        assert!(m.contains(".rules") && !m.contains("INCOMPLETE"), "{m}");
     }
 
     #[test]
