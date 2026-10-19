@@ -28,7 +28,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | script `path` (label) | — | — | escaped, after the arguments (✓) | file name in the title; full label after the arguments (✓) | never used (✓) | Debug-quoted (✓) |
 | script `args` | NUL refused (✓) | — | one `argv[i]` invocation line each, escaped, never cut (✓) | counted invocation lines (✓) | verbatim argv (✓) | Debug-quoted (✓) |
 | install `content` | — | — | text shown, binary described (✓) | 12 lines, then INCOMPLETE (✓) | written by the daemon, atomic (✓) | sha256 (✓) |
-| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1). ⚠ only NUL refused: line breaks and hidden characters pass | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1). ⚠ drawn unescaped in the summary | title cut at 80 characters, summary at 160; owner and mode are counted invocation lines (✓) | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
+| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1); control and hidden characters refused, like `--write` (✓ R3) | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1); escaped in the title and the summary (✓) | title cut at 80 characters, summary at 160; owner and mode are counted invocation lines (✓) | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
 | `cwd` | canonicalized, checked and opened by the helper as the user; the descriptor is passed back (✓ R1, R2) | errors as the user (✓ R1) | escaped; untrusted directory flagged (✓) | `in:` line (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
 | `env` name | R3: exact allowlist of names (the locale categories are listed one by one), so the count is bounded too (✓) | — | escaped (`Shown`); the header scrolls past 45% of the window, so nothing in it can push the code out of view (✓) | every variable listed (✓) | rebuilt from scratch (✓) | — |
 | `env` value | `[A-Za-z0-9_.@:+,-]`, no paths (✓) | — | escaped (✓) | listed (✓) | rebuilt from scratch (✓) | — |
@@ -81,7 +81,8 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 - **(c)** Done: `Shown` in `crates/peekexec-proto/src/view.rs`. Every
   one-line field of the view has this type, made only by escaping or from
   a daemon constant; it caught a header line built from unescaped argv.
-  ⚠ Not yet: `enforced.write`.
+  `enforced.write` stays plain strings (it is also the JSON answer), and
+  the summary escapes each path when it draws it.
 - **(d)** Done: `crates/peekexecd/src/spawn.rs` starts every process
   (dialog, inspection helper, approved command) with an explicit
   environment and stdio, no other descriptors, verified credential drops,

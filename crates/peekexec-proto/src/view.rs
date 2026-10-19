@@ -248,10 +248,14 @@ impl PromptView {
             Level::Builtin => "",
         };
         match &e.write {
-            Some(paths) => out.push((
-                e.write_level != Level::Kernel && e.write_level != Level::Builtin,
-                format!("writes {}{}", paths.join(", "), how(e.write_level)),
-            )),
+            Some(paths) => {
+                // Checked by the daemon already; escaped here all the same.
+                let paths: Vec<Shown> = paths.iter().map(|p| Shown::line(p, 300)).collect();
+                out.push((
+                    e.write_level != Level::Kernel && e.write_level != Level::Builtin,
+                    format!("writes {}{}", join(&paths, ", "), how(e.write_level)),
+                ))
+            }
             None => out.push((true, "writes ANYWHERE".into())),
         }
         if e.network {

@@ -521,16 +521,27 @@ fn validate(req: &Request) -> Result<(), String> {
     if strings.iter().any(|s| s.contains('\0')) {
         return Err("arguments may not contain NUL bytes".into());
     }
+    // Paths root writes to are shown in the one-line summary: a line break
+    // would fake its lines, a bidi or invisible character would hide part
+    // of it. Such a name is never needed, so it is refused, not escaped.
+    let plain = |s: &str| {
+        !s.chars()
+            .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
+    };
+    if let Action::Install { dest, .. } = &req.action {
+        if !plain(dest) {
+            return Err(format!(
+                "install destination may not contain control characters or hidden \
+                 characters: {}",
+                display_line(dest, 300)
+            ));
+        }
+    }
     for path in req.write.iter().flatten() {
         if !path.starts_with('/') {
             return Err(format!("--write path must be absolute: {path}"));
         }
-        // Shown in the one-line summary: a line break would fake its lines,
-        // a bidi or invisible character would hide part of it.
-        if path
-            .chars()
-            .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
-        {
+        if !plain(path) {
             return Err(format!(
                 "--write path may not contain control characters or hidden characters: {path:?}"
             ));
@@ -916,6 +927,18 @@ mod tests {
         });
         r.write = Some(vec!["/etc/motd\nnetwork: blocked".into()]);
         assert!(validate(&r).unwrap_err().contains("control characters"));
+        for dest in [
+            "/etc/motd\nno network",
+            "/etc/\u{200B}motd",
+            "/etc/\u{202E}dtom",
+        ] {
+            let r = req(Action::Install {
+                src: "motd".into(),
+                content: b"hi\n".to_vec(),
+                dest: dest.into(),
+            });
+            assert!(validate(&r).unwrap_err().contains("hidden"), "{dest:?}");
+        }
     }
 
     #[test]
