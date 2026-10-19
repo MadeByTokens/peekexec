@@ -63,7 +63,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Timing: pid reuse | pidfds for the requester and agents. The approved command stays unreaped (`waitid(WNOWAIT)`) until its group is killed, which is exactly the condition `pidfd_open(2)` gives for a pid that cannot be reused, so a pidfd would add nothing (R7) (✓) | ✓ |
 | Processes the approved command starts | killed with its process group; detached ones cannot hold the request (✓) | ✓ |
 | The inspection helper's answer (it runs as the user) | Pre: what root can derive from the request is derived again and compared (the program argv[0] resolves to, the `#!` interpreter and flag, the install destination); the install directory is re-checked as root-controlled; the descriptor must be the directory shown; cwd warning recomputed; failures are generic (✓). The helper is non-dumpable from exec (binary mode 0711) and by `prctl` (✓). Residual: with ptrace_scope 0 (already noted in the dialog) a tampered helper could misstate an existing file's old content; the new content is always shown in full | ✓ |
-| The password, in memory | ⚠ the dialog scrubs its copy; the daemon's copies (the message, PAM's answer) are freed without being wiped | ⚠ |
+| The password, in memory | a `Secret` from the dialog's field to PAM: moved, never copied into a plain `String`, wiped on drop, redacted in `Debug`; every message buffer is wiped after use; PAM's answer and its strdup copy are wiped (✓). Residual: egui's text field and serde's internal buffers are not ours to wipe | ✓ |
 | Panics it can trigger | release builds abort; socket activation restarts (✓) | ✓ |
 
 ## Planned structural fixes

@@ -13,11 +13,21 @@ pub const MAX_MSG: u64 = 32 * 1024 * 1024;
 /// Default daemon socket.
 pub const SOCKET: &str = "/run/peekexec/peekexec.sock";
 
+/// Overwrite bytes that held a secret. `black_box` keeps the compiler from
+/// dropping the writes as dead stores.
+pub fn wipe(bytes: &mut [u8]) {
+    bytes.fill(0);
+    std::hint::black_box(bytes);
+}
+
+/// Message buffers are wiped once used: a message may carry a password.
 pub fn write_msg<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
     let mut buf = serde_json::to_vec(msg).map_err(io::Error::other)?;
     buf.push(b'\n');
-    w.write_all(&buf)?;
-    w.flush()
+    let sent = w.write_all(&buf).and_then(|()| w.flush());
+    buf.resize(buf.capacity(), 0);
+    wipe(&mut buf);
+    sent
 }
 
 /// `Ok(None)` on a clean EOF before any byte of a message.
@@ -35,9 +45,12 @@ pub fn read_msg<R: BufRead, T: DeserializeOwned>(r: &mut R) -> io::Result<Option
         };
         return Err(io::Error::new(io::ErrorKind::InvalidData, why));
     }
-    serde_json::from_slice(&buf)
+    let parsed = serde_json::from_slice(&buf)
         .map(Some)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+    buf.resize(buf.capacity(), 0);
+    wipe(&mut buf);
+    parsed
 }
 
 /// Connect, send one message, read one reply.

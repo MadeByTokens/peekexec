@@ -14,7 +14,7 @@ use std::time::Duration;
 use eframe::egui::{
     self, Align, Color32, Event, Key, Layout, RichText, ScrollArea, TextEdit, Vec2, ViewportCommand,
 };
-use peekexec_proto::ui::{FromUi, ToUi};
+use peekexec_proto::ui::{FromUi, Secret, ToUi};
 use peekexec_proto::view::{self, Approval, PromptView, Provenance, Shown, ViewKind};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::DisplayTier;
@@ -104,13 +104,6 @@ fn answer(msg: &FromUi) {
     let _ = out.flush();
 }
 
-/// Overwrite a secret's bytes before dropping it.
-fn scrub(s: &mut String) {
-    // SAFETY: zero bytes are valid UTF-8, and the string is cleared after.
-    unsafe { s.as_bytes_mut().fill(0) };
-    s.clear();
-}
-
 struct Dialog {
     view: PromptView,
     glyphs: &'static fonts::Glyphs,
@@ -175,8 +168,9 @@ impl Dialog {
         if self.busy || (self.view.wants_password && self.password.is_empty()) {
             return;
         }
-        let password = self.view.wants_password.then(|| self.password.clone());
-        scrub(&mut self.password);
+        // Moved, not copied: the Secret is wiped once sent.
+        let password = std::mem::take(&mut self.password);
+        let password = self.view.wants_password.then(|| Secret::new(password));
         self.error = None;
         self.send(ctx, FromUi::Approve { password });
     }

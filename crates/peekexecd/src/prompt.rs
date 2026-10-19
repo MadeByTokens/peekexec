@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use peekexec_proto::ui::{FromUi, ToUi};
+use peekexec_proto::ui::{FromUi, Secret, ToUi};
 use peekexec_proto::view::PromptView;
 use peekexec_proto::wire::{read_msg, write_msg};
 
@@ -186,25 +186,28 @@ fn wait_for_answer(
                     },
                 );
             }
-            Ok(FromUi::Approve { password }) => match approver.verify(password.as_deref()) {
-                Ok(true) => return Some(Decision::Approved),
-                Ok(false) => {
-                    attempts -= 1;
-                    if attempts == 0 {
+            // `password` is a Secret: wiped when this arm ends.
+            Ok(FromUi::Approve { password }) => {
+                match approver.verify(password.as_ref().map(Secret::expose)) {
+                    Ok(true) => return Some(Decision::Approved),
+                    Ok(false) => {
+                        attempts -= 1;
+                        if attempts == 0 {
+                            return Some(Decision::AuthFailed);
+                        }
+                        let _ = write_msg(
+                            stdin,
+                            &ToUi::WrongPassword {
+                                attempts_left: attempts,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("peekexecd: authentication error: {e}");
                         return Some(Decision::AuthFailed);
                     }
-                    let _ = write_msg(
-                        stdin,
-                        &ToUi::WrongPassword {
-                            attempts_left: attempts,
-                        },
-                    );
                 }
-                Err(e) => {
-                    eprintln!("peekexecd: authentication error: {e}");
-                    return Some(Decision::AuthFailed);
-                }
-            },
+            }
             Ok(FromUi::Cancel) => return Some(Decision::Cancelled),
             Ok(FromUi::Deny { reason }) => return Some(Decision::Denied(reason)),
             Err(RecvTimeoutError::Timeout) => continue,

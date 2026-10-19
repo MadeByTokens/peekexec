@@ -66,6 +66,14 @@ struct Answers {
     password_used: bool,
 }
 
+impl Drop for Answers {
+    fn drop(&mut self) {
+        if let Some(p) = self.password.take() {
+            peekexec_proto::wire::wipe(&mut p.into_bytes_with_nul());
+        }
+    }
+}
+
 extern "C" fn conversation(
     num_msg: c_int,
     msg: *mut *const PamMessage,
