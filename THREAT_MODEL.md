@@ -277,7 +277,10 @@ has a seat and is its active one"), never the absence of a warning sign
 
 Accepted for a single-seat desktop: an administrator's own processes can
 queue requests (at most 3 pending and 1 registration, 16 connections) and occupy the single
-dialog. Other users cannot connect. Any local user can
+dialog. On an unverified display the requester may answer the dialog
+itself, so its wrong passwords (3 per request) can count toward a lockout
+such as pam_faillock; it could do the same with `su`. Other users cannot
+connect. Any local user can
 crash polkitd on affected versions (a polkit bug, Launchpad #1562721; see
 [docs/notes/polkit-unix-session-crash.md](docs/notes/polkit-unix-session-crash.md)); this
 does not affect peekexec's X11 path.
