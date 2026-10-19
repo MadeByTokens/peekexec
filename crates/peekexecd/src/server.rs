@@ -243,10 +243,13 @@ impl Daemon {
                 entry.wait(None).expect("waits until finished")
             }
             ClientMsg::Submit { request } => {
-                let (id, _) = self.start(peer, request);
-                Response {
-                    request_id: Some(id),
-                    ..Response::new(Status::Pending)
+                match self.start(peer, request) {
+                    (Some(id), _) => Response {
+                        request_id: Some(id),
+                        ..Response::new(Status::Pending)
+                    },
+                    // Refused at once, not kept: the answer is now.
+                    (None, entry) => entry.wait(None).expect("finished"),
                 }
             }
             ClientMsg::Wait { id, timeout_secs } => match self.lookup(&id, peer.uid) {
@@ -287,8 +290,9 @@ impl Daemon {
         requests.get(id).filter(|e| e.owner == uid).cloned()
     }
 
-    fn start(self: &Arc<Self>, peer: Peer, request: Request) -> (String, Arc<Entry>) {
-        let id = new_id();
+    /// The id is `None` for a request refused at once, which is not kept.
+    fn start(self: &Arc<Self>, peer: Peer, request: Request) -> (Option<String>, Arc<Entry>) {
+        let mut id = new_id();
         let entry = Arc::new(Entry {
             owner: peer.uid,
             created: Instant::now(),
@@ -305,17 +309,20 @@ impl Daemon {
                 .values()
                 .filter(|e| e.owner == peer.uid && e.result.lock().unwrap().is_none())
                 .count();
-            requests.insert(id.clone(), Arc::clone(&entry));
             if pending >= MAX_PENDING_PER_USER {
-                entry.finish(Response {
-                    request_id: Some(id.clone()),
-                    ..Response::error(format!(
-                        "refused: {pending} requests are already waiting for the human; \
-                         wait for them before sending more"
-                    ))
-                });
-                return (id, entry);
+                // Answered here and not kept: a flood of refused requests
+                // does not grow the table.
+                entry.finish(Response::error(format!(
+                    "refused: {pending} requests are already waiting for the human; \
+                     wait for them before sending more"
+                )));
+                return (None, entry);
             }
+            // Never replace another request's entry.
+            while requests.contains_key(&id) {
+                id = new_id();
+            }
+            requests.insert(id.clone(), Arc::clone(&entry));
         }
         let d = Arc::clone(self);
         let worker_entry = Arc::clone(&entry);
@@ -330,7 +337,7 @@ impl Daemon {
                 "daemon overloaded ({e}); try again"
             )));
         }
-        (id, entry)
+        (Some(id), entry)
     }
 
     fn ctx<'a>(&'a self, inspect: &'a prepare::Inspector) -> Ctx<'a> {
@@ -1006,7 +1013,7 @@ fn is_admin(_user: &User) -> bool {
 }
 
 fn new_id() -> String {
-    let mut b = [0u8; 4];
+    let mut b = [0u8; 8];
     if std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut b))
         .is_err()
@@ -1014,7 +1021,7 @@ fn new_id() -> String {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        b = (t.subsec_nanos() ^ std::process::id()).to_le_bytes();
+        b = (t.as_nanos() as u64 ^ u64::from(std::process::id())).to_le_bytes();
     }
     format!(
         "r-{}",
