@@ -95,7 +95,7 @@ has a seat and is its active one"), never the absence of a warning sign
 | Actor | Trust |
 |---|---|
 | Human approver | Trusted. An administrator (member of the first of `sudo`, `wheel`, `admin` that exists) typing **their own** password; usually the same account as the requester, as with sudo. |
-| Requester (agent, script) | **Untrusted.** Controls argv, file contents, env (within an allowlist), working directory, `--why`, and its own process names. May be buggy, overeager or prompt-injected; on X11 a malicious one is out of reach (see tiers). |
+| Requester (agent, script) | **Untrusted.** Controls argv, file contents, env (within an allowlist), working directory, `--why`, and its own process names. May be buggy, overeager or prompt-injected; on X11, one that runs programs of its own (any agent with a shell can) is out of reach: it can read the password as it is typed (see tiers). |
 | Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group (the first of `sudo`, `wheel`, `admin` that exists). The daemon checks membership again. |
 | `peekexecd` (root) | Trusted computing base. |
 | `peekexec-ui` (the dialog) | Started by the daemon from a root-owned path with a clean environment, as the approving user with no supplementary groups; non-dumpable. Trusted to render honestly, but it runs as the user, so on X11 other programs of that user can drive it. |
@@ -207,8 +207,16 @@ has a seat and is its active one"), never the absence of a warning sign
    display the requester runs, the daemon first asks polkit without user
    interaction and refuses if it would allow with no one asked (a local
    rule granting the action, a remembered authorization). That prompt is drawn by
-   the authentication agent registered at login (GNOME Shell itself), which a
-   requester cannot reroute, and it shows a summary written by the daemon.
+   the authentication agent registered at login. On GNOME that is the shell
+   itself, the compositor, which a requester cannot reroute; on other
+   desktops it is an ordinary program of the user's, which a requester could
+   end and replace with its own. So the path is used only with positive
+   evidence that GNOME Shell holds it: a `gnome-shell` of the user's, from
+   a binary root controls, that started within two minutes of the session's
+   leader (kernel start times). A requester can start a shell or an agent
+   of its own, but not one that started before it did, and a shell
+   restarted since login no longer counts. The prompt shows a summary
+   written by the daemon.
    The daemon's facts come first: the limits, where the request came from,
    the working directory and every warning. Then the command in full: every
    argument and every line of content, long lines wrapped rather than cut,
@@ -235,11 +243,17 @@ has a seat and is its active one"), never the absence of a warning sign
    session (ssh, `ssh localhost`, which logind counts as active and does
    not mark remote, an inactive console), whose agent the requester could
    have chosen, is refused before polkit is asked. A requester with no
-   agent in its session gets an error. Residual risk: if the session's
-   agent is not running (e.g. while GNOME Shell restarts), a process in
-   that session could register a session agent of its own.
-   Without the polkit action installed, the password falls back to the
-   unverified window, flagged on every request.
+   agent in its session gets an error. Residual risk: another agent that
+   registered before GNOME Shell did at login (one started from the
+   session's autostart) would go unnoticed, and with `ptrace_scope` 0
+   (noted in the dialog) a program of the user's could take over the
+   shell itself.
+   Where there is no prompt that can be trusted (the polkit action is not
+   installed, or the desktop is not GNOME), the request is refused before
+   anything is shown: typing the password into the unverified window would
+   hand it to whoever runs that display. An administrator can allow that
+   anyway by starting the daemon with `--allow-unverified-display`; every
+   such dialog then says the display could not be verified.
 5. **Executed command → system.** It runs as full root. The process group is
    killed when the command exits, the umask is 022, and the audit login uid is
    set to the requester. Processes that leave its process group (a new
@@ -253,9 +267,9 @@ has a seat and is its active one"), never the absence of a warning sign
 
 | Tier | Setup | Holds against |
 |---|---|---|
-| 1 | X11, verified X server | Buggy, overeager or prompt-injected requesters. **Not** a malicious same-user program: X11 lets any client draw fake windows, read keys, and synthesize input (including clicking Approve after reading a typed password, or forging a Deny reason). sudo and pkexec share this limit. |
-| 1- | Unverified display, polkit action not installed | As tier 1, and the dialog may be relayed through another display server. Flagged on every request. |
-| 2 | Wayland: password in the desktop's own polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
+| 1 | X11, verified X server | Requesters that only *ask* for the wrong thing: buggy, overeager, or talked into a bad request. **Not** a requester that runs programs of its own, and a prompt-injected agent with a shell can do exactly that: X11 lets any client draw fake windows, read keys, and synthesize input, so it can read the password as it is typed and later type it and click Approve itself (or forge a Deny reason). sudo and pkexec share this limit. |
+| 1- | Unverified display and no prompt that can be trusted (no polkit action, or not GNOME) | Refused, unless root starts the daemon with `--allow-unverified-display`; then as tier 1, and the dialog may be relayed through a display server the requester runs. Flagged on every request. |
+| 2 | GNOME on Wayland: password in GNOME Shell's polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
 | 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. |
 
 ## Things a hurried human might assume

@@ -642,7 +642,9 @@ impl Dialog {
             let remaining = (self.view.timeout_secs as f64 - (now - opened)).max(0.0) as u64;
             let tier = match (self.view.display_verified, self.view.display_tier) {
                 (false, _) => "display server NOT verified",
-                (true, DisplayTier::X11) => "X11: other apps of yours can see this window",
+                (true, DisplayTier::X11) => {
+                    "X11: other programs of yours can read and type into this window"
+                }
                 (true, DisplayTier::Wayland) => "Wayland: isolated from other apps",
             };
             ui.label(

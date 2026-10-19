@@ -26,10 +26,13 @@ file being installed, plus who is asking and why. Built so AI coding agents
 can ask for root with a reason the human can read, and get a structured
 answer back.
 
-> Linux only. On X11 the password goes into peekexec's dialog. On Wayland
-> (where peekexec cannot verify its own window) you read the request in
-> peekexec's window and type the password into your desktop's own polkit
-> prompt, which repeats the key facts; see [THREAT_MODEL.md](THREAT_MODEL.md).
+> Linux only. On X11 the password goes into peekexec's dialog, where any
+> program running as you, one your agent starts included, can read it as
+> you type. On GNOME on Wayland (where peekexec cannot verify its own
+> window) you read the request in peekexec's window and type the password
+> into GNOME Shell's own polkit prompt, which repeats the whole request.
+> Elsewhere peekexec refuses unless an administrator allows the unverified
+> dialog; see [THREAT_MODEL.md](THREAT_MODEL.md).
 
 pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
 
@@ -64,7 +67,7 @@ peekexec help agents     # the guide for automated callers
 | **Not shown** | Files and directories the command reads while it runs (`cp ./x /etc/` shows the command, not `./x`). Use `peekexec install` for files. |
 | **Limits** | `--write` is declared only. `--no-net` puts the command in a new network namespace: this stops well-behaved programs, but a root process can rejoin the host network, so it is reported as `best_effort`. Neither is containment. |
 | **Who is asking** | The uid comes from the kernel and decides everything. Process names and command lines are chosen by the processes themselves and are informational. |
-| **The human channel** | On X11, any program running as you can see and drive the dialog (as with sudo and pkexec). Treat `deny_reason` as the human's advice, not an authenticated instruction. |
+| **The human channel** | On X11, any program running as you, including one your agent starts, can see and drive the dialog and read the password as you type it (as with sudo and pkexec). Treat `deny_reason` as the human's advice, not an authenticated instruction. |
 
 ## When to use something else
 

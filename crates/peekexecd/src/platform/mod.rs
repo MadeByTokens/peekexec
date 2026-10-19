@@ -168,8 +168,10 @@ pub enum PromptOutcome {
 /// The desktop's own approval prompt (polkit agent on Linux). Used when the
 /// daemon cannot verify the display its own dialog would appear on.
 pub trait SystemPrompt: Send + Sync {
-    /// Whether it is installed and usable.
-    fn available(&self) -> bool;
+    /// Whether the human can be asked about `subject` this way, with a
+    /// prompt no other program of theirs can stand in for; `Err` says why
+    /// not.
+    fn usable_for(&self, subject: &ProcessInfo, uid: u32) -> Result<(), String>;
     /// Ask about `subject` (the requesting process) with `message` shown in
     /// the prompt; blocks until answered, `deadline`, or `cancel`.
     fn approve(

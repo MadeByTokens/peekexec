@@ -33,6 +33,9 @@ pub struct Options {
     pub dev: bool,
     pub dialog: PathBuf,
     pub snapshot_root: PathBuf,
+    /// Let the dialog ask for the password on a display that cannot be
+    /// verified, when the desktop has no prompt that can be trusted.
+    pub allow_unverified_display: bool,
     /// Value of PEEKEXEC_TEST_APPROVER (test builds only).
     pub test_approver: Option<String>,
 }
@@ -422,7 +425,7 @@ impl Daemon {
         .and_then(|p| {
             let mut view = p.view;
             self.apply_provenance(peer, &mut view);
-            self.choose_approval(&display, &mut view)?;
+            self.choose_approval(&display, peer, &mut view)?;
             Ok(view)
         })
     }
@@ -634,7 +637,7 @@ impl Daemon {
             approve_delay_ms: 0,
         };
         let mut view = view;
-        if let Err(e) = self.choose_approval(&display, &mut view) {
+        if let Err(e) = self.choose_approval(&display, peer, &mut view) {
             return fail(e);
         }
         let prepared = Prepared {
@@ -792,7 +795,7 @@ impl Daemon {
 
         let mut prepared = prepared;
         self.apply_provenance(peer, &mut prepared.view);
-        if let Err(e) = self.choose_approval(&display, &mut prepared.view) {
+        if let Err(e) = self.choose_approval(&display, peer, &mut prepared.view) {
             if let Some(dir) = &prepared.snapshot_dir {
                 let _ = std::fs::remove_dir_all(dir);
             }
@@ -873,7 +876,7 @@ impl Daemon {
             // The account's own primary group, not the caller's egid.
             run_as: (!self.opts.dev).then_some((user.uid, user.gid)),
         };
-        let approver = match self.system_prompt_for(display) {
+        let approver = match self.platform.system_prompt.as_deref() {
             Some(prompt) if prepared.view.approval == Approval::SystemPrompt => {
                 prompt::Approver::System {
                     prompt,
@@ -892,26 +895,44 @@ impl Daemon {
         prompt::ask(&dialog, display, &prepared.view, &approver, cancel)
     }
 
-    /// How the human approves this view: in peekexec's dialog, or (when the
-    /// display cannot be verified) in the desktop's own prompt, which must
-    /// then hold the whole request.
-    fn choose_approval(&self, display: &Display, view: &mut PromptView) -> Result<(), String> {
-        if self.system_prompt_for(display).is_some() {
-            prepare::use_system_prompt(view);
-            prepare::system_prompt_message(view).map_err(prepare::too_long_for_system_prompt)?;
-        }
-        Ok(())
-    }
-
-    /// The desktop's own prompt, used when this display cannot be verified.
-    fn system_prompt_for(&self, display: &Display) -> Option<&dyn crate::platform::SystemPrompt> {
+    /// How the human approves this view. On a verified display, with the
+    /// password in peekexec's dialog. Otherwise whoever runs that display
+    /// could read the password as it is typed, so it goes into the
+    /// desktop's own prompt, which must then hold the whole request; and
+    /// where there is no prompt that can be trusted, the request is
+    /// refused (in development mode, or when root allowed it with
+    /// `--allow-unverified-display`, the dialog asks and says it cannot
+    /// be verified).
+    fn choose_approval(
+        &self,
+        display: &Display,
+        peer: &Peer,
+        view: &mut PromptView,
+    ) -> Result<(), String> {
         if display.verified || self.opts.test_approver.is_some() {
-            return None;
+            return Ok(());
         }
-        self.platform
-            .system_prompt
-            .as_deref()
-            .filter(|p| p.available())
+        let why = match self.platform.system_prompt.as_deref() {
+            Some(p) => match p.usable_for(&peer.process, peer.uid) {
+                Ok(()) => {
+                    prepare::use_system_prompt(view);
+                    return prepare::system_prompt_message(view)
+                        .map(drop)
+                        .map_err(prepare::too_long_for_system_prompt);
+                }
+                Err(why) => why,
+            },
+            None => "this platform has no desktop password dialog to use".into(),
+        };
+        if self.opts.dev || self.opts.allow_unverified_display {
+            return Ok(());
+        }
+        Err(format!(
+            "refused: the display peekexec's dialog would appear on cannot be verified, so a \
+             password typed into it could be read by another program of yours, and {why}. \
+             Nothing was shown to the human. An administrator can allow typing the password \
+             into the unverified dialog by starting peekexecd with --allow-unverified-display"
+        ))
     }
 
     fn execute(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
@@ -1146,4 +1167,158 @@ fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
             .map(|e| format!(" error={e:?}"))
             .unwrap_or_default(),
     );
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::platform::{PlatformError, PromptOutcome, SystemPrompt};
+    use peekexec_proto::view::ProcLine;
+
+    /// A desktop prompt that is usable or not, as told; never asked.
+    struct Stub(Result<(), String>);
+
+    impl SystemPrompt for Stub {
+        fn usable_for(&self, _: &ProcessInfo, _: u32) -> Result<(), String> {
+            self.0.clone()
+        }
+
+        fn approve(
+            &self,
+            _: &ProcessInfo,
+            _: u32,
+            _: &str,
+            _: Instant,
+            _: &AtomicBool,
+        ) -> Result<PromptOutcome, PlatformError> {
+            unreachable!("not asked in these tests")
+        }
+    }
+
+    fn daemon(prompt: Option<Result<(), String>>, allow: bool) -> Daemon {
+        let mut platform = crate::platform::linux::platform("peekexec");
+        platform.system_prompt = prompt.map(|p| Box::new(Stub(p)) as Box<dyn SystemPrompt>);
+        let opts = Options {
+            socket: PathBuf::from("/nonexistent"),
+            dev: false,
+            dialog: PathBuf::from("/nonexistent"),
+            snapshot_root: PathBuf::from("/nonexistent"),
+            allow_unverified_display: allow,
+            test_approver: None,
+        };
+        Daemon::new(opts, platform)
+    }
+
+    fn peer() -> Peer {
+        Peer {
+            uid: 1000,
+            gid: 1000,
+            process: ProcessInfo {
+                pid: 1,
+                exe: None,
+                cmdline: vec![],
+                start_time: Some(1),
+            },
+            cwd: None,
+            ancestry: vec![],
+            pinned: true,
+        }
+    }
+
+    fn view(lines: usize) -> PromptView {
+        let text: String = (0..lines).map(|i| format!("step{i}\n")).collect();
+        PromptView {
+            kind: ViewKind::Root,
+            approval: Approval::Password,
+            provenance: Provenance::Unregistered,
+            request_id: "r-1".into(),
+            sha256: "0".repeat(64),
+            requester: vec![ProcLine {
+                pid: 1,
+                exe: None,
+                cmdline: vec![],
+                trusted: true,
+            }],
+            requester_user: Shown::fixed("u"),
+            pinned: true,
+            cwd: Shown::fixed("/"),
+            run_as: Shown::fixed("root"),
+            dev_mode: false,
+            why: None,
+            enforced: Enforced {
+                write: None,
+                write_level: Level::NotRequested,
+                network: true,
+                network_level: Level::NotRequested,
+            },
+            display_tier: DisplayTier::Wayland,
+            display_verified: false,
+            env: vec![],
+            sections: vec![Section {
+                title: Shown::fixed("job.sh"),
+                invocation: vec![],
+                syntax: Syntax::Shell,
+                formatted: verbatim(&text),
+                raw: text,
+            }],
+            notes: vec![],
+            timeout_secs: 60,
+            wants_password: true,
+            input_guard_ms: 400,
+            enter_approves: false,
+            approve_delay_ms: 0,
+        }
+    }
+
+    fn display(verified: bool) -> Display {
+        Display {
+            vars: vec![],
+            tier: DisplayTier::Wayland,
+            verified,
+        }
+    }
+
+    #[test]
+    fn a_verified_display_takes_the_password_in_the_dialog() {
+        let mut v = view(3);
+        daemon(None, false)
+            .choose_approval(&display(true), &peer(), &mut v)
+            .unwrap();
+        assert_eq!(v.approval, Approval::Password);
+    }
+
+    #[test]
+    fn an_unverified_display_uses_a_trusted_prompt_or_refuses() {
+        let mut v = view(3);
+        daemon(Some(Ok(())), false)
+            .choose_approval(&display(false), &peer(), &mut v)
+            .unwrap();
+        assert_eq!(v.approval, Approval::SystemPrompt);
+
+        // The prompt must hold the whole request.
+        let e = daemon(Some(Ok(())), false)
+            .choose_approval(&display(false), &peer(), &mut view(30))
+            .unwrap_err();
+        assert!(e.contains("Split"), "{e}");
+
+        // No prompt that can be trusted: refused, saying why...
+        let not_gnome = || Some(Err("not GNOME Shell's".to_string()));
+        let e = daemon(not_gnome(), false)
+            .choose_approval(&display(false), &peer(), &mut view(3))
+            .unwrap_err();
+        assert!(
+            e.starts_with("refused") && e.contains("not GNOME Shell's"),
+            "{e}"
+        );
+        assert!(daemon(None, false)
+            .choose_approval(&display(false), &peer(), &mut view(3))
+            .is_err());
+
+        // ...unless root allowed the unverified dialog.
+        let mut v = view(30);
+        daemon(not_gnome(), true)
+            .choose_approval(&display(false), &peer(), &mut v)
+            .unwrap();
+        assert_eq!(v.approval, Approval::Password);
+    }
 }

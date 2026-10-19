@@ -1,7 +1,10 @@
 //! Approval through the desktop's own polkit authentication agent, for
 //! displays the daemon cannot verify (Wayland). The session's agent was
-//! registered with polkitd when the user logged in (on GNOME it is drawn by
-//! the shell itself).
+//! registered with polkitd when the user logged in. Only GNOME Shell's is
+//! used: there the shell, which is the compositor, draws the prompt, and
+//! another program cannot read or drive it. On other desktops the agent is
+//! an ordinary program of the user's, which a requester can end and replace
+//! with its own (polkit then asks that one), so the path is refused there.
 //!
 //! polkit prefers an agent registered for the *subject process* over the
 //! session's, and any process may register one for a process of its own
@@ -77,9 +80,36 @@ fn details(message: &str) -> HashMap<&'static str, &str> {
     ])
 }
 
+/// How soon after the session's leader GNOME Shell must have started to
+/// count as the one that came up with the session.
+const SHELL_START: Duration = Duration::from_secs(120);
+
 impl SystemPrompt for Polkit {
-    fn available(&self) -> bool {
-        Path::new(POLICY).exists()
+    fn usable_for(&self, subject: &ProcessInfo, uid: u32) -> Result<(), String> {
+        if !Path::new(POLICY).exists() {
+            return Err(format!("the polkit action {ACTION} is not installed"));
+        }
+        // polkit asks the agent of the subject's login session, or, for a
+        // process in none (apps under `user@.service`), the user's display
+        // session. A session the human is not sitting at (ssh, ssh
+        // localhost, an inactive console) may have an agent of the
+        // requester's choosing.
+        let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid))
+            .map_err(|e| format!("requester cgroup: {e}"))?;
+        let id = match session_of(&cgroup) {
+            Some(id) => id,
+            None => display_session(uid)?,
+        };
+        let record =
+            std::fs::read_to_string(format!("/run/systemd/sessions/{id}")).unwrap_or_default();
+        if !active_local_session(&record, uid) {
+            return Err(format!(
+                "the requester runs in login session {id}, which is not your active local \
+                 session (e.g. ssh or another console); send the request from your desktop \
+                 session"
+            ));
+        }
+        desktop_shell(&record, uid)
     }
 
     fn approve(
@@ -93,22 +123,10 @@ impl SystemPrompt for Polkit {
         let start_time = subject
             .start_time
             .ok_or_else(|| PlatformError::Other("requester start time unknown".into()))?;
-        // polkit asks the agent of the subject's login session. A session
-        // the human is not sitting at (ssh, ssh localhost, an inactive
-        // console) may have an agent of the requester's choosing.
-        let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid))
-            .map_err(|e| PlatformError::Other(format!("requester cgroup: {e}")))?;
-        if let Some(id) = session_of(&cgroup) {
-            let record =
-                std::fs::read_to_string(format!("/run/systemd/sessions/{id}")).unwrap_or_default();
-            if !active_local_session(&record, uid) {
-                return Err(PlatformError::Other(format!(
-                    "refusing: the requester runs in login session {id}, which is not your \
-                     active local session (e.g. ssh or another console). Send the request from \
-                     your desktop session"
-                )));
-            }
-        }
+        // Again, now: the human may have switched sessions since the
+        // request was shown, or the shell may have gone.
+        self.usable_for(subject, uid)
+            .map_err(|e| PlatformError::Other(format!("refusing: {e}")))?;
         let conn = zbus::blocking::Connection::system()
             .map_err(|e| PlatformError::Other(format!("system bus: {e}")))?;
         // The Continue click that leads here may come from a display the
@@ -332,6 +350,100 @@ fn active_local_session(record: &str, uid: u32) -> bool {
         && get("REMOTE") != Some("1")
 }
 
+/// The session logind uses as `uid`'s graphical one (`DISPLAY=` in the
+/// user record logind writes).
+fn display_session(uid: u32) -> Result<String, String> {
+    let record = std::fs::read_to_string(format!("/run/systemd/users/{uid}"))
+        .map_err(|e| format!("no logind record for your user: {e}"))?;
+    record
+        .lines()
+        .find_map(|l| l.strip_prefix("DISPLAY="))
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(str::to_string)
+        .ok_or_else(|| "logind names no graphical session for your user".to_string())
+}
+
+/// Positive evidence that GNOME Shell holds the session's polkit agent: a
+/// `gnome-shell` of the user's, from a binary root controls, that started
+/// within [`SHELL_START`] of the session's leader (kernel start times,
+/// one clock). A requester can start a shell or an agent of its own, but
+/// not one that started before it did; and a shell that was restarted
+/// (only possible on X11) no longer counts.
+fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
+    let refused = |why: &str| {
+        Err(format!(
+            "the desktop's password dialog cannot be shown to be GNOME Shell's ({why}); on \
+             other desktops it is an ordinary program, which another program of yours could \
+             replace"
+        ))
+    };
+    let Some(leader) = record
+        .lines()
+        .find_map(|l| l.strip_prefix("LEADER="))
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
+        return refused("logind names no session leader");
+    };
+    let Some(leader_start) = super::peer::start_time_of(leader) else {
+        return refused("the session leader is gone");
+    };
+    let hz = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .ok()
+        .flatten()
+        .filter(|&t| t > 0)
+        .unwrap_or(100) as u64;
+    let owners = crate::trust::trusted_owners();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return refused("cannot list processes");
+    };
+    let found = procs.filter_map(Result::ok).any(|entry| {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        let owned = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .is_ok_and(|s| status_uids(&s) == Some([uid; 4]));
+        // The very file at this path (`exe_of` marks any other), which
+        // only root can change.
+        let shell = || {
+            super::peer::exe_of(pid).is_some_and(|exe| {
+                exe.rsplit('/').next() == Some("gnome-shell")
+                    && crate::trust::check(Path::new(&exe), &owners).is_ok()
+            })
+        };
+        let with_session = || {
+            super::peer::start_time_of(pid)
+                .is_some_and(|t| started_with(leader_start, t, hz, SHELL_START))
+        };
+        owned && shell() && with_session()
+    });
+    if found {
+        Ok(())
+    } else {
+        refused("no GNOME Shell that started with your session")
+    }
+}
+
+/// The real, effective, saved and filesystem uids of a `/proc/<pid>/status`.
+fn status_uids(status: &str) -> Option<[u32; 4]> {
+    let ids: Vec<u32> = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))?
+        .split_whitespace()
+        .map(|n| n.parse().ok())
+        .collect::<Option<_>>()?;
+    ids.try_into().ok()
+}
+
+/// Whether a process that started at `t` (clock ticks since boot) started
+/// within `window` after the session's leader did.
+fn started_with(leader: u64, t: u64, hz: u64, window: Duration) -> bool {
+    t >= leader && t - leader <= window.as_secs() * hz
+}
+
 fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
     match reply {
         Ok((true, _, _)) => Ok(PromptOutcome::Authorized),
@@ -366,6 +478,28 @@ mod tests {
             Some("c1")
         );
         assert_eq!(session_of("0::/x/session-../y.scope\n"), None);
+    }
+
+    #[test]
+    fn the_shell_must_have_started_with_the_session() {
+        let w = Duration::from_secs(120);
+        assert!(started_with(1000, 1000, 100, w));
+        assert!(started_with(1000, 1000 + 120 * 100, 100, w));
+        assert!(!started_with(1000, 1000 + 120 * 100 + 1, 100, w));
+        // Older than the leader: some other process with a reused pid.
+        assert!(!started_with(1000, 999, 100, w));
+    }
+
+    #[test]
+    fn reads_all_four_uids() {
+        let st = "Name:\tgnome-shell\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\n";
+        assert_eq!(status_uids(st), Some([1000; 4]));
+        assert_eq!(
+            status_uids("Uid:\t1000\t0\t1000\t1000\n"),
+            Some([1000, 0, 1000, 1000])
+        );
+        assert_eq!(status_uids("Uid:\t1000\n"), None);
+        assert_eq!(status_uids(""), None);
     }
 
     #[test]

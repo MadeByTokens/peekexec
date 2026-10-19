@@ -83,6 +83,12 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
      the human and could change after approval; use `peekexec install` instead.
      Commands run in / (relative paths resolve there) unless you pass --cwd DIR;
      a DIR you own is flagged to the human, because programs load code from it.
+   - Where peekexec cannot verify its own window (Wayland), the human approves
+     in the desktop's password dialog, which must hold the whole request: at
+     most 12 lines of arguments and 12 of content per part. Split longer
+     scripts into steps. Where the desktop has no dialog peekexec can trust
+     (not GNOME, or the polkit action is missing), requests are refused unless
+     an administrator allowed the unverified window; tell the user.
 
 8. If your tool call has a timeout shorter than the human needs:
      peekexec submit --json run ...     -> {"status":"pending","request_id":ID}

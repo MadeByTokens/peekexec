@@ -24,6 +24,13 @@ struct Args {
     /// PAM service name
     #[arg(long, default_value = "peekexec")]
     pam_service: String,
+    /// Where the display cannot be verified and the desktop has no password
+    /// dialog peekexec can trust (no polkit action installed, or a desktop
+    /// other than GNOME), ask for the password in peekexec's own dialog
+    /// instead of refusing. A program of yours that runs or relays that
+    /// display could read the password; every such dialog says so.
+    #[arg(long)]
+    allow_unverified_display: bool,
 }
 
 fn main() -> ExitCode {
@@ -85,6 +92,7 @@ fn run(args: Args) -> Result<(), String> {
         dev: args.dev,
         dialog,
         snapshot_root,
+        allow_unverified_display: args.allow_unverified_display,
         test_approver,
     };
     let daemon = Arc::new(Daemon::new(opts, platform::current(&args.pam_service)));
