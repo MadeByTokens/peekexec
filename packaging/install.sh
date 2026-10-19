@@ -1,13 +1,16 @@
 #!/bin/sh
 # Install (or remove) peekexec from a release build of this repository.
 #
-#   cargo build --release            # as your user, never as root
+#   cargo build --release --locked   # as your user, never as root
 #   pkexec "$PWD/packaging/install.sh"            # install
 #   pkexec "$PWD/packaging/install.sh" --uninstall
 #
-# Upgrading through peekexec itself (the script then runs from a snapshot,
-# so name the checkout):
-#   peekexec script --why "..." packaging/install.sh --from="$PWD"
+# Running this as root trusts every file in the tree: the binaries in
+# target/release and the files in packaging/ are installed as they are,
+# and whoever can write the tree chose them. So do not approve it on
+# someone else's (or an agent's) behalf: `peekexec script` would show you
+# this script, not the root daemon it installs. --from names the tree when
+# the script runs from a copy.
 set -eu
 
 action=install
@@ -47,15 +50,17 @@ later() {
 }
 
 if [ "$action" = uninstall ]; then
+    # Stop and disable while the unit files still exist: disable cannot
+    # find a removed unit, and the socket would keep listening.
+    if in_service; then
+        echo "install.sh: --uninstall cannot run inside peekexecd.service; use pkexec" >&2
+        exit 1
+    fi
+    systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
     rm -rf "$dropin"
     rm -rf "$libexec"
-    if in_service; then
-        later disable --now peekexecd.socket peekexecd.service
-    else
-        systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
-        systemctl daemon-reload
-    fi
+    systemctl daemon-reload
     # Remove the PAM file only if it is exactly one we ship (not edited).
     if cmp -s "$pam" "$repo/packaging/pam/peekexec.debian" \
         || cmp -s "$pam" "$repo/packaging/pam/peekexec.redhat"; then
@@ -71,7 +76,7 @@ fi
 
 rel="$repo/target/release"
 for f in peekexec peekexecd peekexec-ui; do
-    if [ ! -x "$rel/$f" ]; then
+    if [ ! -e "$rel/$f" ]; then
         echo "install.sh: $rel/$f missing; run 'cargo build --release' first" >&2
         exit 1
     fi
@@ -83,15 +88,22 @@ stage=$(mktemp -d /tmp/peekexec-install.XXXXXX)
 trap 'rm -rf "$stage"' EXIT
 chmod 700 "$stage"
 for f in peekexec peekexecd peekexec-ui; do
-    cp "$rel/$f" "$stage/$f"
+    cp -P "$rel/$f" "$stage/$f"
 done
-cp -r "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" "$stage/"
-# cp -r copies symlinks as links, and install(1) would follow them, reading
-# whatever they point to at that moment. Only plain files are installed.
-if [ -n "$(find "$stage" -type l)" ]; then
-    echo "install.sh: symbolic links in $repo/packaging or target/release; refusing" >&2
+cp -rP "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" "$stage/"
+# -P copies symlinks as links, and install(1) would follow them, reading
+# whatever they point to as root. Only plain files and directories are
+# installed, checked on the copy.
+if [ -n "$(find "$stage" ! -type f ! -type d)" ]; then
+    echo "install.sh: links or special files in $repo/packaging or target/release; refusing" >&2
     exit 1
 fi
+for f in peekexec peekexecd peekexec-ui; do
+    if [ ! -x "$stage/$f" ]; then
+        echo "install.sh: $rel/$f is not executable" >&2
+        exit 1
+    fi
+done
 # What is about to run as root, for the record (the human approving an
 # upgrade through peekexec sees this script, not the binaries).
 sha256sum "$stage/peekexec" "$stage/peekexecd" "$stage/peekexec-ui" | sed "s|$stage/||"
