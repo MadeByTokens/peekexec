@@ -126,9 +126,10 @@ fi
 
 systemctl daemon-reload
 systemctl enable peekexecd.socket
-# Stop a running daemon so the next request starts the new one.
+# Recreate the socket (so its mode and group apply) and stop a running
+# daemon (it requires the socket), so the next request starts the new one.
 if in_service; then
-    later stop peekexecd.service
+    later restart peekexecd.socket
     echo "peekexec installed: $bin, $libexec; the daemon restarts in 3 s"
 else
     systemctl stop peekexecd.service 2>/dev/null || true
