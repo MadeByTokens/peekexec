@@ -68,6 +68,8 @@ pub struct Daemon {
     connections: Mutex<HashMap<u32, usize>>,
     /// Agent processes the human registered.
     agents: Mutex<Vec<AgentSession>>,
+    /// Users with a registration waiting for the human (one at a time).
+    registering: Mutex<std::collections::HashSet<u32>>,
 }
 
 struct Entry {
@@ -111,6 +113,7 @@ impl Daemon {
             last_prompt: Mutex::new(None),
             connections: Mutex::default(),
             agents: Mutex::default(),
+            registering: Mutex::default(),
         }
     }
 
@@ -263,7 +266,25 @@ impl Daemon {
                 agent_pid,
                 why,
                 timeout_secs,
-            } => self.register(&peer, &name, agent_pid, why.as_deref(), timeout_secs),
+            } => {
+                // The client hanging up withdraws the registration too.
+                let cancel = Arc::new(AtomicBool::new(false));
+                let flag = Arc::clone(&cancel);
+                watcher = std::thread::Builder::new()
+                    .spawn(move || {
+                        let _ = read_half.read(&mut [0u8; 1]);
+                        flag.store(true, Ordering::SeqCst);
+                    })
+                    .ok();
+                self.register(
+                    &peer,
+                    &name,
+                    agent_pid,
+                    why.as_deref(),
+                    timeout_secs,
+                    &cancel,
+                )
+            }
             ClientMsg::Unregister => self.unregister(&peer),
             ClientMsg::Cancel { id } => match self.lookup(&id, peer.uid) {
                 Some(entry) => {
@@ -468,6 +489,7 @@ impl Daemon {
         agent_pid: Option<u32>,
         why: Option<&str>,
         timeout_secs: u32,
+        cancel: &AtomicBool,
     ) -> Response {
         let id = format!("s-{}", &new_id()[2..]);
         let fail = |m: String| Response {
@@ -516,6 +538,18 @@ impl Daemon {
                 ));
             }
         }
+        // One registration waiting for the human per user: each would hold
+        // a thread and queue a dialog.
+        if !self.registering.lock().unwrap().insert(peer.uid) {
+            return fail("refused: another registration is already waiting for the human".into());
+        }
+        struct Waiting<'a>(&'a Mutex<std::collections::HashSet<u32>>, u32);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().remove(&self.1);
+            }
+        }
+        let _waiting = Waiting(&self.registering, peer.uid);
         let Some(pinned) = self.platform.peer.pin(agent.pid, start_time) else {
             return fail(format!("cannot pin pid {} (it may have exited)", agent.pid));
         };
@@ -608,10 +642,13 @@ impl Daemon {
             enforced,
             snapshot_dir: None,
         };
-        let cancel = AtomicBool::new(false);
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
-            let d = self.decide(&prepared, &display, &user, peer, &cancel);
+            let d = if cancel.load(Ordering::SeqCst) {
+                Ok(Decision::Cancelled)
+            } else {
+                self.decide(&prepared, &display, &user, peer, cancel)
+            };
             *self.last_prompt.lock().unwrap() = Some(Instant::now());
             d
         };
@@ -624,16 +661,32 @@ impl Daemon {
         };
         let response = match decision {
             Ok(Decision::Approved) => {
-                self.agents.lock().unwrap().push(AgentSession {
-                    id: id.clone(),
-                    name: name.clone(),
-                    uid: peer.uid,
-                    pinned,
-                    registered_at: std::time::SystemTime::now(),
-                });
-                Response {
-                    session: Some(id.clone()),
-                    ..base(Status::Approved)
+                // Checked again: the agent may have exited, or other
+                // registrations finished, while the dialog was up.
+                let mut agents = self.agents.lock().unwrap();
+                agents.retain(|s| self.platform.peer.alive(&s.pinned));
+                if !self.platform.peer.alive(&pinned) {
+                    fail(format!(
+                        "pid {} exited before the registration was approved",
+                        agent.pid
+                    ))
+                } else if agents.iter().filter(|s| s.uid == peer.uid).count() >= MAX_AGENTS_PER_USER
+                {
+                    fail(format!(
+                        "refused: {MAX_AGENTS_PER_USER} agent sessions are already registered"
+                    ))
+                } else {
+                    agents.push(AgentSession {
+                        id: id.clone(),
+                        name: name.clone(),
+                        uid: peer.uid,
+                        pinned,
+                        registered_at: std::time::SystemTime::now(),
+                    });
+                    Response {
+                        session: Some(id.clone()),
+                        ..base(Status::Approved)
+                    }
                 }
             }
             Ok(Decision::Cancelled) => base(Status::Cancelled),
