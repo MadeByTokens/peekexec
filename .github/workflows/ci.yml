@@ -9,19 +9,22 @@ permissions:
   contents: read
 
 # Actions are pinned to commits (the tag or branch in the comment); a moved
-# tag cannot change what runs.
+# tag cannot change what runs. Tools are pinned to versions, and builds use
+# Cargo.lock as committed (--locked).
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo clippy --workspace --all-targets --features peekexecd/test-approver -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --features peekexecd/test-approver -- -D warnings
       - run: shellcheck packaging/install.sh scripts/*.sh dev/wayland-vm/*.sh
       - name: docs/cli.md is up to date
         run: ./scripts/gen-cli-doc.sh && git diff --exit-code docs/cli.md
@@ -30,10 +33,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
-          tool: cargo-audit,cargo-deny
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
       # Known vulnerabilities, yanked crates, licences, sources (deny.toml).
       - run: cargo deny check
       - run: cargo audit
@@ -45,13 +50,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - run: cargo test --workspace --features peekexecd/test-approver
+      - run: cargo test --locked --workspace --features peekexecd/test-approver
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - run: cargo check --workspace --all-targets
-      - run: cargo test -p peekexec-core -p peekexec-proto -p peekexec
+      - run: cargo check --locked --workspace --all-targets
+      - run: cargo test --locked -p peekexec-core -p peekexec-proto -p peekexec

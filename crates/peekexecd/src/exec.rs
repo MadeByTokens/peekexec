@@ -261,6 +261,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn install_keeps_the_group() {
         let primary = nix::unistd::getgid().as_raw();
         let Some(other) = nix::unistd::getgroups()

@@ -50,6 +50,8 @@ pub fn command(spec: Spec) -> Command {
         let groups: Vec<libc::gid_t> = c.groups.clone();
         (c.uid as libc::uid_t, c.gid as libc::gid_t, groups)
     });
+    // Only Linux has no_new_privs.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     let no_new_privs = spec.no_new_privs;
     // SAFETY: only async-signal-safe libc calls on data prepared before the
     // fork; no allocation.

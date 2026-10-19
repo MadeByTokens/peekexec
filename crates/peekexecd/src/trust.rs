@@ -177,10 +177,16 @@ fn on_nosuid_mount(p: &Path) -> bool {
 /// proc, sysfs, tmpfs (and devtmpfs), devpts, cgroup2: files the kernel
 /// owns, whose owners cannot be claimed by whoever mounted them.
 // f_type is i64 here but differs by architecture.
+#[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_cast)]
 fn on_kernel_fs(p: &Path) -> bool {
     const KERNEL: [i64; 5] = [0x9fa0, 0x6265_6572, 0x0102_1994, 0x1cd1, 0x6367_7270];
     nix::sys::statfs::statfs(p).is_ok_and(|s| KERNEL.contains(&(s.filesystem_type().0 as i64)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_kernel_fs(_: &Path) -> bool {
+    false
 }
 
 fn is_executable_file(p: &Path) -> bool {

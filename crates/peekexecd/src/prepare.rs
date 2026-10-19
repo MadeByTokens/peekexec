@@ -1271,7 +1271,10 @@ mod tests {
     fn prepare_for_tests(r: &Request) -> Prepared {
         let uid = nix::unistd::getuid().as_raw();
         let gid = nix::unistd::getgid().as_raw();
+        #[cfg(target_os = "linux")]
         let sandbox = crate::platform::linux::Namespaces;
+        #[cfg(not(target_os = "linux"))]
+        let sandbox = crate::platform::macos::Unported;
         let ctx = Ctx {
             sandbox: &sandbox,
             inspect: &crate::inspect::inspect,
