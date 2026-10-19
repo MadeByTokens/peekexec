@@ -58,7 +58,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
 | Its own polkit agents, other login sessions | Prompt (Wayland): guard agent holds the subject's slot (✓); subject must be in a session with a seat that is the seat's active one, or in none: positive evidence, so `ssh localhost` (seatless, hence "active", and not "remote") is refused (✓) | ✓ |
 | A nested or relaying display server | Dialog: X11 verified through logind and the Xorg process; otherwise unverified, password goes to the desktop's prompt (✓) | ✓ |
-| Timing: dialog start-up | /proc reopening defeated by a socket pair; started through `spawn::command` with `no_new_privs`, only stdio, credentials dropped for good (✓). ⚠ `peekexec-ui` is installed 0755, so it is dumpable until `harden()` runs; with ptrace_scope 0 a tracer can attach in that window. Descriptors are marked close-on-exec by `close_range`, or one by one before Linux 5.11; if neither works the process is not started (✓ R5). | ⚠ |
+| Timing: dialog start-up | /proc reopening defeated by a socket pair; started through `spawn::command` with `no_new_privs`, only stdio, credentials dropped for good (✓). `peekexec-ui` is installed 0711 like the helper, so it is non-dumpable from exec, before its own `prctl` (✓). Descriptors are marked close-on-exec by `close_range`, or one by one before Linux 5.11; if neither works the process is not started (✓ R5). | ✓ |
 | Timing: between showing and running | R2: cwd by descriptor, snapshot by copy; program and install directory are root-controlled chains, unchangeable by the requester (✓) | ✓ |
 | Timing: pid reuse | pidfds for the requester and agents. The approved command stays unreaped (`waitid(WNOWAIT)`) until its group is killed, which is exactly the condition `pidfd_open(2)` gives for a pid that cannot be reused, so a pidfd would add nothing (R7) (✓) | ✓ |
 | Processes the approved command starts | killed with its process group; detached ones cannot hold the request (✓) | ✓ |
@@ -94,3 +94,9 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
   content in the dialog and counted with it in the desktop prompt, which
   are built from the same lines. `PromptView::findings` counts them too,
   in the daemon and the dialog alike.
+- **(f)** Planned, needs a VM test: `allow_any` and `allow_inactive` set
+  to `no` in `org.peekexec.approve.policy`, so polkit itself refuses
+  subjects the daemon already refuses (defence in depth). Not changed
+  untested: a requester in no login session (`user@.service` apps) is
+  classified through the display session, and whether polkit then
+  applies `allow_active` must be checked first.

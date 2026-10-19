@@ -102,11 +102,12 @@ if LC_ALL=C grep -a -q PEEKEXEC_TEST_APPROVER "$stage/peekexecd"; then
 fi
 
 install -d -o root -g root -m 0755 "$libexec"
-# 0711: executable, not readable by users. The daemon runs it, as the user,
-# for its inspection helper; a process running a file it cannot read is
-# non-dumpable from exec on, so other programs of the user cannot drive it.
+# 0711: executable, not readable by users. The daemon runs both as the
+# user (the inspection helper, the dialog); a process running a file it
+# cannot read is non-dumpable from exec on, so other programs of the user
+# cannot attach to it, not even before the dialog's own prctl runs.
 install -o root -g root -m 0711 "$stage/peekexecd" "$libexec/peekexecd"
-install -o root -g root -m 0755 "$stage/peekexec-ui" "$libexec/peekexec-ui"
+install -o root -g root -m 0711 "$stage/peekexec-ui" "$libexec/peekexec-ui"
 install -o root -g root -m 0755 "$stage/peekexec" "$bin"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
