@@ -16,7 +16,7 @@ use eframe::egui::{
 };
 use peekexec_core::textcheck::scan;
 use peekexec_proto::ui::{FromUi, ToUi};
-use peekexec_proto::view::{Approval, PromptView, Provenance, ViewKind};
+use peekexec_proto::view::{self, Approval, PromptView, Provenance, Shown, ViewKind};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::DisplayTier;
 
@@ -308,7 +308,7 @@ impl Dialog {
                             "pid {}\nexecutable (reported by the kernel): {exe}\n  {origin}\n\
                              command line (set by the process): {}",
                             p.pid,
-                            p.cmdline.join(" ")
+                            view::join(&p.cmdline, " ")
                         ));
                     }
                     if self.view.requester.len() > 12 {
@@ -318,10 +318,10 @@ impl Dialog {
                 });
                 ui.end_row();
                 ui.label(RichText::new("In").weak());
-                ui.label(&self.view.cwd);
+                ui.label(self.view.cwd.as_str());
                 ui.end_row();
                 ui.label(RichText::new("Runs as").weak());
-                ui.label(RichText::new(&self.view.run_as).strong());
+                ui.label(RichText::new(self.view.run_as.as_str()).strong());
                 ui.end_row();
                 for (k, v) in &self.view.env {
                     ui.label(RichText::new("Env").weak());
@@ -393,7 +393,7 @@ impl Dialog {
                         .strong(),
                 );
                 let chain = std::iter::once(agent.as_str())
-                    .chain(path.iter().map(String::as_str))
+                    .chain(path.iter().map(Shown::as_str))
                     .collect::<Vec<_>>()
                     .join(forward);
                 let shown = ui.label(RichText::new(chain).monospace().small());
@@ -414,7 +414,7 @@ impl Dialog {
 
     /// Full-width warning: something other than the agent's own shell sits
     /// between the agent and this request.
-    fn script_banner(&self, ui: &mut egui::Ui, agent: &str, others: &[String]) {
+    fn script_banner(&self, ui: &mut egui::Ui, agent: &str, others: &[Shown]) {
         ui.add_space(4.0);
         egui::Frame::new()
             .fill(WARN)
@@ -431,7 +431,7 @@ impl Dialog {
                     .strong(),
                 );
                 ui.label(
-                    RichText::new(others.join(", "))
+                    RichText::new(view::join(others, ", "))
                         .color(Color32::WHITE)
                         .monospace()
                         .strong(),
@@ -459,7 +459,7 @@ impl Dialog {
             return;
         };
         if let Some(h) = &section.header {
-            ui.label(RichText::new(h).monospace().weak().small());
+            ui.label(RichText::new(h.as_str()).monospace().weak().small());
         }
         let key = (self.tab, self.raw, dark);
         if self.cache.as_ref().map(|(k, _)| *k) != Some(key) {

@@ -510,7 +510,7 @@ fn registered_agent_requests_are_labelled() {
     let v = preview_view(&d, sh("true"));
     assert!(
         matches!(&v.provenance, Provenance::InSession { agent, others, .. }
-            if agent == "Test Agent" && others.is_empty()),
+            if agent.as_str() == "Test Agent" && others.is_empty()),
         "{:?}",
         v.provenance
     );

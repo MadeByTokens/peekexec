@@ -489,7 +489,11 @@ fn untrusted_file_args(args: &[String], cwd: &str, owners: &[u32]) -> Option<Str
         }
     }
     (!hits.is_empty()).then(|| {
-        let shown: Vec<String> = hits.iter().take(3).map(|h| display_line(h, 100)).collect();
+        let shown: Vec<String> = hits
+            .iter()
+            .take(3)
+            .map(|h| display_line(h, 100).into_string())
+            .collect();
         let more = hits.len().saturating_sub(3);
         format!(
             "Names {}{}, which root does not control: if the program reads or runs it, that \

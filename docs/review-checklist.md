@@ -18,12 +18,12 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 
 | Input | Pre | Ans | Show | Run | Log |
 |---|---|---|---|---|---|
-| `argv` | R3: NUL refused. argv[0] resolved in SAFE_PATH, root-owned chain, not nosuid; file-like args checked for the "root does not control" note; all as the user, in the helper (✓ R1) | errors are what the user could learn (✓ R1) | R3: one line per argument, controls escaped (✓) | R2: program by canonical path in a root-owned chain (✓); ⚠ by path, not descriptor → (b) | Debug-quoted (✓) |
+| `argv` | R3: NUL refused. argv[0] resolved in SAFE_PATH, root-owned chain, not nosuid; file-like args checked for the "root does not control" note; all as the user, in the helper (✓ R1) | errors are what the user could learn (✓ R1) | R3: one line per argument, controls escaped (✓) | R2: program by a canonical path whose every component only root can change (root-owned, not writable by others, not nosuid; checked by the helper and again by root), so the name is as good as the object (✓) | Debug-quoted (✓) |
 | script `content` | R3: `#!` interpreter resolved and trusted, flags allowlisted per interpreter (✓) | — | Full text, findings marked (✓) | R2: root-only snapshot with a daemon-chosen name (✓) | sha256 (✓) |
 | script `path` (label) | — | — | escaped (✓) | never used (✓) | Debug-quoted (✓) |
 | script `args` | NUL refused (✓) | — | in the header, escaped (✓) | verbatim argv (✓) | Debug-quoted (✓) |
 | install `content` | — | — | text shown, binary described (✓) | written by the daemon, atomic (✓) | sha256 (✓) |
-| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1) | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1) | R6: owner, group, mode, label kept (✓); ⚠ by path → (b) | Debug-quoted (✓) |
+| install `dest` | Root-owned parent chain, regular single-link target, inspected as the user (✓ R1) | errors and existing-file facts as the user sees them (✓ R1) | diff only if the kernel lets the user read the file (✓ R1) | R6: owner, group, mode, label kept; written into a canonical root-controlled directory with `O_NOFOLLOW`, `create_new` and `rename` (✓ R2) | Debug-quoted (✓) |
 | `cwd` | canonicalized, checked and opened by the helper as the user; the descriptor is passed back (✓ R1, R2) | errors as the user (✓ R1) | escaped; untrusted directory flagged (✓) | `fchdir` to the descriptor (✓) | Debug-quoted (✓) |
 | `env` | R allowlist of names, path-free values (✓) | — | listed (✓) | rebuilt from scratch (✓) | — |
 | `write` | absolute, no control characters (✓) | — | in the summary (✓) | declared only, reported as such (✓) | — |
@@ -47,12 +47,12 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | Its process names, command lines | Show: escaped, labelled as self-reported (✓) | ✓ |
 | Its executable path (mount namespaces) | Show and provenance: must be the same inode as the path in the daemon's view (✓) | ✓ |
 | Its environment | Display fallback only; Wayland socket name and runtime dir checked; marked unverified (✓) | ✓ |
-| Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: program and install target by path → (b) | ⚠ |
+| Symlinks, files in its own directories | Pre: resolved as the user (✓). Run: only canonical paths inside root-controlled chains are used, where the user can place no symlink (✓) | ✓ |
 | User mounts (udisks images, FUSE) | Pre: nosuid mounts never trusted; a mount that never answers ends the inspection after 10 s (✓) | ✓ |
 | Its own polkit agents, other login sessions | Show (Wayland): guard agent holds the subject's slot; subject must be in the active local session or none (✓) | ✓ |
 | A nested or relaying display server | Show: X11 verified through logind and the Xorg process; otherwise unverified, password goes to the desktop's prompt (✓) | ✓ |
 | Timing: dialog start-up | /proc reopening defeated by a socket pair; started through `spawn::command` with `no_new_privs`, only stdio, credentials dropped for good (✓) | ✓ |
-| Timing: between showing and running | R2: cwd by descriptor, snapshot by copy (✓); program and install target by path → (b) | ⚠ |
+| Timing: between showing and running | R2: cwd by descriptor, snapshot by copy; program and install directory are root-controlled chains, unchangeable by the requester (✓) | ✓ |
 | Timing: pid reuse | pidfds for the requester and agents. The approved command stays unreaped (`waitid(WNOWAIT)`) until its group is killed, which is exactly the condition `pidfd_open(2)` gives for a pid that cannot be reused, so a pidfd would add nothing (R7) (✓) | ✓ |
 | Processes the approved command starts | killed with its process group; detached ones cannot hold the request (✓) | ✓ |
 | The inspection helper's answer (it runs as the user) | Pre: program, interpreter and install directory re-checked as root; destination must be the requested one; descriptor must be the directory shown; cwd warning recomputed; failures are generic (✓). The helper is non-dumpable from exec (binary mode 0711) and by `prctl` (✓). Residual: with ptrace_scope 0 (already noted in the dialog) a tampered helper could misstate an existing file's old content; the new content is always shown in full | ✓ |
@@ -64,10 +64,15 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
   credentials and `no_new_privs`, returning facts and the working directory
   (`SCM_RIGHTS`); see `crates/peekexecd/src/inspect.rs`. R1 by
   construction.
-- **(b)** `openat2` with `RESOLVE_NO_MAGICLINKS`; run by descriptor
-  (`execveat`), write through the directory descriptor. R2 by construction.
-- **(c)** A text type for everything shown, constructible only by escaping.
-  R3 by construction.
+- **(b)** Decided, no code: programs, interpreters and install
+  directories are used by canonical paths inside chains only root can
+  change, which binds the name to the object as well as a descriptor
+  would. Running by descriptor (`/proc/self/fd/N`) would break `#!`
+  programs, whose interpreter gets an already-closed `/dev/fd/N` (R7).
+  Revisit if the trust rule ever admits paths the requester can change.
+- **(c)** Done: `Shown` in `crates/peekexec-proto/src/view.rs`. Every
+  one-line field of the view has this type, made only by escaping or from
+  a daemon constant; it caught a header line built from unescaped argv.
 - **(d)** Done: `crates/peekexecd/src/spawn.rs` starts every process
   (dialog, inspection helper, approved command) with an explicit
   environment and stdio, no other descriptors, verified credential drops,

@@ -23,7 +23,9 @@ use crate::session::{self, Display};
 use crate::sessions::{self, AgentSession};
 use crate::trust;
 use peekexec_core::format::verbatim;
-use peekexec_proto::view::{Approval, PromptView, Provenance, Section, Syntax, ViewKind};
+use peekexec_proto::view::{
+    self, Approval, PromptView, Provenance, Section, Shown, Syntax, ViewKind,
+};
 use peekexec_proto::{Enforced, Level};
 
 pub struct Options {
@@ -416,8 +418,8 @@ impl Daemon {
                 others,
                 command,
             } => Provenance::InSession {
-                since: since(&session),
-                agent: session,
+                since: display_line(&since(&session), 20),
+                agent: display_line(&session, 60),
                 path: path.iter().map(|p| display_line(p, 60)).collect(),
                 others: others.iter().map(|p| display_line(p, 60)).collect(),
                 command: command.map(|c| display_line(&c, 600)),
@@ -455,7 +457,7 @@ impl Daemon {
             Ok(u) => u,
             Err(e) => return fail(e),
         };
-        let name = match display_line(name.trim(), 40) {
+        let name = match display_line(name.trim(), 40).into_string() {
             n if n.is_empty() => "agent".to_string(),
             n => n,
         };
@@ -512,14 +514,18 @@ impl Daemon {
             ));
         };
         let line = proc_line(agent);
-        let exe = line.exe.clone().unwrap_or_else(|| "?".into());
+        let exe = line
+            .exe
+            .clone()
+            .map(Shown::into_string)
+            .unwrap_or_else(|| "?".into());
         let description = format!(
             "Register this process as the agent \"{name}\":\n\n  pid {} (started at tick {start_time})\n  executable: {exe}\n  command line: {}\n\nFrom now on, requests from inside this process (its own commands and \
              anything it starts) are labelled \"{name}'s session\", and scripts or programs \
              it starts that sit in between are flagged. Nothing runs as root now. The \
              registration ends when this process exits.\n",
             agent.pid,
-            line.cmdline.join(" "),
+            view::join(&line.cmdline, " "),
         );
         let mut notes = Vec::new();
         if self.opts.dev {
@@ -546,10 +552,10 @@ impl Daemon {
             request_id: id.clone(),
             sha256: peekexec_core::request::sha256_hex(description.as_bytes()),
             requester: chain.iter().map(proc_line).collect(),
-            requester_user: user.name.clone(),
+            requester_user: display_line(&user.name, 64),
             pinned: peer.pinned,
             cwd: display_line(peer.cwd.as_deref().unwrap_or("?"), 300),
-            run_as: "nothing runs (registration only)".into(),
+            run_as: Shown::fixed("nothing runs (registration only)"),
             dev_mode: self.opts.dev,
             why: why.map(|w| display_line(w, 300)),
             enforced: enforced.clone(),
@@ -557,13 +563,13 @@ impl Daemon {
             display_verified: display.verified,
             env: Vec::new(),
             sections: vec![Section {
-                title: "agent session".into(),
+                title: Shown::fixed("agent session"),
                 header: None,
                 syntax: Syntax::Plain,
                 formatted: verbatim(&description),
                 raw: description,
             }],
-            notes,
+            notes: notes.iter().map(|n| display_line(n, 1000)).collect(),
             timeout_secs: timeout_secs.clamp(5, prepare::MAX_TIMEOUT_SECS),
             wants_password: self.platform.auth.wants_password(),
             input_guard_ms: 400,
@@ -726,8 +732,10 @@ impl Daemon {
                 prepared.view.enter_approves = false;
                 prepared.view.notes.insert(
                     0,
-                    "This request arrived right after the previous one. Read it before approving."
-                        .into(),
+                    Shown::fixed(
+                        "This request arrived right after the previous one. Read it before \
+                         approving.",
+                    ),
                 );
             }
             let d = if cancel.load(Ordering::SeqCst) {

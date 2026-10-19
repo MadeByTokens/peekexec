@@ -11,7 +11,9 @@ use peekexec_core::display::shell_join;
 use peekexec_core::format::{format_shell, verbatim};
 use peekexec_core::textcheck::{classify, scan, FindingKind};
 use peekexec_core::{Action, Request};
-use peekexec_proto::view::{Approval, ProcLine, PromptView, Provenance, Section, Syntax, ViewKind};
+use peekexec_proto::view::{
+    Approval, ProcLine, PromptView, Provenance, Section, Shown, Syntax, ViewKind,
+};
 use peekexec_proto::{Enforced, Level};
 
 use crate::inspect::{Facts, Inspection};
@@ -260,7 +262,7 @@ pub fn prepare(
         );
     }
     // Some notes quote requester-chosen paths.
-    let notes: Vec<String> = notes.iter().map(|n| display_line(n, 1000)).collect();
+    let notes: Vec<Shown> = notes.iter().map(|n| display_line(n, 1000)).collect();
 
     let requester = std::iter::once(&peer.process)
         .chain(&peer.ancestry)
@@ -273,13 +275,13 @@ pub fn prepare(
         request_id: id.to_string(),
         sha256: req.digest(),
         requester,
-        requester_user: user.name.clone(),
+        requester_user: display_line(&user.name, 64),
         pinned: peer.pinned,
         cwd: display_line(&workdir.path, 300),
         run_as: if ctx.dev {
-            format!("{} (development mode, NOT root)", user.name)
+            display_line(&format!("{} (development mode, NOT root)", user.name), 120)
         } else {
-            "root".into()
+            Shown::fixed("root")
         },
         dev_mode: ctx.dev,
         why: req.why.as_deref().map(|w| display_line(w, 300)),
@@ -312,22 +314,8 @@ pub fn prepare(
 
 /// Text for a single dialog line: characters that could fake extra lines or
 /// hide text become visible `⟨U+XXXX⟩` tokens, and long text is cut.
-pub fn display_line(s: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i == max_chars {
-            out.push('…');
-            break;
-        }
-        // Unlike code, a one-line field must not contain newlines or tabs.
-        let hidden = c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii));
-        if hidden {
-            out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
+pub fn display_line(s: &str, max_chars: usize) -> Shown {
+    Shown::line(s, max_chars)
 }
 
 /// Control characters as visible `⟨U+XXXX⟩` tokens, everything else as is
@@ -348,19 +336,15 @@ fn escape_controls(s: &str) -> String {
 /// Prefix of the note added when the display cannot be verified.
 pub const UNVERIFIED_NOTE: &str = "Could not verify which display server shows this dialog";
 const SYSTEM_PROMPT_NOTE: &str = "You will confirm in your desktop's own password dialog";
+const SYSTEM_PROMPT_NOTE_TEXT: &str = "You will confirm in your desktop's own password dialog \
+     next; it repeats the key facts. This window cannot be verified: if the two disagree, cancel.";
 
 /// Switch a view to approval through the desktop's own prompt.
 pub fn use_system_prompt(view: &mut PromptView) {
     view.approval = Approval::SystemPrompt;
     view.wants_password = false;
     view.notes.retain(|n| !n.starts_with(UNVERIFIED_NOTE));
-    view.notes.insert(
-        0,
-        format!(
-            "{SYSTEM_PROMPT_NOTE} next; it repeats the key facts. This window cannot be \
-             verified: if the two disagree, cancel."
-        ),
-    );
+    view.notes.insert(0, Shown::fixed(SYSTEM_PROMPT_NOTE_TEXT));
 }
 
 /// The text the desktop's prompt shows: the decisive facts on their own,
@@ -432,13 +416,16 @@ pub fn system_prompt_message(view: &PromptView) -> String {
         let facts: Vec<String> = view
             .summary(0)
             .into_iter()
-            .map(|(_, t)| display_line(&t, 160))
+            .map(|(_, t)| display_line(&t, 160).into_string())
             .collect();
         m.push_str(&format!("{}\n", facts.join(" · ")));
     }
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
-            let others: Vec<String> = others.iter().map(|o| display_line(o, 40)).collect();
+            let others: Vec<String> = others
+                .iter()
+                .map(|o| display_line(o, 40).into_string())
+                .collect();
             m.push_str(&format!(
                 "⚠ a script or program it started may be asking: {}\n",
                 others.join(", ")
@@ -502,10 +489,14 @@ fn validate(req: &Request) -> Result<(), String> {
         if !path.starts_with('/') {
             return Err(format!("--write path must be absolute: {path}"));
         }
-        // Shown in the one-line summary: a line break would fake its lines.
-        if path.chars().any(char::is_control) {
+        // Shown in the one-line summary: a line break would fake its lines,
+        // a bidi or invisible character would hide part of it.
+        if path
+            .chars()
+            .any(|c| c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii)))
+        {
             return Err(format!(
-                "--write path may not contain control characters: {path:?}"
+                "--write path may not contain control characters or hidden characters: {path:?}"
             ));
         }
     }
@@ -587,16 +578,16 @@ fn run_section(argv: &[String], program: &str) -> Section {
             header = format!("{header}   ({resolved})");
         }
         return Section {
-            title: "shell script".into(),
-            header: Some(header),
+            title: Shown::fixed("shell script"),
+            header: Some(display_line(&header, 400)),
             syntax: Syntax::Shell,
             raw: argv[2].clone(),
             formatted: format_shell(&argv[2]),
         };
     }
     Section {
-        title: "command".into(),
-        header: (!resolved.is_empty()).then_some(resolved),
+        title: Shown::fixed("command"),
+        header: (!resolved.is_empty()).then(|| display_line(&resolved, 400)),
         syntax: Syntax::Shell,
         raw,
         formatted: verbatim(&shell_join(argv)),
@@ -742,8 +733,10 @@ fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
         diff
     };
     Some(Section {
-        title: "changes".into(),
-        header: Some("unified diff: lines starting with - are removed, + are added".into()),
+        title: Shown::fixed("changes"),
+        header: Some(Shown::fixed(
+            "unified diff: lines starting with - are removed, + are added",
+        )),
         syntax: Syntax::Diff,
         formatted: verbatim(&raw),
         raw,
@@ -839,11 +832,11 @@ mod tests {
     #[test]
     fn why_cannot_fake_lines() {
         assert_eq!(
-            display_line("ok\nRuns as: nobody", 300),
+            display_line("ok\nRuns as: nobody", 300).as_str(),
             "ok⟨U+000A⟩Runs as: nobody"
         );
-        assert_eq!(display_line("abcdef", 3), "abc…");
-        assert_eq!(display_line("café", 300), "café");
+        assert_eq!(display_line("abcdef", 3).as_str(), "abc…");
+        assert_eq!(display_line("café", 300).as_str(), "café");
     }
 
     #[test]
@@ -865,6 +858,24 @@ mod tests {
         });
         r.write = Some(vec!["/etc/motd\nnetwork: blocked".into()]);
         assert!(validate(&r).unwrap_err().contains("control characters"));
+    }
+
+    #[test]
+    fn headers_are_escaped_too() {
+        // Arguments after `sh -c SCRIPT` go into the header line.
+        let argv: Vec<String> = ["sh", "-c", "true", "name\nRuns as: nobody"]
+            .map(String::from)
+            .to_vec();
+        let s = run_section(&argv, "/usr/bin/dash");
+        let header = s.header.unwrap();
+        assert!(!header.contains('\n'), "{header}");
+        assert!(header.contains("⟨U+000A⟩"), "{header}");
+
+        let mut r = req(Action::Run {
+            argv: vec!["true".into()],
+        });
+        r.write = Some(vec!["/etc/\u{202E}dwssap".into()]);
+        assert!(validate(&r).is_err(), "bidi override accepted in --write");
     }
 
     #[test]
@@ -990,12 +1001,12 @@ mod tests {
             request_id: "r-1".into(),
             sha256: "3f9a1c0000000000000000000000000000000000000000000000000000c21e".into(),
             requester: vec![],
-            requester_user: "u".into(),
+            requester_user: Shown::fixed("u"),
             pinned: true,
-            cwd: "/".into(),
-            run_as: "root".into(),
+            cwd: Shown::fixed("/"),
+            run_as: Shown::fixed("root"),
             dev_mode: false,
-            why: Some("ignored: only daemon facts go in".into()),
+            why: Some(Shown::fixed("ignored: only daemon facts go in")),
             enforced: Enforced {
                 write: Some(vec!["/etc/udev/rules.d".into()]),
                 write_level: Level::DeclaredOnly,
@@ -1010,8 +1021,8 @@ mod tests {
                 "/usr/bin/dash",
             )],
             notes: vec![
-                format!("{UNVERIFIED_NOTE}: x"),
-                "Touches /etc/sudoers*".into(),
+                display_line(&format!("{UNVERIFIED_NOTE}: x"), 300),
+                Shown::fixed("Touches /etc/sudoers*"),
             ],
             timeout_secs: 60,
             wants_password: true,
@@ -1019,6 +1030,7 @@ mod tests {
             enter_approves: false,
             approve_delay_ms: 0,
         };
+        assert!(SYSTEM_PROMPT_NOTE_TEXT.starts_with(SYSTEM_PROMPT_NOTE));
         use_system_prompt(&mut v);
         assert_eq!(v.approval, Approval::SystemPrompt);
         assert!(!v.wants_password);
@@ -1054,7 +1066,9 @@ mod tests {
         assert!(m.contains("evil-tail"), "{m}");
 
         // Every warning is listed.
-        v.notes = (0..6).map(|i| format!("warning {i}")).collect();
+        v.notes = (0..6)
+            .map(|i| display_line(&format!("warning {i}"), 100))
+            .collect();
         let m = system_prompt_message(&v);
         assert!(m.contains("⚠ warning 5"), "{m}");
     }

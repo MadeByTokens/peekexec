@@ -3,15 +3,83 @@
 //! of the very same value, so what an agent previews is what the human gets.
 
 use peekexec_core::format::Line;
+use peekexec_core::textcheck::{classify, FindingKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{DisplayTier, Enforced, Level};
 
+/// Text that is safe on one line of the dialog (design rule 3). It can only
+/// be made by escaping ([`Shown::line`]: characters that could fake extra
+/// lines or hide text become visible `⟨U+XXXX⟩` tokens, long text is cut)
+/// or from a constant the daemon wrote ([`Shown::fixed`]). There is no
+/// `From<String>`, so requester text cannot reach a one-line field without
+/// being escaped: forgetting is a compile error.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Shown(String);
+
+impl Shown {
+    /// `s` escaped for one line, cut after `max_chars` characters.
+    pub fn line(s: &str, max_chars: usize) -> Shown {
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i == max_chars {
+                out.push('…');
+                break;
+            }
+            // Unlike code, a one-line field must not contain newlines or tabs.
+            let hidden =
+                c.is_control() || !matches!(classify(c), None | Some(FindingKind::NonAscii));
+            if hidden {
+                out.push_str(&format!("⟨U+{:04X}⟩", c as u32));
+            } else {
+                out.push(c);
+            }
+        }
+        Shown(out)
+    }
+
+    /// Text the daemon itself wrote, as a literal.
+    pub fn fixed(s: &'static str) -> Shown {
+        Shown(s.to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::ops::Deref for Shown {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// One-line pieces joined with `sep`: still one line.
+pub fn join(items: &[Shown], sep: &str) -> String {
+    items
+        .iter()
+        .map(Shown::as_str)
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+impl std::fmt::Display for Shown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcLine {
     pub pid: u32,
-    pub exe: Option<String>,
-    pub cmdline: Vec<String>,
+    pub exe: Option<Shown>,
+    pub cmdline: Vec<Shown>,
     /// The executable is root-owned and only root could have placed it.
     /// Names of untrusted processes may be chosen by whoever runs them.
     pub trusted: bool,
@@ -22,7 +90,7 @@ impl ProcLine {
     pub fn name(&self) -> String {
         self.exe
             .as_deref()
-            .or(self.cmdline.first().map(String::as_str))
+            .or(self.cmdline.first().map(Shown::as_str))
             .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
             .unwrap_or_else(|| "?".into())
     }
@@ -57,14 +125,14 @@ pub enum Provenance {
     /// From inside a registered agent's process tree. This does not prove
     /// the agent itself decided to ask: a program it started could have.
     InSession {
-        agent: String,
-        since: String,
+        agent: Shown,
+        since: Shown,
         /// Short labels from the agent's child down to the client.
-        path: Vec<String>,
+        path: Vec<Shown>,
         /// Scripts and programs in `path` other than shells and peekexec.
-        others: Vec<String>,
+        others: Vec<Shown>,
         /// The command of the agent's shell, if it ran one.
-        command: Option<String>,
+        command: Option<Shown>,
     },
 }
 
@@ -79,9 +147,9 @@ pub enum Syntax {
 /// One tab in the dialog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Section {
-    pub title: String,
+    pub title: Shown,
     /// How the content is invoked (interpreter, resolved program, target).
-    pub header: Option<String>,
+    pub header: Option<Shown>,
     pub syntax: Syntax,
     /// Ground truth: exactly what executes, unformatted.
     pub raw: String,
@@ -98,23 +166,24 @@ pub struct PromptView {
     pub sha256: String,
     /// The requesting process first, then its parent, grandparent, ...
     pub requester: Vec<ProcLine>,
-    pub requester_user: String,
+    pub requester_user: Shown,
     /// Whether the requester's identity was pinned (pidfd) while it was read.
     pub pinned: bool,
-    pub cwd: String,
-    pub run_as: String,
+    pub cwd: Shown,
+    pub run_as: Shown,
     pub dev_mode: bool,
     /// The requester's own explanation. Unverified.
-    pub why: Option<String>,
+    pub why: Option<Shown>,
     pub enforced: Enforced,
     pub display_tier: DisplayTier,
     /// Whether the display was found from sources the requester cannot
     /// control (see THREAT_MODEL.md).
     pub display_verified: bool,
+    /// Allowlisted names, values limited to `[A-Za-z0-9_.@:+,-]`.
     pub env: Vec<(String, String)>,
     pub sections: Vec<Section>,
     /// Warnings the human should see (unpinned identity, dev mode, ...).
-    pub notes: Vec<String>,
+    pub notes: Vec<Shown>,
     pub timeout_secs: u32,
     /// False when the platform authenticates without a password (Touch ID).
     pub wants_password: bool,
@@ -203,7 +272,7 @@ impl PromptView {
                     agent, since, path, ..
                 } => format!(
                     "{agent}'s session (registered {since}): {agent} → {}",
-                    path.join(" → ")
+                    join(path, " → ")
                 ),
             }
         ));
@@ -211,7 +280,7 @@ impl PromptView {
             if !others.is_empty() {
                 line(format!(
                     "  WARNING : a script or program that {agent} started may be asking: {}",
-                    others.join(", ")
+                    join(others, ", ")
                 ));
             }
         }
