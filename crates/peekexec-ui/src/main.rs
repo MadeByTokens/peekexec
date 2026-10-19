@@ -239,13 +239,15 @@ impl eframe::App for Dialog {
         });
         let dark = ctx.global_style().visuals.dark_mode;
 
-        // The header holds requester text (cwd, why, variables): however
-        // long it gets, it scrolls, and the code below stays in view.
+        // The header ends with requester text (variables, why): however
+        // long it gets, it scrolls within 45% of the window, so the code
+        // below stays in view, and the daemon's facts come first.
         let max_header = ctx.content_rect().height() * 0.45;
         egui::Panel::top("who").show(ui, |ui| {
             ScrollArea::vertical()
                 .id_salt("who")
                 .max_height(max_header)
+                .min_scrolled_height(max_header)
                 .auto_shrink([false, true])
                 .show(ui, |ui| self.header(ui, dark));
         });
@@ -325,11 +327,6 @@ impl Dialog {
                 ui.label(RichText::new("Runs as").weak());
                 ui.label(RichText::new(self.view.run_as.as_str()).strong());
                 ui.end_row();
-                for (k, v) in &self.view.env {
-                    ui.label(RichText::new("Env").weak());
-                    ui.monospace(format!("{}={}", k.as_str(), v.as_str()));
-                    ui.end_row();
-                }
             });
         ui.add_space(4.0);
         let summary = match self.view.kind {
@@ -358,7 +355,20 @@ impl Dialog {
                     .small(),
             );
         }
-        // The requester's own words come after everything the daemon checked.
+        // What the requester chose, in bulk, after everything the daemon
+        // checked: variables, then its own words.
+        if !self.view.env.is_empty() {
+            egui::Grid::new("env")
+                .num_columns(2)
+                .spacing([12.0, 3.0])
+                .show(ui, |ui| {
+                    for (k, v) in &self.view.env {
+                        ui.label(RichText::new("Env").weak());
+                        ui.monospace(format!("{}={}", k.as_str(), v.as_str()));
+                        ui.end_row();
+                    }
+                });
+        }
         if let Some(why) = &self.view.why {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("The requester says:").weak().small());
