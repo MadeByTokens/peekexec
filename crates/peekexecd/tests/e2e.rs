@@ -417,7 +417,12 @@ fn detached_processes_do_not_hold_the_request() {
     );
     let out = r.stdout.unwrap_or_default();
     assert!(out.starts_with("started\n"), "{out}");
-    assert!(out.contains("stopped reading"), "{out}");
+    // With a cgroup of its own the detached process is killed with the
+    // command, so nothing holds stdout; without one, reading stops after a
+    // while, and says so.
+    use peekexecd::platform::{linux::CommandGroup, Group};
+    let contained = CommandGroup::create().is_ok_and(|g| Box::new(g).end().is_ok());
+    assert_eq!(out.contains("stopped reading"), !contained, "{out}");
     let _ = std::process::Command::new("pkill")
         .args(["-x", "-f", "sleep 30"])
         .status();

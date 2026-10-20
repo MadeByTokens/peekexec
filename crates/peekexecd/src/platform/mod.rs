@@ -131,7 +131,22 @@ pub trait Sandbox: Send + Sync {
     /// must never overstate.
     fn enforcement(&self, plan: &ExecPlan) -> Enforced;
     /// Start the plan with stdin closed and stdout/stderr piped.
-    fn spawn(&self, plan: &ExecPlan) -> Result<Child, PlatformError>;
+    fn spawn(&self, plan: &ExecPlan) -> Result<Started, PlatformError>;
+}
+
+/// A started command.
+pub struct Started {
+    pub child: Child,
+    /// Every process the command starts, wherever it moves: ended once the
+    /// command exits. `None` where the platform cannot hold them; then
+    /// only the command's process group is ended.
+    pub group: Option<Box<dyn Group>>,
+}
+
+/// The processes of one approved command.
+pub trait Group: Send {
+    /// Kill every process still in the group, and remove it.
+    fn end(self: Box<Self>) -> Result<(), String>;
 }
 
 /// The honest answer for a backend that enforces nothing: every requested

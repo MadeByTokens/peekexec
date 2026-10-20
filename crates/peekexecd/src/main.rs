@@ -86,6 +86,12 @@ fn run(args: Args) -> Result<(), String> {
         trust::check(&dialog, &[0]).map_err(|e| format!("refusing dialog program: {e}"))?;
     }
 
+    // Commands a previous run left running keep their groups; empty ones go.
+    #[cfg(target_os = "linux")]
+    if root {
+        platform::linux::remove_stale_groups();
+    }
+
     let test_approver = test_approver()?;
     let opts = Options {
         socket,

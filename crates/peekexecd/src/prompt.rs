@@ -96,26 +96,36 @@ pub fn ask(
     // The child holds its own copies now.
     drop(cmd);
     let stderr = child.stderr.take().expect("piped");
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let line: String = line.chars().take(500).collect();
-            eprintln!("peekexecd: dialog stderr: {line:?}");
-        }
-    });
+    // From here on, a failure must not leave the dialog running.
+    let mut stop = |e: String| {
+        let _ = child.kill();
+        let _ = child.wait();
+        e
+    };
+    std::thread::Builder::new()
+        .spawn(move || {
+            use std::io::BufRead;
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line: String = line.chars().take(500).collect();
+                eprintln!("peekexecd: dialog stderr: {line:?}");
+            }
+        })
+        .map_err(|e| stop(format!("cannot start the dialog: {e}")))?;
     let reader = conn
         .try_clone()
-        .map_err(|e| format!("cannot read from the dialog: {e}"))?;
+        .map_err(|e| stop(format!("cannot read from the dialog: {e}")))?;
 
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut r = BufReader::new(reader);
-        while let Ok(Some(msg)) = read_msg::<_, FromUi>(&mut r) {
-            if tx.send(msg).is_err() {
-                break;
+    std::thread::Builder::new()
+        .spawn(move || {
+            let mut r = BufReader::new(reader);
+            while let Ok(Some(msg)) = read_msg::<_, FromUi>(&mut r) {
+                if tx.send(msg).is_err() {
+                    break;
+                }
             }
-        }
-    });
+        })
+        .map_err(|e| stop(format!("cannot start the dialog: {e}")))?;
 
     let show = ToUi::Show {
         view: Box::new(view.clone()),

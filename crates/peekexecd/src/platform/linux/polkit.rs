@@ -256,7 +256,7 @@ impl Polkit {
         let (tx, rx) = mpsc::channel::<Reply>();
         let worker = conn.clone();
         let (pid, id, text) = (subject.pid, cancellation_id.clone(), message.to_string());
-        std::thread::spawn(move || {
+        let started = std::thread::Builder::new().spawn(move || {
             let subject_details = subject_details(pid, start_time, uid);
             let details = details(&text);
             let reply = worker
@@ -276,6 +276,8 @@ impl Polkit {
                 .and_then(|m| m.body().deserialize());
             let _ = tx.send(reply);
         });
+        // Nothing was asked yet: refuse rather than abort the daemon.
+        started.map_err(|e| PlatformError::Other(format!("cannot ask polkit: {e}")))?;
 
         let mut withdrawn: Option<PromptOutcome> = None;
         loop {

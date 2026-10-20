@@ -254,12 +254,18 @@ has a seat and is its active one"), never the absence of a warning sign
    hand it to whoever runs that display. An administrator can allow that
    anyway by starting the daemon with `--allow-unverified-display`; every
    such dialog then says the display could not be verified.
-5. **Executed command → system.** It runs as full root. The process group is
-   killed when the command exits, the umask is 022, and the audit login uid is
-   set to the requester. Processes that leave its process group (a new
-   session with `setsid`, or a background job of a shell with job control,
-   `set -m`) are not killed and can outlive it: they are part of what the
-   human approved, but they are not bounded by the request. `enforced`
+5. **Executed command → system.** It runs as full root, in a cgroup of its
+   own that it enters before `exec`. When it exits, everything in that
+   cgroup is killed (`cgroup.kill`, or freeze and kill on kernels before
+   5.14), so processes that left its process group (`setsid`, a background
+   job of a shell with job control, a double fork) end with it too. A
+   process cannot leave a cgroup by itself; work handed to systemd
+   (`systemd-run`, `systemctl start`) becomes a unit of systemd's own and is
+   not ended. Without a writable cgroup v2 hierarchy only the process group
+   is killed, and the journal says so. A running command does not depend on
+   the daemon: the service stops with `KillMode=process`, so restarting or
+   upgrading peekexecd lets an approved `apt` finish. The umask is 022, and
+   the audit login uid is set to the requester. `enforced`
    reports `kernel`, `best_effort`, `builtin` (no command ran: peekexec
    wrote the file), `declared_only` or `not_requested` per limit.
 
@@ -314,8 +320,13 @@ does not affect peekexec's X11 path.
 
 Each request is logged to the journal with the requester's uid and pid, the
 command (argv, or script/install content hash), working directory, stated
-reason, outcome, exit code and any deny reason. The command's audit login uid
-is the requester's.
+reason, outcome, exit code and any deny reason. An approved one is logged
+twice: before the command starts (so a command that ends the daemon or the
+machine is still on record) and when it ends. Requester strings are quoted
+and each is cut at 512 characters (32 arguments at most; the request's
+sha256 identifies the rest), so no line reaches journald's `LineMax` and is
+split into records that begin with requester text. The command's audit
+login uid is the requester's.
 
 ## Out of scope
 

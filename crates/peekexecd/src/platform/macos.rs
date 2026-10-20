@@ -4,13 +4,12 @@
 
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::Child;
 
 use peekexec_proto::Enforced;
 
 use super::{
     declared_only, Authenticator, ExecPlan, Listener, Peer, PeerInfo, Pinned, Platform,
-    PlatformError, Sandbox, XServer,
+    PlatformError, Sandbox, Started, XServer,
 };
 
 pub fn platform() -> Platform {
@@ -69,7 +68,7 @@ impl Sandbox for Unported {
         declared_only(plan)
     }
 
-    fn spawn(&self, _plan: &ExecPlan) -> Result<Child, PlatformError> {
+    fn spawn(&self, _plan: &ExecPlan) -> Result<Started, PlatformError> {
         Err(PlatformError::Unsupported("execution on macOS (M4)"))
     }
 }

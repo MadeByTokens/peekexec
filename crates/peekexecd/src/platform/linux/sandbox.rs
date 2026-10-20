@@ -1,11 +1,12 @@
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::Stdio;
 
 use peekexec_proto::{Enforced, Level};
 
-use crate::platform::{declared_only, ExecPlan, PlatformError, Sandbox};
+use super::cgroup::CommandGroup;
+use crate::platform::{declared_only, ExecPlan, Group, PlatformError, Sandbox, Started};
 use crate::spawn::{self, Spec};
 
 /// `--no-net` via a fresh network namespace (root only). That stops a
@@ -30,7 +31,7 @@ impl Sandbox for Namespaces {
         e
     }
 
-    fn spawn(&self, plan: &ExecPlan) -> Result<Child, PlatformError> {
+    fn spawn(&self, plan: &ExecPlan) -> Result<Started, PlatformError> {
         let env: Vec<(String, String)> = plan
             .env
             .iter()
@@ -62,9 +63,36 @@ impl Sandbox for Namespaces {
             .audit_uid
             .filter(|_| is_root())
             .map(|uid| std::ffi::CString::new(uid.to_string()).expect("digits"));
+        // A cgroup of its own, entered before exec, so everything the
+        // command starts can be ended with it.
+        let group = match CommandGroup::create() {
+            Ok(g) => Some(g),
+            Err(e) => {
+                if is_root() {
+                    eprintln!(
+                        "peekexecd: no cgroup of its own for the approved command ({e}); only \
+                         its process group is ended when it exits"
+                    );
+                }
+                None
+            }
+        };
+        let procs = group.as_ref().map(CommandGroup::procs);
         // SAFETY: only async-signal-safe libc calls; no allocation or locks.
         unsafe {
             cmd.pre_exec(move || {
+                // First, so nothing below runs outside the group.
+                if let Some(procs) = &procs {
+                    let fd = libc::open(procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                    if fd < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    let wrote = libc::write(fd, c"0".as_ptr().cast(), 1);
+                    libc::close(fd);
+                    if wrote != 1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
                 // The directory that was shown, not whatever its path names now.
                 if let Some(fd) = dir_fd {
                     if libc::fchdir(fd) != 0 {
@@ -86,7 +114,16 @@ impl Sandbox for Namespaces {
                 Ok(())
             });
         }
-        cmd.spawn()
-            .map_err(|e| PlatformError::io(format!("start {}", plan.program), e))
+        let child = cmd.spawn();
+        let group = group.map(|g| Box::new(g) as Box<dyn Group>);
+        match child {
+            Ok(child) => Ok(Started { child, group }),
+            Err(e) => {
+                if let Some(g) = group {
+                    let _ = g.end();
+                }
+                Err(PlatformError::io(format!("start {}", plan.program), e))
+            }
+        }
     }
 }

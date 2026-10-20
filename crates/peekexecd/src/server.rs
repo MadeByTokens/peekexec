@@ -829,7 +829,10 @@ impl Daemon {
         };
 
         let mut response = match decision {
-            Ok(Decision::Approved) => self.execute(&prepared, id, base(Status::Approved)),
+            Ok(Decision::Approved) => {
+                audit_line(peer, request, id, "status=starting");
+                self.execute(&prepared, id, base(Status::Approved))
+            }
             Ok(Decision::Cancelled) => base(Status::Cancelled),
             Ok(Decision::TimedOut) => base(Status::Timeout),
             Ok(Decision::AuthFailed) => base(Status::AuthFailed),
@@ -1120,37 +1123,73 @@ fn new_id() -> String {
     )
 }
 
-/// One line per request in the daemon log (the journal under systemd):
-/// who asked, what exactly, where, why, and the outcome. Strings are
-/// Debug-quoted so control characters cannot forge log lines.
-fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
+/// Longest requester string an audit line quotes, and most arguments it
+/// lists; the request's sha256 identifies the rest. journald cuts a line
+/// longer than its `LineMax` (48 KiB by default) into records of their
+/// own, and the later ones would begin with requester text.
+const AUDIT_FIELD: usize = 512;
+const AUDIT_ARGS: usize = 32;
+
+/// Debug-quoted (control characters cannot forge log lines) and cut.
+fn quoted(s: &str) -> String {
+    let n = s.chars().count();
+    if n <= AUDIT_FIELD {
+        return format!("{s:?}");
+    }
+    let head: String = s.chars().take(AUDIT_FIELD).collect();
+    format!("{head:?}…(+{} chars)", n - AUDIT_FIELD)
+}
+
+fn quoted_list(items: &[String]) -> String {
+    let mut parts: Vec<String> = items.iter().take(AUDIT_ARGS).map(|a| quoted(a)).collect();
+    if items.len() > AUDIT_ARGS {
+        parts.push(format!("…(+{} more)", items.len() - AUDIT_ARGS));
+    }
+    format!("[{}]", parts.join(", "))
+}
+
+/// Two lines per approved request in the daemon log (the journal under
+/// systemd), one when the command starts and one with the outcome, and
+/// one for any other: who asked, what exactly, where, why, and what
+/// happened. The first is written before anything runs, so a command that
+/// ends the daemon (or the machine) is still on record.
+fn audit_line(peer: &Peer, request: &Request, id: &str, outcome: &str) {
     use peekexec_core::request::sha256_hex;
     let what = match &request.action {
-        Action::Run { argv } => format!("run argv={argv:?}"),
+        Action::Run { argv } => format!("run argv={}", quoted_list(argv)),
         Action::Script {
             path,
             content,
             args,
         } => format!(
-            "script path={path:?} bytes={} content_sha256={} args={args:?}",
+            "script path={} bytes={} content_sha256={} args={}",
+            quoted(path),
             content.len(),
-            sha256_hex(content)
+            sha256_hex(content),
+            quoted_list(args)
         ),
         Action::Install { src, content, dest } => format!(
-            "install dest={dest:?} src={src:?} bytes={} content_sha256={}",
+            "install dest={} src={} bytes={} content_sha256={}",
+            quoted(dest),
+            quoted(src),
             content.len(),
             sha256_hex(content)
         ),
     };
     eprintln!(
-        "peekexecd: audit id={id} uid={} pid={} exe={:?} {what} cwd={:?} why={:?} \
-         sha256={} status={}{}{}{}",
+        "peekexecd: audit id={id} uid={} pid={} exe={} {what} cwd={} why={} sha256={} {outcome}",
         peer.uid,
         peer.process.pid,
-        peer.process.exe.as_deref().unwrap_or("?"),
-        request.cwd,
-        request.why.as_deref().unwrap_or(""),
+        quoted(peer.process.exe.as_deref().unwrap_or("?")),
+        quoted(&request.cwd),
+        quoted(request.why.as_deref().unwrap_or("")),
         request.digest(),
+    );
+}
+
+fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
+    let outcome = format!(
+        "status={}{}{}{}",
         response.status.as_str(),
         response
             .exit_code
@@ -1159,14 +1198,15 @@ fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
         response
             .deny_reason
             .as_deref()
-            .map(|r| format!(" deny_reason={r:?}"))
+            .map(|r| format!(" deny_reason={}", quoted(r)))
             .unwrap_or_default(),
         response
             .error
             .as_deref()
-            .map(|e| format!(" error={e:?}"))
+            .map(|e| format!(" error={}", quoted(e)))
             .unwrap_or_default(),
     );
+    audit_line(peer, request, id, &outcome);
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1276,6 +1316,20 @@ mod tests {
             tier: DisplayTier::Wayland,
             verified,
         }
+    }
+
+    #[test]
+    fn audit_fields_are_bounded() {
+        assert_eq!(quoted("a\nb"), "\"a\\nb\"");
+        let long = "x".repeat(100_000);
+        let q = quoted(&long);
+        assert!(
+            q.len() < AUDIT_FIELD + 40 && q.ends_with("(+99488 chars)"),
+            "{q}"
+        );
+        let many = vec![long; 1000];
+        let l = quoted_list(&many);
+        assert!(l.len() < 20_000 && l.contains("(+968 more)"), "{}", l.len());
     }
 
     #[test]

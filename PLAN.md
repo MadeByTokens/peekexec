@@ -226,8 +226,10 @@ itself "claude"). Plan:
 
 - Run approved commands as transient systemd units (`PrivateNetwork=`,
   `ProtectSystem=strict`, `ReadWritePaths=`, `CapabilityBoundingSet=`,
-  `NoNewPrivileges=`), so `enforced` can say `kernel` truthfully, the unit can
-  be killed as a whole, and a PAM session applies. Until then: best effort.
+  `NoNewPrivileges=`), so `enforced` can say `kernel` truthfully and a PAM
+  session applies. Until then: best effort. (Done already: each command has
+  a cgroup of its own, killed as a whole when it exits, and outlives a
+  daemon restart.)
 - libaudit `USER_AUTH` / `USER_CMD` records; store the shown text by sha256.
 
 ### M2 detail: hardening from the pre-install review

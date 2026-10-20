@@ -1,7 +1,9 @@
 //! Linux backends: kernel peer credentials + /proc, PAM, network namespace
-//! for `--no-net`, systemd socket activation. Real containment (approved
-//! commands as transient systemd units, see PLAN.md): M2.
+//! for `--no-net`, a cgroup per approved command, systemd socket
+//! activation. Real containment (approved commands as transient systemd
+//! units, see PLAN.md): M2.
 
+mod cgroup;
 mod display;
 mod pam;
 mod peer;
@@ -15,6 +17,7 @@ use std::path::Path;
 
 use super::{Listener, Platform, PlatformError};
 
+pub use cgroup::{remove_stale as remove_stale_groups, CommandGroup};
 pub use pam::Pam;
 pub use peer::ProcPeerInfo;
 pub use sandbox::Namespaces;

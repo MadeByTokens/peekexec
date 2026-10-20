@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::platform::{ExecPlan, Sandbox};
+use crate::platform::{ExecPlan, Sandbox, Started};
 
 /// Output kept per stream; the rest is drained and dropped.
 pub const OUTPUT_CAP: u64 = 16 * 1024 * 1024;
@@ -25,23 +25,34 @@ pub struct Outcome {
 pub const LINGER: Duration = Duration::from_secs(2);
 
 pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
-    let mut child = sandbox.spawn(plan).map_err(|e| e.to_string())?;
+    let Started { mut child, group } = sandbox.spawn(plan).map_err(|e| e.to_string())?;
     let out = child.stdout.take().expect("piped");
     let err = child.stderr.take().expect("piped");
     let deadline = Arc::new(Mutex::new(None));
     let reader = {
         let deadline = Arc::clone(&deadline);
-        std::thread::spawn(move || capture([Box::new(out), Box::new(err)], &deadline))
+        std::thread::Builder::new()
+            .spawn(move || capture([Box::new(out), Box::new(err)], &deadline))
     };
-    // When the command exits, end everything it left behind in its process
-    // group. Processes it moved to another group or session survive (see
-    // THREAT_MODEL.md, boundary 5). Waiting with WNOWAIT
-    // keeps the exited child's pid, and so its group id, from being reused
-    // before the kill.
-    wait_exited(child.id());
+    // When the command exits, end everything it left behind: its process
+    // group, and its cgroup, which holds even the processes that left the
+    // group (see THREAT_MODEL.md, boundary 5). Waiting with WNOWAIT keeps
+    // the exited child's pid, and so its group id, from being reused
+    // before the kill. If no thread could be started to read its output,
+    // it is ended at once instead (without a reader it would block on a
+    // full pipe).
+    if reader.is_ok() {
+        wait_exited(child.id());
+    }
     // SAFETY: plain signal to the command's own process group.
     unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    let ended = group.map(|g| g.end());
     let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+    let reader =
+        reader.map_err(|e| format!("cannot read the command's output ({e}); it was killed"))?;
+    if let Some(Err(e)) = ended {
+        eprintln!("peekexecd: {e}");
+    }
     let exit_code = status
         .code()
         .or_else(|| status.signal().map(|s| 128 + s))
@@ -318,5 +329,50 @@ mod tests {
             "temp file left behind"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Run where this process's cgroup can be written (a delegated user
+    /// unit); skipped elsewhere.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn processes_that_leave_the_group_are_ended() {
+        use crate::platform::{linux::Namespaces, Group};
+        match crate::platform::linux::CommandGroup::create() {
+            Ok(g) => Box::new(g).end().unwrap(),
+            Err(e) => {
+                eprintln!("skipped: {e}");
+                return;
+            }
+        }
+        // A process in a session of its own, which reports its own pid
+        // (`setsid` may fork, so `$!` would name the wrong one).
+        let f = std::env::temp_dir().join(format!("pe-setsid-{}", std::process::id()));
+        let f = f.to_str().unwrap();
+        let script = format!(
+            "setsid sh -c 'echo $$ > {f}; exec sleep 300' </dev/null >/dev/null 2>&1 & \
+             while [ ! -s {f} ]; do sleep 0.01; done; cat {f}; rm {f}"
+        );
+        let plan = ExecPlan {
+            program: "/bin/sh".into(),
+            argv: vec!["sh".into(), "-c".into(), script],
+            env: Default::default(),
+            cwd: "/".into(),
+            cwd_fd: None,
+            write: None,
+            no_net: false,
+            audit_uid: None,
+        };
+        let out = run(&Namespaces, &plan).unwrap();
+        let pid: u32 = out.stdout.trim().parse().expect(&out.stdout);
+        // Gone, or a zombie waiting for whoever reaps orphans.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let running = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|st| !st.rsplit(')').next().unwrap_or("").starts_with(" Z"))
+        };
+        while running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!running(), "setsid child {pid} outlived the command");
     }
 }

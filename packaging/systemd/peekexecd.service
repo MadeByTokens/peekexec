@@ -8,6 +8,12 @@ ExecStart=/usr/libexec/peekexec/peekexecd
 # Approved commands run as root from here, so no sandboxing that would
 # change what they can do; the per-request limits are applied by peekexecd.
 StandardError=journal
+# Each approved command runs in a cgroup of its own below this one, and
+# everything in it is killed when the command exits (setsid included).
+Delegate=yes
+# Stopping or restarting the daemon (an upgrade, a crash) ends the daemon
+# only: an approved command that is running (apt, dpkg) finishes.
+KillMode=process
 
 [Install]
 Also=peekexecd.socket
