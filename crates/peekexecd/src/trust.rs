@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 /// Programs are looked up here, never in the requester's PATH.
 pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-const S_ISVTX: u32 = 0o1000;
-
 /// Owners whose files are trusted: root, plus the daemon's own uid (which
 /// is root in production; the developer in `--dev` mode).
 pub fn trusted_owners() -> Vec<u32> {
@@ -81,7 +79,10 @@ pub fn check_dir(dir: &std::fs::File, shown: &str, owners: &[u32]) -> Result<(),
             ));
         }
         let mode = m.permissions().mode();
-        if mode & 0o022 != 0 && (leaf || mode & S_ISVTX == 0) {
+        // Not even sticky (/tmp): a root-owned directory in one can be
+        // removed by a root job (tmp cleaning) and the name taken by the
+        // user before the request runs.
+        if mode & 0o022 != 0 {
             return Err(format!(
                 "{what} is writable by other users: it could change after approval"
             ));
@@ -132,7 +133,6 @@ fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf
     let canon = path
         .canonicalize()
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut leaf = true;
     for p in canon.ancestors() {
         let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
         if !owners.contains(&m.uid()) {
@@ -150,15 +150,15 @@ fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf
                 p.display()
             ));
         }
-        let mode = m.permissions().mode();
-        let sticky_dir = !leaf && m.is_dir() && mode & S_ISVTX != 0;
-        if mode & 0o022 != 0 && !sticky_dir {
+        // Not even a sticky directory (/tmp) above it: what root owns
+        // there can be removed by a root job (tmp cleaning) and the name
+        // taken by the user between approval and use.
+        if m.permissions().mode() & 0o022 != 0 {
             return Err(format!(
                 "{} is writable by other users: it could change after approval",
                 p.display()
             ));
         }
-        leaf = false;
     }
     Ok(canon)
 }
@@ -212,6 +212,24 @@ fn is_executable_file(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// For tests: a new directory (mode 0755) that this process's owner rule
+/// trusts, outside `/tmp` (which no chain may pass through): under
+/// `$XDG_RUNTIME_DIR` or `$HOME`, whichever the check accepts. `None` if
+/// neither does; the test then skips.
+#[cfg(test)]
+pub fn test_dir(tag: &str) -> Option<PathBuf> {
+    let owners = trusted_owners();
+    let base = ["XDG_RUNTIME_DIR", "HOME"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .find(|b| check(b, &owners).is_ok())?;
+    let dir = base.join(format!(".pe-test-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).ok()?;
+    Some(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,10 +255,10 @@ mod tests {
 
     #[test]
     fn user_files_are_not_trusted_by_root() {
-        let dir = std::env::temp_dir().join(format!("pe-trust-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Independent of the umask (Ubuntu's 002 makes new dirs group-writable).
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(dir) = test_dir("trust") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
         let f = dir.join("tool");
         std::fs::write(&f, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -249,7 +267,6 @@ mod tests {
             let err = check(&f, &[0]).unwrap_err();
             assert!(err.contains("not trusted"), "{err}");
         }
-        // /tmp is world-writable but sticky: fine as an ancestor.
         assert!(check(&f, &[0, me]).is_ok());
         std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o777)).unwrap();
         assert!(check(&f, &[0, me])
@@ -265,9 +282,23 @@ mod tests {
         // everyone, and then it is rightly not trusted.
         let r = check_dir(&open("/etc"), "/etc", &[0]);
         assert!(r.is_ok(), "{r:?}");
-        // Sticky and world-writable: fine above a directory, not as it.
+        // Sticky and world-writable: not as it, and not above it either.
         let err = check_dir(&open("/tmp"), "/tmp", &[0]).unwrap_err();
         assert!(err.contains("writable by other"), "{err}");
+        let in_tmp = std::fs::read_dir("/tmp").ok().and_then(|d| {
+            d.filter_map(Result::ok).map(|e| e.path()).find(|p| {
+                std::fs::symlink_metadata(p).is_ok_and(|m| {
+                    m.is_dir() && m.uid() == 0 && m.permissions().mode() & 0o022 == 0
+                })
+            })
+        });
+        match in_tmp {
+            Some(p) => {
+                let err = check(&p, &[0]).unwrap_err();
+                assert!(err.contains("/tmp is writable by other"), "{err}");
+            }
+            None => eprintln!("skipped: no root-owned directory in /tmp"),
+        }
         if !nix::unistd::geteuid().is_root() {
             let home = std::env::var("HOME").unwrap();
             let err = check_dir(&open(&home), &home, &[0]).unwrap_err();

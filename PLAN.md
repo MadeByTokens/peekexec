@@ -279,7 +279,7 @@ the default wherever the display cannot be verified.
 - [x] C9a Client escapes daemon text and output unless the daemon is root.
 - [x] C9b `PEEKEXEC_SOCKET` set means `dev_mode`.
 - [x] C10a Ancestry walk: parent re-read, started before its child.
-- [ ] C10b No world-writable sticky directory in a trusted chain.
+- [x] C10b No world-writable sticky directory in a trusted chain.
 - [ ] C10c No vfat/exfat/ntfs/cifs/nfs/fuse filesystem in a trusted chain.
 - [ ] C10d Password buffers wiped (daemon reader, egui undo).
 - [ ] D11a `install.sh` refuses to run inside the service.

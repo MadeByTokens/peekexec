@@ -26,8 +26,17 @@ struct Daemon {
 impl Daemon {
     fn start(answer: &str) -> Daemon {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "pe-e2e-{}-{}",
+        // Not under /tmp: no trusted chain may pass through a directory
+        // others can write, so install targets there would be refused.
+        let owners = peekexecd::trust::trusted_owners();
+        let base = ["XDG_RUNTIME_DIR", "HOME"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(PathBuf::from)
+            .find(|b| peekexecd::trust::check(b, &owners).is_ok())
+            .expect("a trusted scratch directory ($XDG_RUNTIME_DIR or $HOME)");
+        let dir = base.join(format!(
+            ".pe-e2e-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));

@@ -1682,9 +1682,10 @@ mod tests {
 
     #[test]
     fn install_destination_is_a_counted_line_in_full() {
-        let dir = std::env::temp_dir().join(format!("pe-dest-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(dir) = crate::trust::test_dir("dest") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
         let dest = dir.join(format!("README-not-a-rule-{}.rules", "x".repeat(200)));
         let install = req(Action::Install {
             src: "r".into(),
@@ -1704,9 +1705,10 @@ mod tests {
         if nix::unistd::geteuid().is_root() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("pe-unread-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(dir) = crate::trust::test_dir("unread") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
         let dest = dir.join("secret.conf");
         std::fs::write(&dest, "secret-line\n").unwrap();
         let install = req(Action::Install {

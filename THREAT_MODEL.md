@@ -150,8 +150,9 @@ has a seat and is its active one"), never the absence of a warning sign
    - `run` looks a bare argv[0] up in a fixed system PATH (a path is used as
      given, relative to the working directory) and requires the program and
      every directory above it to be root-owned and not writable by others
-     (a root-owned sticky directory such as `/tmp` may sit above it, not be
-     it), and not on a nosuid mount: removable media, disk images and FUSE
+     (not even a sticky one such as `/tmp`: what root owns there can be
+     removed by a root job and the name taken by the user before the
+     request runs), and not on a nosuid mount: removable media, disk images and FUSE
      mounted for a user are nosuid, and their files may claim any owner. A
      script's `#!` interpreter is held to the same rule, and may receive only
      flags allowlisted for that interpreter (`-e` is harmless to sh but means
