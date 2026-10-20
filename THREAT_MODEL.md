@@ -211,12 +211,14 @@ has a seat and is its active one"), never the absence of a warning sign
    itself, the compositor, which a requester cannot reroute; on other
    desktops it is an ordinary program of the user's, which a requester could
    end and replace with its own. So the path is used only with positive
-   evidence that GNOME Shell holds it: a `gnome-shell` of the user's, from
-   a binary root controls, that started within two minutes of the session's
-   leader (kernel start times). A requester can start a shell or an agent
-   of its own, but not one that started before it did, and a shell
-   restarted since login no longer counts. The prompt shows a summary
-   written by the daemon.
+   evidence that GNOME Shell holds it: the session's controller, as logind
+   records it (the one process that took control of the session's devices,
+   the compositor on Wayland), resolved to a pid by the bus daemon, is a
+   `gnome-shell` of the user's from a binary root controls. A requester can
+   start a shell or an agent of its own, but not take the session from the
+   compositor, which cannot be replaced without ending the session. X11
+   sessions have no controller, so they never take this path. The prompt
+   shows a summary written by the daemon.
    The daemon's facts come first: the limits, where the request came from,
    the working directory and every warning. Then the command in full: every
    argument and every line of content, long lines wrapped rather than cut,
@@ -245,7 +247,8 @@ has a seat and is its active one"), never the absence of a warning sign
    have chosen, is refused before polkit is asked. A requester with no
    agent in its session gets an error. Residual risk: another agent that
    registered before GNOME Shell did at login (one started from the
-   session's autostart) would go unnoticed, and with `ptrace_scope` 0
+   session's autostart) would go unnoticed (GNOME Shell then reports that
+   it could not register its own), and with `ptrace_scope` 0
    (noted in the dialog) a program of the user's could take over the
    shell itself.
    Where there is no prompt that can be trusted (the polkit action is not

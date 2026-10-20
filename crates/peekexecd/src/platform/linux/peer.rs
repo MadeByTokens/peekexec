@@ -207,7 +207,7 @@ fn process_info(pid: u32) -> ProcessInfo {
     }
 }
 
-pub(super) fn start_time_of(pid: u32) -> Option<u64> {
+fn start_time_of(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_start_time(&stat)
 }

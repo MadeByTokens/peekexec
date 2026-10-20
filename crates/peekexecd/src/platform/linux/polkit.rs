@@ -1,8 +1,8 @@
 //! Approval through the desktop's own polkit authentication agent, for
 //! displays the daemon cannot verify (Wayland). The session's agent was
 //! registered with polkitd when the user logged in. Only GNOME Shell's is
-//! used: there the shell, which is the compositor, draws the prompt, and
-//! another program cannot read or drive it. On other desktops the agent is
+//! used, on Wayland: there the shell, which is the compositor, draws the
+//! prompt, and another program cannot read or drive it. On other desktops the agent is
 //! an ordinary program of the user's, which a requester can end and replace
 //! with its own (polkit then asks that one), so the path is refused there.
 //!
@@ -80,10 +80,6 @@ fn details(message: &str) -> HashMap<&'static str, &str> {
     ])
 }
 
-/// How soon after the session's leader GNOME Shell must have started to
-/// count as the one that came up with the session.
-const SHELL_START: Duration = Duration::from_secs(120);
-
 impl SystemPrompt for Polkit {
     fn usable_for(&self, subject: &ProcessInfo, uid: u32) -> Result<(), String> {
         if !Path::new(POLICY).exists() {
@@ -94,8 +90,14 @@ impl SystemPrompt for Polkit {
         // session. A session the human is not sitting at (ssh, ssh
         // localhost, an inactive console) may have an agent of the
         // requester's choosing.
-        let cgroup = std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid))
-            .map_err(|e| format!("requester cgroup: {e}"))?;
+        // polkit asks about that very process, so it must still be there.
+        let cgroup =
+            std::fs::read_to_string(format!("/proc/{}/cgroup", subject.pid)).map_err(|_| {
+                "the requesting process has exited: the desktop's password dialog asks about \
+                 that very process, so it must wait for the answer (use `peekexec run`, not \
+                 `submit`, here)"
+                    .to_string()
+            })?;
         let id = match session_of(&cgroup) {
             Some(id) => id,
             None => display_session(uid)?,
@@ -365,12 +367,14 @@ fn display_session(uid: u32) -> Result<String, String> {
         .ok_or_else(|| "logind names no graphical session for your user".to_string())
 }
 
-/// Positive evidence that GNOME Shell holds the session's polkit agent: a
-/// `gnome-shell` of the user's, from a binary root controls, that started
-/// within [`SHELL_START`] of the session's leader (kernel start times,
-/// one clock). A requester can start a shell or an agent of its own, but
-/// not one that started before it did; and a shell that was restarted
-/// (only possible on X11) no longer counts.
+/// Positive evidence that GNOME Shell holds the session's polkit agent:
+/// the session's controller, as logind records it (`CONTROLLER=`, the bus
+/// name that took control of the session's devices, which on Wayland is
+/// the compositor; there is one per session), is a `gnome-shell` of the
+/// user's from a binary root controls. A requester can start a shell or an
+/// agent of its own, but not take the session from the compositor that
+/// holds it; and on Wayland the compositor cannot be replaced without
+/// ending the session. X11 sessions have no controller and are refused.
 fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
     let refused = |why: &str| {
         Err(format!(
@@ -379,53 +383,41 @@ fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
              replace"
         ))
     };
-    let Some(leader) = record
+    let Some(controller) = record
         .lines()
-        .find_map(|l| l.strip_prefix("LEADER="))
-        .and_then(|p| p.parse::<u32>().ok())
+        .find_map(|l| l.strip_prefix("CONTROLLER="))
+        .filter(|c| c.starts_with(':'))
     else {
-        return refused("logind names no session leader");
+        return refused("the session has no compositor controlling it");
     };
-    let Some(leader_start) = super::peer::start_time_of(leader) else {
-        return refused("the session leader is gone");
+    let pid = zbus::blocking::Connection::system()
+        .and_then(|conn| {
+            conn.call_method(
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "GetConnectionUnixProcessID",
+                &(controller,),
+            )?
+            .body()
+            .deserialize::<u32>()
+        })
+        .ok();
+    let Some(pid) = pid else {
+        return refused("the session's controller is gone");
     };
-    let hz = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
-        .ok()
-        .flatten()
-        .filter(|&t| t > 0)
-        .unwrap_or(100) as u64;
-    let owners = crate::trust::trusted_owners();
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return refused("cannot list processes");
-    };
-    let found = procs.filter_map(Result::ok).any(|entry| {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            return false;
-        };
-        let owned = std::fs::read_to_string(format!("/proc/{pid}/status"))
-            .is_ok_and(|s| status_uids(&s) == Some([uid; 4]));
-        // The very file at this path (`exe_of` marks any other), which
-        // only root can change.
-        let shell = || {
-            super::peer::exe_of(pid).is_some_and(|exe| {
-                exe.rsplit('/').next() == Some("gnome-shell")
-                    && crate::trust::check(Path::new(&exe), &owners).is_ok()
-            })
-        };
-        let with_session = || {
-            super::peer::start_time_of(pid)
-                .is_some_and(|t| started_with(leader_start, t, hz, SHELL_START))
-        };
-        owned && shell() && with_session()
+    let owned = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .is_ok_and(|s| status_uids(&s) == Some([uid; 4]));
+    // The very file at this path (`exe_of` marks any other), which only
+    // root can change.
+    let shell = super::peer::exe_of(pid).is_some_and(|exe| {
+        exe.rsplit('/').next() == Some("gnome-shell")
+            && crate::trust::check(Path::new(&exe), &crate::trust::trusted_owners()).is_ok()
     });
-    if found {
+    if owned && shell {
         Ok(())
     } else {
-        refused("no GNOME Shell that started with your session")
+        refused("the session's compositor is not GNOME Shell")
     }
 }
 
@@ -438,12 +430,6 @@ fn status_uids(status: &str) -> Option<[u32; 4]> {
         .map(|n| n.parse().ok())
         .collect::<Option<_>>()?;
     ids.try_into().ok()
-}
-
-/// Whether a process that started at `t` (clock ticks since boot) started
-/// within `window` after the session's leader did.
-fn started_with(leader: u64, t: u64, hz: u64, window: Duration) -> bool {
-    t >= leader && t - leader <= window.as_secs() * hz
 }
 
 fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
@@ -483,13 +469,12 @@ mod tests {
     }
 
     #[test]
-    fn the_shell_must_have_started_with_the_session() {
-        let w = Duration::from_secs(120);
-        assert!(started_with(1000, 1000, 100, w));
-        assert!(started_with(1000, 1000 + 120 * 100, 100, w));
-        assert!(!started_with(1000, 1000 + 120 * 100 + 1, 100, w));
-        // Older than the leader: some other process with a reused pid.
-        assert!(!started_with(1000, 999, 100, w));
+    fn a_session_without_a_compositor_is_refused() {
+        // An X11 session record: no controller, so no bus call is made.
+        let rec = "UID=1000\nACTIVE=1\nSTATE=active\nTYPE=x11\nCLASS=user\nSEAT=seat0\n";
+        let e = desktop_shell(rec, 1000).unwrap_err();
+        assert!(e.contains("no compositor"), "{e}");
+        assert!(desktop_shell(&format!("{rec}CONTROLLER=\n"), 1000).is_err());
     }
 
     #[test]

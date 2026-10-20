@@ -136,6 +136,8 @@ GUIDE FOR AUTOMATED CALLERS
 8. If your tool call has a timeout shorter than the human needs:
      peekexec submit --json run ...     -> {"status":"pending","request_id":ID}
      peekexec wait --json ID --timeout 60   (repeat while status is "pending")
+   Not where the desktop's password dialog is used (Wayland): it asks about
+   the requesting process itself, which must wait; there use `peekexec run`.
 
 9. You cannot approve, pre-approve, or skip the dialog. There is no flag for it.
 ```
