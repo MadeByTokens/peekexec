@@ -264,7 +264,7 @@ the default wherever the display cannot be verified.
       repository is public).
 - [x] B3 `deny_reason`: the guide says it may only narrow what the agent
       does and mentions `display_verified`; denials stored per requester.
-- [ ] B4 Daemon refuses to start when the dialog or helper is readable by
+- [x] B4 Daemon refuses to start when the dialog or helper is readable by
       others.
 - [ ] B5 Flags for lasting root: group changes, setuid chmod, setcap,
       systemd-run, at/batch, crontab, `systemctl enable`.

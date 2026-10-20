@@ -92,6 +92,12 @@ fn run(args: Args) -> Result<(), String> {
     if root {
         // The dialog collects the password: it must not be replaceable.
         trust::check(&dialog, &[0]).map_err(|e| format!("refusing dialog program: {e}"))?;
+        // It and this binary (the inspection helper) must not be dumpable
+        // between exec and their own prctl.
+        for program in [dialog.as_path(), std::path::Path::new("/proc/self/exe")] {
+            trust::not_readable_by_others(program)
+                .map_err(|e| format!("refusing to start: {e}"))?;
+        }
     }
 
     // Groups an earlier run left, once empty.

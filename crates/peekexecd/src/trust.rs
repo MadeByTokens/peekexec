@@ -24,6 +24,25 @@ pub fn trusted_owners() -> Vec<u32> {
     }
 }
 
+/// A program that handles secrets or the user's files (the dialog, the
+/// inspection helper) must not be readable by others: the kernel makes a
+/// process that execs a file it cannot read non-dumpable from the start,
+/// so the user cannot attach to it before it hardens itself.
+pub fn not_readable_by_others(path: &Path) -> Result<(), String> {
+    let mode = std::fs::metadata(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .permissions()
+        .mode();
+    if mode & 0o044 != 0 {
+        return Err(format!(
+            "{} is readable by others (mode {:o}); install it 0711, as install.sh does",
+            path.display(),
+            mode & 0o7777
+        ));
+    }
+    Ok(())
+}
+
 /// Canonicalize `path` and check it and every ancestor. Returns the
 /// canonical path.
 pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
@@ -196,6 +215,19 @@ fn is_executable_file(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readable_programs_are_refused() {
+        let dir = std::env::temp_dir().join(format!("pe-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("prog");
+        std::fs::write(&f, b"x").unwrap();
+        for (mode, ok) in [(0o711, true), (0o700, true), (0o755, false), (0o751, false)] {
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(not_readable_by_others(&f).is_ok(), ok, "{mode:o}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn system_binaries_are_trusted() {
