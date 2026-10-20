@@ -271,7 +271,7 @@ the default wherever the display cannot be verified.
 - [x] B6 Facts say the output goes back to the requester.
 - [x] B7a Results expire from when they finished.
 - [x] B7b `is_admin` uses the first admin group only.
-- [ ] B7c The dialog's Enter path honours the approve delay.
+- [x] B7c The dialog's Enter path honours the approve delay.
 - [ ] B7d `Shown` escapes characters with zero advance.
 - [ ] C8a Diff against the previous request when one follows soon.
 - [ ] C8b "N more requests waiting" note.

@@ -168,8 +168,11 @@ impl Dialog {
         }
     }
 
-    fn approve(&mut self, ctx: &egui::Context) {
-        if self.busy || (self.view.wants_password && self.password.is_empty()) {
+    /// Every way of approving goes through here, so each one waits out the
+    /// approve delay (Enter as much as the button).
+    fn approve(&mut self, ctx: &egui::Context, now: f64) {
+        let early = delay_left(self.view.approve_delay_ms, self.opened_at, now) > 0.0;
+        if early || self.busy || (self.view.wants_password && self.password.is_empty()) {
             return;
         }
         // Moved, not copied: the Secret is wiped once sent.
@@ -592,12 +595,12 @@ impl Dialog {
                     && field.lost_focus()
                     && ui.input(|i| i.key_pressed(Key::Enter))
                 {
-                    self.approve(ctx);
+                    self.approve(ctx, now);
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
-                let wait = self.view.approve_delay_ms as f64 / 1000.0 - (now - opened);
+                let wait = delay_left(self.view.approve_delay_ms, Some(opened), now);
                 let ready = wait <= 0.0
                     && !self.busy
                     && (!self.view.wants_password || !self.password.is_empty());
@@ -618,7 +621,7 @@ impl Dialog {
                     .add_enabled(ready, approve)
                     .clicked_by(egui::PointerButton::Primary)
                 {
-                    self.approve(ctx);
+                    self.approve(ctx, now);
                 }
                 if ui.button("Cancel").clicked() {
                     self.send(ctx, FromUi::Cancel);
@@ -667,5 +670,28 @@ impl Dialog {
             });
         });
         ui.add_space(6.0);
+    }
+}
+
+/// Seconds until Approve may be used: `delay_ms` after the window first
+/// drew (`opened`, in egui's clock); the whole delay before it has drawn.
+fn delay_left(delay_ms: u32, opened: Option<f64>, now: f64) -> f64 {
+    let delay = f64::from(delay_ms) / 1000.0;
+    match opened {
+        Some(t) => delay - (now - t),
+        None => delay,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::delay_left;
+
+    #[test]
+    fn the_approve_delay_counts_from_the_first_frame() {
+        assert!(delay_left(2000, None, 100.0) > 0.0);
+        assert!(delay_left(2000, Some(100.0), 101.0) > 0.0);
+        assert!(delay_left(2000, Some(100.0), 102.0) <= 0.0);
+        assert!(delay_left(0, Some(100.0), 100.0) <= 0.0);
     }
 }
