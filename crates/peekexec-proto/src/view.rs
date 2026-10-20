@@ -162,6 +162,11 @@ pub struct Section {
     pub raw: String,
     /// Display layout of the same content (see `peekexec_core::format`).
     pub formatted: Vec<Line>,
+    /// Not what runs: the changes since the request the human saw before,
+    /// for comparison. Left out of the desktop prompt (a note there says
+    /// it exists) and of the findings (its text is counted where it runs).
+    #[serde(default)]
+    pub comparison: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +218,7 @@ impl PromptView {
     pub fn findings(&self) -> usize {
         self.sections
             .iter()
+            .filter(|s| !s.comparison)
             .map(|s| scan(&s.raw).len() + s.invocation.iter().map(|l| scan(l).len()).sum::<usize>())
             .sum()
     }
@@ -336,7 +342,12 @@ impl PromptView {
         }
         for s in &self.sections {
             line(String::new());
-            line(format!("── {} ──", s.title));
+            let what = if s.comparison {
+                " (for comparison: not what runs)"
+            } else {
+                ""
+            };
+            line(format!("── {}{what} ──", s.title));
             for l in &s.invocation {
                 line(format!("     {l}"));
             }

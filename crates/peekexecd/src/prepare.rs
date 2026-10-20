@@ -203,6 +203,7 @@ pub fn prepare(
                 200,
             ));
             let section = Section {
+                comparison: false,
                 title: display_line(&name, 80),
                 invocation,
                 syntax: if is_shell {
@@ -573,7 +574,8 @@ pub fn system_prompt_message(view: &PromptView, max_lines: usize) -> Result<Stri
 /// What the prompt says, before it is laid out.
 fn prompt_text(view: &PromptView) -> String {
     let mut body = String::new();
-    for s in &view.sections {
+    // A comparison is not what runs; a note says it is in the window.
+    for s in view.sections.iter().filter(|s| !s.comparison) {
         body.push_str(&format!("\n{}:\n", ascii(&cut(&s.title, 80))));
         // How it runs (each argument), then what it runs.
         for l in &s.invocation {
@@ -887,6 +889,7 @@ fn run_section(argv: &[String], program: &str) -> Section {
         let mut invocation = argv_lines(argv, 2, "(the script below)");
         invocation.extend(resolved);
         return Section {
+            comparison: false,
             title: Shown::fixed("shell script"),
             invocation,
             syntax: Syntax::Shell,
@@ -895,6 +898,7 @@ fn run_section(argv: &[String], program: &str) -> Section {
         };
     }
     Section {
+        comparison: false,
         title: Shown::fixed("command"),
         invocation: resolved.into_iter().collect(),
         syntax: Syntax::Shell,
@@ -1242,6 +1246,7 @@ fn install_section(
         (String::from_utf8_lossy(content).into_owned(), Syntax::Plain)
     };
     Section {
+        comparison: false,
         title: display_line(&format!("new {dest}"), 120),
         invocation,
         syntax,
@@ -1267,6 +1272,7 @@ fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
         diff
     };
     Some(Section {
+        comparison: false,
         title: Shown::fixed("changes"),
         invocation: vec![Shown::fixed(
             "unified diff: lines starting with - are removed, + are added",
@@ -1275,6 +1281,83 @@ fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
         formatted: verbatim(&raw),
         raw,
     })
+}
+
+/// Everything that makes a request what it is, as lines to compare with
+/// the next one: the kind, working directory, limits, variables, then the
+/// argv, script or file.
+pub fn comparable_text(req: &Request) -> String {
+    let mut t = String::new();
+    let (kind, body) = match &req.action {
+        Action::Run { argv } => ("run", argv.join("\n")),
+        Action::Script { content, args, .. } => (
+            "script",
+            format!(
+                "args: {}\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(content)
+            ),
+        ),
+        Action::Install { dest, content, .. } => (
+            "install",
+            format!("to: {dest}\n{}", String::from_utf8_lossy(content)),
+        ),
+    };
+    t.push_str(&format!("{kind} in {}\n", req.cwd));
+    t.push_str(&format!(
+        "writes: {}\n",
+        req.write
+            .as_ref()
+            .map_or("anywhere".into(), |w| w.join(" "))
+    ));
+    t.push_str(&format!(
+        "network: {}\n",
+        if req.no_net { "no" } else { "yes" }
+    ));
+    for (k, v) in &req.env {
+        t.push_str(&format!("env: {k}={v}\n"));
+    }
+    t.push_str(&body);
+    if !t.ends_with('\n') {
+        t.push('\n');
+    }
+    t
+}
+
+/// The changes from `before` (a request shown at `at`) to `now`, as a
+/// section for comparison, when the two are alike: at most half the lines
+/// (and at least a few) changed. Very different requests are not
+/// compared, and identical ones need no diff. Returns the section and how
+/// many lines changed.
+pub fn comparison_section(before: &str, now: &str, at: &str) -> Option<(Section, usize)> {
+    if before == now {
+        return None;
+    }
+    let diff = similar::TextDiff::from_lines(before, now);
+    let changed = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() != similar::ChangeTag::Equal)
+        .count();
+    let total = before.lines().count().max(now.lines().count());
+    if changed > (total / 2).max(4) {
+        return None;
+    }
+    let raw = diff
+        .unified_diff()
+        .context_radius(3)
+        .header("before", "now")
+        .to_string();
+    let section = Section {
+        comparison: true,
+        title: display_line(&format!("changes since {at}"), 40),
+        invocation: vec![Shown::fixed(
+            "not what runs: how this request differs from the one shown before (- before, + now)",
+        )],
+        syntax: Syntax::Diff,
+        formatted: verbatim(&raw),
+        raw,
+    };
+    Some((section, changed))
 }
 
 fn write_snapshot(dir: &Path, file: &Path, content: &[u8]) -> Result<(), String> {
@@ -1798,6 +1881,7 @@ mod tests {
         // never dropped. Lines of nothing but spaces are left out; other
         // whitespace is a visible token.
         v.sections = vec![Section {
+            comparison: false,
             title: Shown::fixed("job.py"),
             invocation: vec![],
             syntax: Syntax::Plain,
@@ -1848,6 +1932,43 @@ mod tests {
         assert!(lay_out(&"W".repeat(30)).1 >= 2);
         // Lines measured to fit in the VM (Ubuntu font) count as one.
         assert_eq!(lay_out("from: peekexec (pid 8213), not a registered").1, 1);
+    }
+
+    #[test]
+    fn alike_requests_are_compared_different_ones_not() {
+        let run = |argv: &[&str]| {
+            comparable_text(&req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            }))
+        };
+        let a = run(&["apt-get", "install", "-y", "jq"]);
+        let (s, changed) =
+            comparison_section(&a, &run(&["apt-get", "install", "-y", "jq2"]), "10:00").unwrap();
+        assert_eq!(changed, 2, "{}", s.raw);
+        assert!(s.comparison && s.title.as_str() == "changes since 10:00");
+        assert!(comparison_section(&a, &a, "10:00").is_none(), "identical");
+        let other = run(&[
+            "systemctl",
+            "restart",
+            "nginx",
+            "--now",
+            "-q",
+            "x",
+            "y",
+            "z",
+        ]);
+        assert!(
+            comparison_section(&a, &other, "10:00").is_none(),
+            "unrelated"
+        );
+        // The limits and variables are part of what is compared.
+        let mut r = req(Action::Run {
+            argv: vec!["true".into()],
+        });
+        let before = comparable_text(&r);
+        r.write = Some(vec!["/etc".into()]);
+        let (s, _) = comparison_section(&before, &comparable_text(&r), "10:00").unwrap();
+        assert!(s.raw.contains("+writes: /etc"), "{}", s.raw);
     }
 
     #[test]
@@ -1952,6 +2073,7 @@ mod tests {
         }
         // In the command text: `..` too; program directories only as targets.
         let section = |raw: &str| Section {
+            comparison: false,
             title: Shown::fixed("t"),
             invocation: vec![],
             syntax: Syntax::Shell,

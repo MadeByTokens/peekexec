@@ -52,6 +52,9 @@ const ADMIN_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
 const SELF_EXE: &str = "/proc/self/exe";
 /// Requests a user may have waiting at once; more are refused.
 const MAX_PENDING_PER_USER: usize = 3;
+/// A request within this long of the one a user saw before is compared
+/// with it.
+const COMPARE_WINDOW: Duration = Duration::from_secs(600);
 /// A dialog appearing this soon after the previous one closed gets a longer
 /// keystroke guard and a note, against reflexive approval.
 const BACK_TO_BACK: Duration = Duration::from_secs(10);
@@ -67,11 +70,22 @@ type DenialKey = (u32, String, String);
 /// verified.
 type Denial = (Instant, String, bool);
 
+#[derive(Clone)]
+struct LastShown {
+    at: Instant,
+    /// When, as the dialog says it (`HH:MM`).
+    hhmm: String,
+    /// [`prepare::comparable_text`] of it.
+    text: String,
+}
+
 pub struct Daemon {
     opts: Options,
     platform: Platform,
     requests: Mutex<HashMap<String, Arc<Entry>>>,
     denials: Mutex<HashMap<DenialKey, Denial>>,
+    /// The request each user saw last, to compare the next one with.
+    last_shown: Mutex<HashMap<u32, LastShown>>,
     /// One dialog on screen at a time.
     prompt_lock: Mutex<()>,
     /// When the last dialog closed.
@@ -132,6 +146,7 @@ impl Daemon {
             platform,
             requests: Mutex::default(),
             denials: Mutex::default(),
+            last_shown: Mutex::default(),
             prompt_lock: Mutex::new(()),
             last_prompt: Mutex::new(None),
             connections: Mutex::default(),
@@ -640,6 +655,7 @@ impl Daemon {
             display_verified: display.verified,
             env: Vec::new(),
             sections: vec![Section {
+                comparison: false,
                 title: Shown::fixed("agent session"),
                 invocation: Vec::new(),
                 syntax: Syntax::Plain,
@@ -844,11 +860,15 @@ impl Daemon {
                 prepared.view.enter_approves = false;
                 prepared.view.notes.insert(0, note);
             }
+            self.compare_with_last(peer.uid, request, &mut prepared.view);
             let d = if cancel.load(Ordering::SeqCst) {
                 Ok(Decision::Cancelled)
             } else {
                 self.decide(&prepared, &display, &user, peer, cancel)
             };
+            if d.is_ok() {
+                self.remember_shown(peer.uid, request);
+            }
             *self.last_prompt.lock().unwrap() = Some(Instant::now());
             d
         };
@@ -986,6 +1006,54 @@ impl Daemon {
                 ..base
             },
         }
+    }
+
+    /// A request that follows closely on one the user saw gets the changes
+    /// since it, so "the same again, with a fix" cannot slip in another
+    /// change unseen: a section after the request's own (not counted as
+    /// what runs) and a note, which the desktop prompt carries too.
+    fn compare_with_last(&self, uid: u32, request: &Request, view: &mut PromptView) {
+        let before = self
+            .last_shown
+            .lock()
+            .unwrap()
+            .get(&uid)
+            .filter(|b| b.at.elapsed() < COMPARE_WINDOW)
+            .cloned();
+        let Some(before) = before else {
+            return;
+        };
+        let now = prepare::comparable_text(request);
+        if let Some((section, changed)) =
+            prepare::comparison_section(&before.text, &now, &before.hhmm)
+        {
+            view.sections.push(section);
+            view.enter_approves = false;
+            view.notes.insert(
+                0,
+                display_line(
+                    &format!(
+                        "Differs in {changed} line{} from the request you saw at {}: the \
+                         changes are on the \"changes since {}\" tab of peekexec's window.",
+                        if changed == 1 { "" } else { "s" },
+                        before.hhmm,
+                        before.hhmm
+                    ),
+                    300,
+                ),
+            );
+        }
+    }
+
+    fn remember_shown(&self, uid: u32, request: &Request) {
+        self.last_shown.lock().unwrap().insert(
+            uid,
+            LastShown {
+                at: Instant::now(),
+                hhmm: hhmm(std::time::SystemTime::now()),
+                text: prepare::comparable_text(request),
+            },
+        );
     }
 
     /// How many more requests of this user wait behind request `id`, as a
@@ -1390,6 +1458,7 @@ mod tests {
             display_verified: false,
             env: vec![],
             sections: vec![Section {
+                comparison: false,
                 title: Shown::fixed("job.sh"),
                 invocation: vec![],
                 syntax: Syntax::Shell,
@@ -1436,6 +1505,46 @@ mod tests {
             .filter(|&g| g != gid)
             .collect();
         assert!(!is_admin(&user(others)));
+    }
+
+    #[test]
+    fn a_close_follow_up_is_compared_with_what_was_shown() {
+        let d = daemon(None, false);
+        let run = |argv: &[&str]| Request {
+            action: Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            },
+            why: None,
+            write: None,
+            no_net: false,
+            env: Default::default(),
+            cwd: "/".into(),
+            timeout_secs: 60,
+        };
+        let mut v = view(3);
+        // Nothing shown before: nothing to compare.
+        d.compare_with_last(1000, &run(&["apt-get", "install", "-y", "jq"]), &mut v);
+        assert_eq!(v.sections.len(), 1);
+        d.remember_shown(1000, &run(&["apt-get", "install", "-y", "jq"]));
+        // "The same again" with one more argument: compared.
+        let mut v = view(3);
+        let next = run(&["apt-get", "install", "-y", "jq", "netcat-openbsd"]);
+        d.compare_with_last(1000, &next, &mut v);
+        let diff = v.sections.last().unwrap();
+        assert!(
+            diff.comparison && diff.raw.contains("+netcat-openbsd"),
+            "{}",
+            diff.raw
+        );
+        assert!(v.notes[0].starts_with("Differs in "), "{:?}", v.notes);
+        assert!(!v.enter_approves);
+        // Not in the desktop prompt's body, and not counted as findings.
+        let m = prepare::system_prompt_message(&v, prepare::PROMPT_SCREEN_LINES).unwrap();
+        assert!(!m.contains("+netcat") && m.contains("Differs in"), "{m}");
+        // Another user's history is not compared.
+        let mut v = view(3);
+        d.compare_with_last(1001, &next, &mut v);
+        assert_eq!(v.sections.len(), 1);
     }
 
     #[test]

@@ -325,6 +325,12 @@ has a seat and is its active one"), never the absence of a warning sign
   preview a request until nothing on the list is flagged. A dialog
   arriving right after another gets a longer input guard, and the daemon
   refuses an Approve that comes sooner than the dialog allows one.
+- **"The same again, with a fix"** is where a second change slips in. A
+  request within 10 minutes of one the user saw, and alike (at most half
+  its lines changed), comes with the changes since that one: a tab in the
+  dialog marked as not what runs, and a note (in the desktop prompt too)
+  that says how many lines differ. When others wait behind a request, the
+  dialog says how many. Either turns Enter off.
 - **The one-hour refusal of a denied request** is a courtesy for well-behaved
   agents (any change makes a new request), not a control. It replays the
   reason only to the requester it was given to (the registered agent
