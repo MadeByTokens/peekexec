@@ -87,9 +87,10 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
      Commands run in / (relative paths resolve there) unless you pass --cwd DIR;
      a DIR you own is flagged to the human, because programs load code from it.
    - Where peekexec cannot verify its own window (Wayland), the human approves
-     in the desktop's password dialog, which must hold the whole request: at
-     most 12 lines of arguments and 12 of content per part. Split longer
-     scripts into steps. Where the desktop has no dialog peekexec can trust
+     in the desktop's password dialog, which must hold the whole request and
+     does not scroll: on a small screen about 22 lines of 45 characters, the
+     daemon's facts and warnings included. Preview says if a request does not
+     fit; split it into short steps. Where the desktop has no dialog peekexec can trust
      (not GNOME, or the polkit action is missing), requests are refused unless
      an administrator allowed the unverified window; tell the user.
 

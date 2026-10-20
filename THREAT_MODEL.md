@@ -221,11 +221,19 @@ has a seat and is its active one"), never the absence of a warning sign
    shows a summary written by the daemon.
    The daemon's facts come first: the limits, where the request came from,
    the working directory and every warning. Then the command in full: every
-   argument and every line of content, long lines wrapped rather than cut,
-   indentation kept (as a count), then the environment. The prompt does not
-   scroll, so it holds at most 12 lines per part of a section; a request
-   that does not fit is refused on this path rather than approved with part
-   of it visible only in the window that cannot be verified. The prompt has
+   argument and every line of content, indentation kept (as a count: GNOME
+   centres the text), then the environment. Nothing is cut. The prompt does
+   not scroll, so the daemon lays the message out as GNOME draws it
+   (measured in the VM: about 45 `x` widths per line, wrapped at spaces,
+   `-` and `/`, each character counted at its widest in the Ubuntu and
+   Cantarell fonts, a word wider than a line broken and marked `⟨+⟩` so it
+   is not clipped) and counts every screen line. The whole message must fit
+   in 22 of them, which keeps the password field on a screen 768 pixels
+   tall (root can raise it with `--prompt-lines` for larger screens). A
+   request that does not fit is refused on this path rather than approved
+   with part of it below the screen's edge or visible only in the window
+   that cannot be verified. That leaves room for a few short lines of
+   script; longer work is split into steps. The prompt has
    no colour or markers, so every character outside printable ASCII is
    written as `⟨U+XXXX⟩`, runs of spaces collapse into a count, and the
    number of suspicious characters comes first. The summary is

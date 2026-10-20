@@ -474,46 +474,113 @@ pub fn use_system_prompt(view: &mut PromptView) {
     view.notes.insert(0, Shown::fixed(SYSTEM_PROMPT_NOTE_TEXT));
 }
 
-/// Lines the desktop's prompt shows per part of a section (the invocation,
-/// the content), and characters per line: longer lines wrap, they are
-/// never cut. The prompt does not scroll, so this is all it can hold.
-pub const PROMPT_LINES: usize = 12;
-const PROMPT_WIDTH: usize = 120;
+/// What GNOME Shell's polkit dialog can show, measured on GNOME Shell 46
+/// (Ubuntu 24.04) at 1024×768: its text is 44 to 47 widths of an `x` wide,
+/// wrapped at spaces and after `-` and `/`, and clipped (not wrapped)
+/// where a word is wider; the dialog does not scroll. Title, avatar,
+/// password field and buttons take 361 pixels and each line 18, so on a
+/// screen 768 pixels tall 22 lines fit with the password field in view
+/// (39 at 1080). Root can change it (`--prompt-lines`). Counted
+/// against a narrower line, with each character as wide as it is in the
+/// wider of the Ubuntu and Cantarell fonts.
+pub const PROMPT_SCREEN_LINES: usize = 22;
+/// Tenths of the width of an `x`.
+const PROMPT_WIDTH: u32 = 420;
+
+/// Widths of `' '..='~'` in tenths of an `x`: the wider of Ubuntu and
+/// Cantarell (the fonts of Ubuntu's and of upstream GNOME's shell),
+/// rounded up.
+const GLYPH: [u8; 95] = [
+    5, 6, 9, 14, 12, 20, 14, 5, 7, 7, 10, 12, 6, 9, 6, 8, 12, 11, 11, 11, 12, 11, 12, 11, 12, 12,
+    6, 6, 12, 12, 12, 9, 20, 13, 13, 13, 14, 12, 11, 15, 15, 6, 10, 13, 11, 18, 15, 16, 12, 16, 13,
+    11, 12, 14, 13, 20, 13, 12, 13, 7, 8, 7, 12, 10, 10, 11, 12, 10, 12, 11, 8, 12, 12, 5, 5, 11,
+    6, 18, 12, 12, 12, 12, 8, 10, 8, 12, 10, 16, 10, 10, 10, 8, 6, 8, 12,
+];
+
+fn glyph(c: char) -> u32 {
+    match c {
+        ' '..='~' => u32::from(GLYPH[c as usize - 32]),
+        // The daemon's own `⟨` `⟩` `·` `…` `⚠` (at most 2 widths), the only
+        // characters outside ASCII the prompt holds.
+        _ => 20,
+    }
+}
+
+/// Marks the start of a piece of a word the daemon broke because it is
+/// wider than a line (GNOME would clip it). Requester text cannot hold `⟨`.
+const BROKEN: &str = "⟨+⟩";
+
+/// `text` laid out as the prompt draws it: each line broken where GNOME
+/// would break it, and a word wider than a line broken by the daemon
+/// (marked [`BROKEN`]). Returns the text to send and the number of screen
+/// lines it takes. Breaking only at spaces, `-` and `/`, and with each
+/// character at its widest, it counts at least as many lines as GNOME
+/// draws.
+fn lay_out(text: &str) -> (String, usize) {
+    let mut out = String::new();
+    let mut lines = 0;
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        lines += 1;
+        let mut used = 0;
+        // Pieces that end where GNOME may break: after a space, `-` or `/`.
+        for piece in line.split_inclusive([' ', '-', '/']) {
+            let width: u32 = piece.chars().map(glyph).sum();
+            if used > 0 && used + width > PROMPT_WIDTH {
+                // GNOME moves the piece to a line of its own.
+                lines += 1;
+                used = 0;
+            }
+            if width <= PROMPT_WIDTH - used {
+                out.push_str(piece);
+                used += width;
+                continue;
+            }
+            // Wider than a line: break it here, so nothing is clipped.
+            for c in piece.chars() {
+                if used + glyph(c) > PROMPT_WIDTH {
+                    out.push('\n');
+                    out.push_str(BROKEN);
+                    lines += 1;
+                    used = BROKEN.chars().map(glyph).sum();
+                }
+                out.push(c);
+                used += glyph(c);
+            }
+        }
+    }
+    (out, lines)
+}
 
 /// The text the desktop's prompt shows: the decisive facts on their own,
 /// since a decoy window could sit next to it. On that path it is the only
 /// view the human can trust, so it must hold everything root runs (R4):
-/// `Err` says how many lines would not fit, and the request is refused
-/// rather than approved with parts of it shown only in the window that
-/// cannot be verified.
-pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
-    let mut omitted = 0;
-    let mut add = |lines: Vec<String>, indent: &str, body: &mut String| {
-        omitted += lines.len().saturating_sub(PROMPT_LINES);
-        for l in lines {
-            body.push_str(&format!("{indent}{l}\n"));
-        }
-    };
+/// It may take at most `max_lines` screen lines (every line of it counts,
+/// as drawn: see [`lay_out`]); `Err` is the refusal, and the request is
+/// refused rather than approved with parts of it below the screen's edge
+/// or shown only in the window that cannot be verified.
+pub fn system_prompt_message(view: &PromptView, max_lines: usize) -> Result<String, String> {
+    let (text, lines) = lay_out(&prompt_text(view));
+    if lines > max_lines {
+        return Err(too_long_for_system_prompt(lines - max_lines, max_lines));
+    }
+    Ok(text)
+}
+
+/// What the prompt says, before it is laid out.
+fn prompt_text(view: &PromptView) -> String {
     let mut body = String::new();
     for s in &view.sections {
         body.push_str(&format!("\n{}:\n", ascii(&cut(&s.title, 80))));
-        // How it runs (each argument), then what it runs: both counted.
-        let invocation = s
-            .invocation
-            .iter()
-            .flat_map(|l| wrap(&ascii(l), PROMPT_WIDTH))
-            .collect();
-        add(invocation, "  ", &mut body);
-        let lines = s
-            .formatted
-            .iter()
-            .filter_map(prompt_line)
-            .flat_map(|l| wrap(&l, PROMPT_WIDTH))
-            .collect();
-        add(lines, "    ", &mut body);
-    }
-    if omitted > 0 {
-        return Err(omitted);
+        // How it runs (each argument), then what it runs.
+        for l in &s.invocation {
+            body.push_str(&format!("  {}\n", ascii(l)));
+        }
+        for l in s.formatted.iter().filter_map(prompt_line) {
+            body.push_str(&format!("    {l}\n"));
+        }
     }
     let mut m = String::new();
     m.push_str(match view.kind {
@@ -533,7 +600,7 @@ pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
         let facts: Vec<String> = view
             .summary(0)
             .into_iter()
-            .map(|(_, t)| ascii(&cut(&t, 160)))
+            .map(|(_, t)| ascii(&t))
             .collect();
         m.push_str(&format!("{}\n", facts.join(" · ")));
     }
@@ -555,10 +622,7 @@ pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
             })
             .unwrap_or_default(),
     };
-    m.push_str(&format!(
-        "from: {from}\nin: {}\n",
-        ascii(&cut(&view.cwd, 120))
-    ));
+    m.push_str(&format!("from: {from}\nin: {}\n", ascii(&view.cwd)));
     if let Provenance::InSession { others, .. } = &view.provenance {
         if !others.is_empty() {
             let others: Vec<String> = others.iter().map(|o| ascii(&cut(o, 40))).collect();
@@ -574,7 +638,7 @@ pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
         .filter(|n| !n.starts_with(SYSTEM_PROMPT_NOTE));
     // All of them: each kind of note appears at most once.
     for n in warnings {
-        m.push_str(&format!("⚠ {}\n", ascii(&cut(n, 300))));
+        m.push_str(&format!("⚠ {}\n", ascii(n)));
     }
     m.push_str(&body);
     // Every variable, after the command: the allowlist bounds how many
@@ -593,16 +657,17 @@ pub fn system_prompt_message(view: &PromptView) -> Result<String, usize> {
         "request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
-    Ok(m)
+    m
 }
 
-/// Why a request is refused when [`system_prompt_message`] cannot hold it.
-pub fn too_long_for_system_prompt(omitted: usize) -> String {
+/// Why a request is refused when the prompt cannot hold it.
+fn too_long_for_system_prompt(over: usize, max_lines: usize) -> String {
     format!(
         "refused: the desktop's password dialog is the only view of this request that can be \
-         trusted here, and it holds {PROMPT_LINES} lines per part; {omitted} lines of this \
-         request would not be in it. Split it into smaller steps (several short scripts, or \
-         `peekexec install` for each file)"
+         trusted here, and it does not scroll: it shows {max_lines} lines of about \
+         45 characters, and this request needs {over} more. Split it into smaller steps \
+         (short scripts of a few lines, or `peekexec install` for each file); each warning \
+         takes lines too (a working directory you own is one)"
     )
 }
 
@@ -616,7 +681,16 @@ fn prompt_line(l: &peekexec_core::format::Line) -> Option<String> {
     if text.chars().all(|c| c == ' ' || c == '\t') {
         return None;
     }
-    Some(ascii(&display_line(text, usize::MAX)))
+    // GNOME centres the prompt's text, so even one leading space would not
+    // show: leading spaces are always a count.
+    let body = text.trim_start_matches(' ');
+    let lead = text.len() - body.len();
+    let lead = if lead > 0 {
+        format!("⟨{lead} space{}⟩", if lead == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
+    Some(format!("{lead}{}", ascii(&display_line(body, usize::MAX))))
 }
 
 /// At most `max` characters of already-escaped text.
@@ -659,15 +733,6 @@ fn ascii(s: &str) -> String {
     }
     flush(&mut out, &mut spaces);
     out
-}
-
-/// `s` in pieces of at most `width` characters.
-fn wrap(s: &str, width: usize) -> Vec<String> {
-    let chars: Vec<char> = s.chars().collect();
-    chars
-        .chunks(width.max(1))
-        .map(|c| c.iter().collect())
-        .collect()
 }
 
 pub struct User {
@@ -1307,7 +1372,7 @@ mod tests {
             .collect();
         assert_eq!(&lines[2..5], ["argv[2] rm", "argv[3] -rf", "argv[4] /"]);
         assert!(lines[5].starts_with("the requester calls the script"));
-        let m = system_prompt_message(&p.view).unwrap();
+        let m = prompt_text(&p.view);
         assert!(m.contains("  argv[4] /\n"), "{m}");
         assert!(!p.view.enter_approves || p.view.findings() == 0);
 
@@ -1373,7 +1438,7 @@ mod tests {
                 "⟨U+0041⟩".into(),
             ],
         });
-        let m = system_prompt_message(&prepare_for_tests(&r).view).unwrap();
+        let m = prompt_text(&prepare_for_tests(&r).view);
         assert!(m.contains("g⟨U+0456⟩thub"), "{m}");
         assert!(m.contains("a⟨U+E0041⟩b"), "{m}");
         // Escaped once, and a typed token is not a token.
@@ -1428,7 +1493,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         let line = format!("writes {}", dest.display());
         assert_eq!(p.view.sections[0].invocation[0].as_str(), line);
-        let m = system_prompt_message(&p.view).unwrap();
+        let m = prompt_text(&p.view);
         assert!(m.contains(".rules"), "{m}");
     }
 
@@ -1555,7 +1620,7 @@ mod tests {
         use_system_prompt(&mut v);
         assert_eq!(v.approval, Approval::SystemPrompt);
         assert!(!v.wants_password);
-        let m = system_prompt_message(&v).unwrap();
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.starts_with("peekexec: run this as root?"));
         assert!(m.contains("    a &&"), "{m}");
         assert!(m.contains("    f $("), "all six lines fit: {m}");
@@ -1570,7 +1635,7 @@ mod tests {
             Shown::fixed("DEBIAN_FRONTEND"),
             Shown::fixed("noninteractive"),
         )];
-        let m = system_prompt_message(&v).unwrap();
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.contains("\nenv: DEBIAN_FRONTEND=noninteractive\n"), "{m}");
         // The daemon's facts and warnings come before anything the
         // requester sent: the command, then its variables.
@@ -1587,8 +1652,10 @@ mod tests {
             &["sh".into(), "-c".into(), script],
             "/usr/bin/dash",
         )];
-        assert_eq!(system_prompt_message(&v), Err(18));
-        assert!(too_long_for_system_prompt(18).contains("18 lines"));
+        let e = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap_err();
+        assert!(e.starts_with("refused") && e.contains("more"), "{e}");
+        // A larger screen, set by root, holds more.
+        assert!(system_prompt_message(&v, 60).is_ok());
 
         // A long line wraps; nothing is cut off.
         let long = format!("apt-get install -y {}evil-tail", "pkg ".repeat(60));
@@ -1596,15 +1663,16 @@ mod tests {
             &["sh".into(), "-c".into(), long],
             "/usr/bin/dash",
         )];
-        let m = system_prompt_message(&v).unwrap();
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.contains("evil-tail"), "{m}");
 
         // Every warning is listed.
         v.notes = (0..6)
             .map(|i| display_line(&format!("warning {i}"), 100))
             .collect();
-        let m = system_prompt_message(&v).unwrap();
+        let m = prompt_text(&v);
         assert!(m.contains("⚠ warning 5"), "{m}");
+        v.notes.clear();
 
         // A script's indentation is part of what runs: shown as a count,
         // never dropped. Lines of nothing but spaces are left out; other
@@ -1616,7 +1684,7 @@ mod tests {
             formatted: verbatim("if ok:\n    guarded()\n   \nunguarded()\n\u{a0}x\n\tr\n"),
             raw: String::new(),
         }];
-        let m = system_prompt_message(&v).unwrap();
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.contains("\n    ⟨4 spaces⟩guarded()\n"), "{m}");
         assert!(m.contains("\n    unguarded()\n"), "{m}");
         assert!(m.contains("\n    ⟨U+00A0⟩x\n"), "{m}");
@@ -1630,9 +1698,36 @@ mod tests {
             &["sh".into(), "-c".into(), code.into()],
             "/usr/bin/dash",
         )];
-        let m = system_prompt_message(&v).unwrap();
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.contains("\n    ⟨4 spaces⟩guarded()\n"), "{m}");
         assert!(m.contains("\n    unguarded()\n"), "{m}");
+        // Centred text hides short indentation: it is counted too.
+        v.sections[0].formatted = verbatim("if ok; then\n  guarded\nfi\n");
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
+        assert!(m.contains("\n    ⟨2 spaces⟩guarded\n"), "{m}");
+    }
+
+    #[test]
+    fn the_prompt_is_laid_out_as_gnome_draws_it() {
+        let width = |l: &str| l.chars().map(glyph).sum::<u32>();
+        // Short lines: one screen line each.
+        assert_eq!(lay_out("a\nb\n").1, 3);
+        // Words wrap at spaces, `-` and `/`; every screen line fits.
+        let (_, n) = lay_out(&"word ".repeat(40));
+        assert!(n >= 5, "{n}");
+        // A word wider than a line is broken, marked, and never clipped.
+        let (text, n) = lay_out(&"x".repeat(200));
+        assert!(text.lines().all(|l| width(l) <= PROMPT_WIDTH), "{text}");
+        assert!(
+            text.lines().skip(1).all(|l| l.starts_with(BROKEN)),
+            "{text}"
+        );
+        assert_eq!(n, text.lines().count());
+        assert_eq!(text.replace(&format!("\n{BROKEN}"), ""), "x".repeat(200));
+        // The widest characters count as such.
+        assert!(lay_out(&"W".repeat(30)).1 >= 2);
+        // Lines measured to fit in the VM (Ubuntu font) count as one.
+        assert_eq!(lay_out("from: peekexec (pid 8213), not a registered").1, 1);
     }
 
     #[test]

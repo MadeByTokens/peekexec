@@ -31,6 +31,14 @@ struct Args {
     /// display could read the password; every such dialog says so.
     #[arg(long)]
     allow_unverified_display: bool,
+    /// Screen lines GNOME's password dialog may take for one request. It
+    /// does not scroll, so a request that needs more is refused there. The
+    /// default fits a screen 768 pixels tall; 29 fits 900, 39 fits 1080, 59 fits 1440.
+    /// Set it only as high as your smallest screen allows: lines past its
+    /// edge are lines you approve without seeing.
+    #[arg(long, default_value_t = peekexecd::prepare::PROMPT_SCREEN_LINES as u16,
+          value_parser = clap::value_parser!(u16).range(10..=200))]
+    prompt_lines: u16,
 }
 
 fn main() -> ExitCode {
@@ -99,6 +107,7 @@ fn run(args: Args) -> Result<(), String> {
         dialog,
         snapshot_root,
         allow_unverified_display: args.allow_unverified_display,
+        prompt_lines: usize::from(args.prompt_lines),
         test_approver,
     };
     let daemon = Arc::new(Daemon::new(opts, platform::current(&args.pam_service)));

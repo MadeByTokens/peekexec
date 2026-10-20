@@ -36,6 +36,8 @@ pub struct Options {
     /// Let the dialog ask for the password on a display that cannot be
     /// verified, when the desktop has no prompt that can be trusted.
     pub allow_unverified_display: bool,
+    /// Screen lines the desktop's prompt may take (it does not scroll).
+    pub prompt_lines: usize,
     /// Value of PEEKEXEC_TEST_APPROVER (test builds only).
     pub test_approver: Option<String>,
 }
@@ -886,8 +888,10 @@ impl Daemon {
                     subject: &peer.process,
                     uid: peer.uid,
                     // Checked to fit when the approval path was chosen.
-                    message: prepare::system_prompt_message(&prepared.view)
-                        .map_err(prepare::too_long_for_system_prompt)?,
+                    message: prepare::system_prompt_message(
+                        &prepared.view,
+                        self.opts.prompt_lines,
+                    )?,
                 }
             }
             _ => prompt::Approver::Password {
@@ -919,9 +923,7 @@ impl Daemon {
             Some(p) => match p.usable_for(&peer.process, peer.uid) {
                 Ok(()) => {
                     prepare::use_system_prompt(view);
-                    return prepare::system_prompt_message(view)
-                        .map(drop)
-                        .map_err(prepare::too_long_for_system_prompt);
+                    return prepare::system_prompt_message(view, self.opts.prompt_lines).map(drop);
                 }
                 Err(why) => why,
             },
@@ -1257,6 +1259,7 @@ mod tests {
             dialog: PathBuf::from("/nonexistent"),
             snapshot_root: PathBuf::from("/nonexistent"),
             allow_unverified_display: allow,
+            prompt_lines: prepare::PROMPT_SCREEN_LINES,
             test_approver: None,
         };
         Daemon::new(opts, platform)
