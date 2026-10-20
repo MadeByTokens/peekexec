@@ -299,7 +299,11 @@ has a seat and is its active one"), never the absence of a warning sign
 - **A write scope is not containment.** A udev rule, systemd unit, cron entry,
   sudoers fragment or profile script can run commands as root later, and so
   can a file put in `/usr/bin`, `/usr/lib` or `/root`; targets under such
-  paths are flagged (a denylist: it warns, it does not decide).
+  paths are flagged (a denylist: it warns, it does not decide). So are
+  commands that give root beyond the request or run again later: adding a
+  user to a root-equivalent group (docker, lxd, sudo, wheel, disk...), a
+  setuid or setgid mode, `setcap`, `systemd-run`, `at`, `crontab`,
+  `systemctl enable`.
 - **Formatted is a rendering.** Its line texts are exact slices of the
   original, but indentation and colours are hints and can mislead; Raw is the
   ground truth.

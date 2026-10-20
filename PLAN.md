@@ -266,7 +266,7 @@ the default wherever the display cannot be verified.
       does and mentions `display_verified`; denials stored per requester.
 - [x] B4 Daemon refuses to start when the dialog or helper is readable by
       others.
-- [ ] B5 Flags for lasting root: group changes, setuid chmod, setcap,
+- [x] B5 Flags for lasting root: group changes, setuid chmod, setcap,
       systemd-run, at/batch, crontab, `systemctl enable`.
 - [ ] B6 Facts say the output goes back to the requester.
 - [ ] B7a Results expire from when they finished.

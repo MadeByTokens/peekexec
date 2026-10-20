@@ -280,6 +280,7 @@ pub fn prepare(
     };
 
     notes.extend(sensitive_targets(&sections, &enforced));
+    notes.extend(lasting_root(&sections));
     if ctx.dev {
         notes.push(format!(
             "DEVELOPMENT MODE: this runs as {}, not as root.",
@@ -1003,6 +1004,101 @@ const SENSITIVE_WRITES: &[&str] = &[
     "/root",
     "/etc/default",
 ];
+
+/// Groups whose members are root in all but name (they can start a root
+/// container, read the raw disk, run a VM with host devices, sudo).
+const ROOT_GROUPS: &[&str] = &[
+    "root", "sudo", "wheel", "admin", "docker", "lxd", "incus", "disk", "libvirt", "kvm", "shadow",
+];
+
+/// Commands, found where a shell would start one (the first word of a
+/// line, or after `;`, `&`, `|`, `(`, `` ` ``, skipping `sudo`, `env`,
+/// `nohup` and the like, and `VAR=value`), that give root beyond this
+/// request: a membership, a setuid bit, a capability, or something that
+/// runs again, or keeps running, after the request ends. A denylist: it
+/// warns, it does not decide. One note for all of them.
+fn lasting_root(sections: &[Section]) -> Option<String> {
+    const SKIP: &[&str] = &[
+        "sudo", "doas", "env", "nohup", "nice", "ionice", "time", "timeout", "exec", "command",
+        "builtin", "then", "do", "else", "!", "{",
+    ];
+    let mut hits: Vec<String> = Vec::new();
+    let mut hit = |h: String| {
+        if !hits.contains(&h) {
+            hits.push(h);
+        }
+    };
+    for s in sections {
+        for command in s.raw.split(['\n', ';', '&', '|', '(', ')', '`']) {
+            let words: Vec<String> = command
+                .split_whitespace()
+                .map(|w| w.replace(['\'', '"', '\\'], ""))
+                .collect();
+            let start = words.iter().position(|w| {
+                !SKIP.contains(&w.as_str())
+                    && !w.contains('=')
+                    && !w.starts_with('-')
+                    && !w.chars().all(|c| c.is_ascii_digit())
+            });
+            let Some(start) = start else {
+                continue;
+            };
+            let program = basename(&words[start]);
+            let args = &words[start + 1..];
+            match program {
+                "usermod" | "gpasswd" | "adduser" | "useradd" | "addgroup" => {
+                    for g in args.iter().flat_map(|a| a.split(',')) {
+                        if ROOT_GROUPS.contains(&g) {
+                            hit(format!("membership of group {g} ({program})"));
+                        }
+                    }
+                }
+                "chmod" if args.iter().any(|a| setuid_mode(a)) => {
+                    hit("a setuid or setgid bit (chmod)".into());
+                }
+                "install" if args.iter().any(|a| setuid_mode(a)) => {
+                    hit("a setuid or setgid bit (install -m)".into());
+                }
+                "setcap" => hit("file capabilities (setcap)".into()),
+                "systemd-run" => hit("systemd-run (keeps running after this request)".into()),
+                "at" | "batch" => hit(format!("{program} (runs later)")),
+                "crontab" => hit("crontab (runs later, repeatedly)".into()),
+                "systemctl"
+                    if args
+                        .iter()
+                        .any(|a| matches!(a.as_str(), "enable" | "link" | "add-wants")) =>
+                {
+                    hit("systemctl enable (runs at every boot)".into());
+                }
+                _ => {}
+            }
+        }
+    }
+    (!hits.is_empty()).then(|| {
+        format!(
+            "Gives root beyond this request, or runs again as root after it: {}.",
+            hits.join(", ")
+        )
+    })
+}
+
+/// A `chmod`/`install -m` mode that sets setuid or setgid: octal with a
+/// leading 2, 4, 6 or 7 among four digits (`4755`), or symbolic with `s`
+/// (`u+s`, `g=rwxs`, `+s`).
+fn setuid_mode(a: &str) -> bool {
+    let a = a.strip_prefix("-m").unwrap_or(a);
+    if a.len() >= 4 && a.chars().all(|c| c.is_digit(8)) {
+        return a
+            .chars()
+            .nth(a.len() - 4)
+            .is_some_and(|c| matches!(c, '2' | '4' | '6' | '7'));
+    }
+    a.split(',').any(|clause| {
+        clause.find(['+', '=']).is_some_and(|i| {
+            clause[..i].chars().all(|c| "ugoa".contains(c)) && clause[i..].contains('s')
+        })
+    })
+}
 
 /// One note for all hits, so naming many paths cannot push other warnings
 /// out of the desktop prompt's summary.
@@ -1728,6 +1824,55 @@ mod tests {
         assert!(lay_out(&"W".repeat(30)).1 >= 2);
         // Lines measured to fit in the VM (Ubuntu font) count as one.
         assert_eq!(lay_out("from: peekexec (pid 8213), not a registered").1, 1);
+    }
+
+    #[test]
+    fn flags_root_beyond_the_request() {
+        let note = |text: &str| {
+            let section = Section {
+                title: Shown::fixed("x"),
+                invocation: vec![],
+                syntax: Syntax::Shell,
+                formatted: verbatim(text),
+                raw: text.into(),
+            };
+            lasting_root(&[section])
+        };
+        for (text, want) in [
+            ("usermod -aG docker u", "group docker"),
+            ("sudo /usr/sbin/usermod -a -G wheel,video u", "group wheel"),
+            ("gpasswd -a u lxd", "group lxd"),
+            ("chmod u+s /usr/bin/python3", "setuid"),
+            ("chmod 4755 /tmp/x", "setuid"),
+            ("cd /x && chmod g=rwxs d", "setuid"),
+            ("install -m 4755 a /usr/local/bin/a", "install -m"),
+            ("setcap cap_setuid+ep /usr/bin/x", "setcap"),
+            ("nohup systemd-run --unit=x /bin/sh", "systemd-run"),
+            ("echo id | at now + 1 min", "at (runs later)"),
+            ("crontab /tmp/c", "crontab"),
+            ("systemctl enable --now x.service", "systemctl enable"),
+            ("X=1 env crontab -l", "crontab"),
+        ] {
+            let n = note(text).unwrap_or_default();
+            assert!(n.contains(want), "{text}: {n}");
+        }
+        for text in [
+            "chmod 755 /usr/local/bin/x",
+            "chmod u+x,g-w f",
+            "usermod -aG video u",
+            "# look at this, then crontab-like prose",
+            "systemctl restart x.service",
+            "echo usermod -aG docker u",
+            "apt-get install -y at",
+        ] {
+            assert_eq!(note(text), None, "{text}");
+        }
+        // One note for many.
+        let n = note("usermod -aG docker u\nsetcap x y\ncrontab c").unwrap();
+        assert!(
+            n.contains("docker") && n.contains("setcap") && n.contains("crontab"),
+            "{n}"
+        );
     }
 
     #[test]
