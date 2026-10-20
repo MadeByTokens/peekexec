@@ -239,7 +239,7 @@ impl PromptView {
         parts.join(sep)
     }
 
-    /// The summary line: writes, network, findings.
+    /// The summary line: writes, network, where the output goes, findings.
     pub fn summary(&self, findings: usize) -> Vec<(bool, String)> {
         let e = &self.enforced;
         let mut out = Vec::new();
@@ -268,6 +268,12 @@ impl PromptView {
                 e.network_level != Level::Kernel,
                 format!("no network{}", how(e.network_level)),
             ));
+        }
+        // A command's stdout and stderr go to whoever asked: approving
+        // `cat /etc/shadow` hands the file to the requester. Not for an
+        // install, which runs nothing.
+        if e.write_level != Level::Builtin {
+            out.push((true, "its output goes back to the requester".into()));
         }
         if findings > 0 {
             out.push((true, format!("{findings} suspicious character(s)")));

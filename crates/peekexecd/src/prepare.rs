@@ -1744,6 +1744,7 @@ mod tests {
         assert!(m.contains("    a &&"), "{m}");
         assert!(m.contains("    f $("), "all six lines fit: {m}");
         assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
+        assert!(m.contains("its output goes back to the requester"), "{m}");
         assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
         assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
         assert!(!m.contains("ignored"), "why must not be in the prompt: {m}");

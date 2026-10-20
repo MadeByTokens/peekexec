@@ -268,7 +268,7 @@ the default wherever the display cannot be verified.
       others.
 - [x] B5 Flags for lasting root: group changes, setuid chmod, setcap,
       systemd-run, at/batch, crontab, `systemctl enable`.
-- [ ] B6 Facts say the output goes back to the requester.
+- [x] B6 Facts say the output goes back to the requester.
 - [ ] B7a Results expire from when they finished.
 - [ ] B7b `is_admin` uses the first admin group only.
 - [ ] B7c The dialog's Enter path honours the approve delay.

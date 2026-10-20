@@ -309,6 +309,10 @@ has a seat and is its active one"), never the absence of a warning sign
   ground truth.
 - **`--why` is the requester's claim**, shown below everything the daemon
   checked and labelled unverified.
+- **The output goes back to the requester.** Up to 16 MiB of stdout and
+  stderr each: approving `cat /etc/shadow` or `journalctl` hands that to the
+  agent. The summary says so on every command (not on an install, which
+  runs nothing).
 - **Enter-to-approve** works only for a plain `run` (no word of it names a
   shell, an interpreter or a program that runs another, such as `timeout`
   or `xargs`, and no argument holds spaces or shell syntax), only when there
