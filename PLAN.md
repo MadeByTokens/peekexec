@@ -275,7 +275,7 @@ the default wherever the display cannot be verified.
 - [x] B7d `Shown` escapes characters with zero advance.
 - [ ] C8a Diff against the previous request when one follows soon.
 - [ ] C8b "N more requests waiting" note.
-- [ ] C8c Neutral agent-session badge.
+- [x] C8c Neutral agent-session badge.
 - [ ] C9a Client escapes daemon text and output unless the daemon is root.
 - [ ] C9b `PEEKEXEC_SOCKET` set means `dev_mode`.
 - [ ] C10a Ancestry walk: parent re-read, started before its child.

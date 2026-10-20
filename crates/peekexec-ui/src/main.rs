@@ -408,11 +408,13 @@ impl Dialog {
                 command,
                 ..
             } => {
-                ui.label(
-                    RichText::new(format!("From {agent}'s session (registered {since})"))
-                        .color(Color32::from_rgb(70, 140, 220))
-                        .strong(),
-                );
+                // Plain, not a badge of trust: ancestry shows where the
+                // request came from, not that the agent itself decided to
+                // ask (any program it ran could have).
+                ui.label(RichText::new(format!(
+                    "From inside {agent}'s session (registered {since}): any program it runs \
+                     can ask from here too"
+                )));
                 let chain = std::iter::once(agent.as_str())
                     .chain(path.iter().map(Shown::as_str))
                     .collect::<Vec<_>>()
