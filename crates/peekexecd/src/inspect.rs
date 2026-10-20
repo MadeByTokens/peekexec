@@ -965,7 +965,7 @@ mod tests {
         // Prose and system paths in text are not.
         assert!(!flagged(
             &[],
-            "#!/bin/sh\n# and/or TCP/IP, see /usr/share/doc\necho /etc/hostname\n"
+            "#!/bin/sh\n# and/or TCP/IP, see /etc/ssl/certs\necho /etc/hostname\n"
         ));
         assert!(!flagged(&["a/b c".into()], ""));
         // Too many to check: it says so.
