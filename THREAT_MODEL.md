@@ -112,7 +112,10 @@ has a seat and is its active one"), never the absence of a warning sign
    while names and command lines are set by the process itself and can be
    anything. The connecting process is pinned with a pidfd (Linux 6.5+), which
    proves the pid was not reused, not that the process did not exec something
-   else. Ancestors are best effort. Processes whose executable is not
+   else. Ancestors are best effort: each is
+   kept only if it started no later than its child and is still that
+   child's parent when read again, so a reused pid ends the chain rather
+   than joining it to someone else's. Processes whose executable is not
    root-owned are marked. The executable path the kernel reports is the one
    the process sees, which in another mount namespace can name any file, so
    it counts only if it is the very file (device and inode) at that path in

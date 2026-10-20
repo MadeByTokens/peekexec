@@ -24,15 +24,24 @@ impl PeerInfo for ProcPeerInfo {
         let process = process_info(pid);
         let cwd = readlink(pid, "cwd");
         let mut ancestry = Vec::new();
-        let mut next = parent_pid(pid);
-        while let Some(ppid) = next.filter(|&p| p > 1) {
+        let mut child = (pid, process.start_time);
+        while let Some(ppid) = parent_pid(child.0).filter(|&p| p > 1) {
             if ancestry.len() == MAX_ANCESTRY {
                 // Cut, not followed: an agent session beyond this depth is
                 // not found, so the request counts as unregistered.
                 break;
             }
-            ancestry.push(process_info(ppid));
-            next = parent_pid(ppid);
+            let parent = process_info(ppid);
+            // A pid names the parent only while the child still has it:
+            // read again after describing it, and it must have started no
+            // later than the child (a reused pid starts later). Otherwise
+            // the walk ends here, and the request counts as from fewer
+            // ancestors, never from someone else's.
+            if !genuine_parent(child.1, parent.start_time, parent_pid(child.0), ppid) {
+                break;
+            }
+            child = (ppid, parent.start_time);
+            ancestry.push(parent);
         }
         // Still alive after we read /proc, so the pid was not reused meanwhile.
         let pinned = pidfd.as_ref().is_some_and(|fd| pidfd_alive(fd, pid));
@@ -218,6 +227,18 @@ fn parse_start_time(stat: &str) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
+/// Whether the process described as `ppid` (started at `parent_start`) is
+/// still the parent of a child that started at `child_start`, whose parent
+/// pid now reads `ppid_now`.
+fn genuine_parent(
+    child_start: Option<u64>,
+    parent_start: Option<u64>,
+    ppid_now: Option<u32>,
+    ppid: u32,
+) -> bool {
+    matches!((child_start, parent_start), (Some(c), Some(p)) if p <= c) && ppid_now == Some(ppid)
+}
+
 fn parent_pid(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_ppid(&stat)
@@ -233,6 +254,19 @@ fn parse_ppid(stat: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_parent_must_be_older_than_its_child_and_still_its_parent() {
+        assert!(genuine_parent(Some(200), Some(100), Some(7), 7));
+        assert!(genuine_parent(Some(200), Some(200), Some(7), 7));
+        // Started after the child: a reused pid.
+        assert!(!genuine_parent(Some(200), Some(300), Some(7), 7));
+        // The child was reparented while we looked.
+        assert!(!genuine_parent(Some(200), Some(100), Some(1), 7));
+        // Unknown start times prove nothing.
+        assert!(!genuine_parent(None, Some(100), Some(7), 7));
+        assert!(!genuine_parent(Some(200), None, Some(7), 7));
+    }
 
     #[test]
     fn identifies_self_over_socketpair() {
