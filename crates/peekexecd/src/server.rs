@@ -43,7 +43,7 @@ pub struct Options {
 }
 
 /// How long a denial blocks an identical request, and how long finished
-/// results stay available to `wait`.
+/// results stay available to `wait` (counted from when they finished).
 const DENIAL_TTL: Duration = Duration::from_secs(3600);
 const RESULT_TTL: Duration = Duration::from_secs(900);
 const ADMIN_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
@@ -86,7 +86,9 @@ pub struct Daemon {
 
 struct Entry {
     owner: u32,
-    created: Instant,
+    /// When the result came, from which it is kept for [`RESULT_TTL`]: a
+    /// command that ran long after a long wait is still reported.
+    finished: Mutex<Option<Instant>>,
     cancel: AtomicBool,
     result: Mutex<Option<Response>>,
     done: Condvar,
@@ -95,7 +97,16 @@ struct Entry {
 impl Entry {
     fn finish(&self, r: Response) {
         *self.result.lock().unwrap() = Some(r);
+        *self.finished.lock().unwrap() = Some(Instant::now());
         self.done.notify_all();
+    }
+
+    /// Finished more than [`RESULT_TTL`] ago; a pending one never expires.
+    fn expired(&self) -> bool {
+        self.finished
+            .lock()
+            .unwrap()
+            .is_some_and(|t| t.elapsed() >= RESULT_TTL)
     }
 
     /// The final response, or `None` if still pending after `timeout`.
@@ -328,16 +339,14 @@ impl Daemon {
         let mut id = new_id();
         let entry = Arc::new(Entry {
             owner: peer.uid,
-            created: Instant::now(),
+            finished: Mutex::new(None),
             cancel: AtomicBool::new(false),
             result: Mutex::new(None),
             done: Condvar::new(),
         });
         {
             let mut requests = self.requests.lock().unwrap();
-            requests.retain(|_, e| {
-                e.created.elapsed() < RESULT_TTL || e.result.lock().unwrap().is_none()
-            });
+            requests.retain(|_, e| !e.expired());
             let pending = requests
                 .values()
                 .filter(|e| e.owner == peer.uid && e.result.lock().unwrap().is_none())
@@ -1372,6 +1381,22 @@ mod tests {
             tier: DisplayTier::Wayland,
             verified,
         }
+    }
+
+    #[test]
+    fn results_are_kept_from_when_they_finished() {
+        let e = Entry {
+            owner: 1000,
+            finished: Mutex::new(None),
+            cancel: AtomicBool::new(false),
+            result: Mutex::new(None),
+            done: Condvar::new(),
+        };
+        assert!(!e.expired(), "pending");
+        e.finish(Response::error("x"));
+        assert!(!e.expired(), "just finished");
+        *e.finished.lock().unwrap() = Instant::now().checked_sub(RESULT_TTL);
+        assert!(e.expired());
     }
 
     #[test]
