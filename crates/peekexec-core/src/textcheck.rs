@@ -59,7 +59,25 @@ pub fn classify(c: char) -> Option<FindingKind> {
         | '\u{1AB0}'..='\u{1AFF}'
         | '\u{1DC0}'..='\u{1DFF}'
         | '\u{20D0}'..='\u{20FF}'
-        | '\u{FE20}'..='\u{FE2F}' => Some(FindingKind::Invisible),
+        | '\u{FE20}'..='\u{FE2F}'
+        // Measured: drawn with no width by the dialog's fonts (egui's
+        // Ubuntu and Hack, then DejaVu), so text could hide in them.
+        | '\u{0483}'..='\u{0487}'
+        | '\u{05B0}'..='\u{05BD}'
+        | '\u{05BF}'
+        | '\u{05C1}'..='\u{05C2}'
+        | '\u{05C7}'
+        | '\u{0615}'
+        | '\u{064B}'..='\u{0655}'
+        | '\u{0657}'
+        | '\u{0670}'
+        | '\u{07EB}'..='\u{07F3}'
+        | '\u{0EB1}'
+        | '\u{0EB4}'..='\u{0EB9}'
+        | '\u{0EBB}'..='\u{0EBC}'
+        | '\u{0EC8}'..='\u{0ECD}'
+        | '\u{FB1E}'
+        | '\u{FFF9}'..='\u{FFFC}' => Some(FindingKind::Invisible),
         c if c.is_control() => Some(FindingKind::ControlChar),
         c if !c.is_ascii() => Some(FindingKind::NonAscii),
         _ => None,
@@ -95,6 +113,29 @@ mod tests {
 
     fn kinds(text: &str) -> Vec<FindingKind> {
         scan(text).into_iter().map(|f| f.kind).collect()
+    }
+
+    #[test]
+    fn zero_width_glyphs_are_invisible() {
+        for c in [
+            '\u{0483}', '\u{05B4}', '\u{064B}', '\u{07EB}', '\u{0EC8}', '\u{FFF9}', '\u{FFFC}',
+        ] {
+            assert_eq!(
+                classify(c),
+                Some(FindingKind::Invisible),
+                "U+{:04X}",
+                c as u32
+            );
+        }
+        // Their neighbours that take space stay plain non-ASCII.
+        for c in ['\u{05D0}', '\u{0627}', '\u{0EB2}'] {
+            assert_eq!(
+                classify(c),
+                Some(FindingKind::NonAscii),
+                "U+{:04X}",
+                c as u32
+            );
+        }
     }
 
     #[test]
