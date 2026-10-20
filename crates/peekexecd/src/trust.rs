@@ -261,7 +261,8 @@ mod tests {
     #[test]
     fn open_directories_are_checked_by_object() {
         let open = |p: &str| std::fs::File::open(p).unwrap();
-        assert!(check_dir(&open("/usr/share"), "/usr/share", &[0]).is_ok());
+        let r = check_dir(&open("/usr/share"), "/usr/share", &[0]);
+        assert!(r.is_ok(), "{r:?}");
         // Sticky and world-writable: fine above a directory, not as it.
         let err = check_dir(&open("/tmp"), "/tmp", &[0]).unwrap_err();
         assert!(err.contains("writable by other"), "{err}");

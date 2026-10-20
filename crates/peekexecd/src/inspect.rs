@@ -923,7 +923,8 @@ mod tests {
             "/dev/fd/3",
         ];
         let system: Vec<String> = system.map(String::from).to_vec();
-        assert!(untrusted_file_args(&system, b"", "/", &[0]).is_none());
+        let note = untrusted_file_args(&system, b"", "/", &[0]);
+        assert!(note.is_none(), "{note:?}");
         // Nor need the path exist, be a file, or be written plainly.
         let link = dir.join("link");
         std::os::unix::fs::symlink("/bin/true", &link).unwrap();
