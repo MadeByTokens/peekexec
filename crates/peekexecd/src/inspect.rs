@@ -184,6 +184,8 @@ pub fn inspect_as(
             fd,
         )),
         Err(why) => {
+            // Built from Debug-quoted request values; bounded for journald.
+            let why: String = why.chars().take(2000).collect();
             eprintln!("peekexecd: inspection helper answer rejected: {why}");
             Err("the inspection helper's answer did not verify; see the daemon log".into())
         }
@@ -625,9 +627,12 @@ const MAX_PATHS_CHECKED: usize = 1000;
 
 /// The words of text that runs (a `sh -c` string, a script, an installed
 /// unit or rule), split where a shell would split them, so
-/// `cp /home/u/x /etc/` yields `/home/u/x`.
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| c.is_whitespace() || ";|&()<>'\"`{}".contains(c))
+/// `cp /home/u/x /etc/` yields `/home/u/x`. Quotes and backslashes are
+/// dropped rather than split at, as the shell joins `/ho"me/u"/x` into one
+/// word.
+fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| c.is_whitespace() || ";|&()<>`{}".contains(c))
+        .map(|w| w.replace(['\'', '"', '\\'], ""))
         .filter(|w| !w.is_empty())
 }
 
@@ -639,10 +644,14 @@ fn is_code(a: &str) -> bool {
 
 /// Paths named inside text: only absolute ones and `./`, `../`, so that
 /// prose (`and/or`, `TCP/IP`) in a comment is not taken for a path.
-fn named_in_text(text: &str) -> impl Iterator<Item = &str> {
-    words(text)
-        .flat_map(path_candidates)
-        .filter(|p| p.starts_with('/') || p.starts_with("./") || p.starts_with("../"))
+fn named_in_text(text: &str) -> impl Iterator<Item = String> + '_ {
+    words(text).flat_map(|w| {
+        path_candidates(&w)
+            .into_iter()
+            .filter(|p| p.starts_with('/') || p.starts_with("./") || p.starts_with("../"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    })
 }
 
 /// Paths the user could change (`sh ~/x.sh`, `cp -r /tmp/d /etc/`,
@@ -660,34 +669,48 @@ fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) 
             let inner = is_code(a).then(|| named_in_text(a));
             path_candidates(a)
                 .into_iter()
+                .map(str::to_string)
                 .chain(inner.into_iter().flatten())
         })
         .chain(named_in_text(&text));
     let mut seen = std::collections::HashSet::new();
-    let mut hits: Vec<&str> = Vec::new();
+    let mut hits: Vec<String> = Vec::new();
+    let mut too_many = false;
     for value in named {
-        if !value.contains('/') || !seen.insert(value) {
+        if !value.contains('/') || seen.contains(&value) {
             continue;
         }
-        if seen.len() > MAX_PATHS_CHECKED {
-            return Some(format!(
-                "Names more than {MAX_PATHS_CHECKED} paths, more than peekexec checks: \
-                 some may be files root does not control, whose content is not shown here."
-            ));
+        if seen.len() == MAX_PATHS_CHECKED {
+            too_many = true;
+            break;
         }
-        let path = Path::new(cwd).join(value);
-        let own = own_descriptor(&path);
-        if !own && trust::check_named(&path, owners).is_err() {
+        seen.insert(value.clone());
+        // A pattern names files that cannot be checked one by one.
+        let pattern = value.contains(['*', '?', '[']);
+        let path = Path::new(cwd).join(&value);
+        if pattern || (!own_descriptor(&path) && trust::check_named(&path, owners).is_err()) {
             hits.push(value);
         }
     }
+    // Cut only: the whole note is escaped where the view is built.
+    let first: Vec<String> = hits
+        .iter()
+        .take(3)
+        .map(|h| h.chars().take(100).collect())
+        .collect();
+    if too_many {
+        return Some(format!(
+            "Names more than {MAX_PATHS_CHECKED} paths, more than peekexec checks: some may \
+             be files root does not control, whose content is not shown here{}.",
+            if first.is_empty() {
+                String::new()
+            } else {
+                format!(" (among those checked: {})", first.join(", "))
+            }
+        ));
+    }
     (!hits.is_empty()).then(|| {
-        let shown: Vec<String> = hits
-            .iter()
-            .take(3)
-            // Cut only: the whole note is escaped where the view is built.
-            .map(|h| h.chars().take(100).collect::<String>())
-            .collect();
+        let shown = first;
         let more = hits.len().saturating_sub(3);
         format!(
             "Names {}{}, which root does not control: whatever reads or runs it as root gets \
@@ -934,6 +957,10 @@ mod tests {
         assert!(flagged(&[], &format!("#!/bin/sh\ncp {s} /etc/x.conf\n")));
         assert!(flagged(&[], &format!("[Service]\nExecStart={s} --now\n")));
         assert!(flagged(&[], &format!("x=$(cat '{s}')")));
+        // Quotes the shell joins, and patterns that cannot be checked.
+        let (head, tail) = s.split_at(4);
+        assert!(flagged(&[], &format!("cat {head}\"{tail}\"")));
+        assert!(flagged(&[], "cp /h*/u/x /etc/"));
         // Prose and system paths in text are not.
         assert!(!flagged(
             &[],

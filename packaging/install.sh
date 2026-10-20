@@ -44,9 +44,20 @@ fi
 in_service() {
     grep -q 'peekexecd\.service' /proc/self/cgroup 2>/dev/null
 }
+# Approved commands run in cgroups below the daemon's own, and stopping the
+# daemon ends them: wait until none is running (an apt upgrade finishes
+# first). Run through peekexec, this script is one of them until it exits,
+# so the restart it hands over waits for it too. Expanded by the shell
+# that runs it, which may be a transient unit's.
+# shellcheck disable=SC2016
+wait_idle='cg=/sys/fs/cgroup$(systemctl show -p ControlGroup --value peekexecd.service)
+if grep -qsx "populated 1" "$cg"/peekexec-cmd-*/cgroup.events; then
+    echo "install.sh: waiting for approved commands that are still running" >&2
+fi
+while grep -qsx "populated 1" "$cg"/peekexec-cmd-*/cgroup.events; do sleep 2; done'
 later() {
     systemd-run --quiet --collect --on-active=3 --timer-property=AccuracySec=100ms \
-        --unit="peekexec-upgrade-$$" systemctl "$@"
+        --unit="peekexec-upgrade-$$" /bin/sh -c "$wait_idle; systemctl $*"
 }
 
 if [ "$action" = uninstall ]; then
@@ -56,6 +67,7 @@ if [ "$action" = uninstall ]; then
         echo "install.sh: --uninstall cannot run inside peekexecd.service; use pkexec" >&2
         exit 1
     fi
+    sh -c "$wait_idle"
     systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
     rm -rf "$dropin"
@@ -157,6 +169,7 @@ if in_service; then
     later restart peekexecd.socket
     echo "peekexec installed: $bin, $libexec; the daemon restarts in 3 s"
 else
+    sh -c "$wait_idle"
     systemctl stop peekexecd.service 2>/dev/null || true
     systemctl restart peekexecd.socket
     echo "peekexec installed: $bin, $libexec, peekexecd.socket enabled"

@@ -65,7 +65,8 @@ A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
   run things later (sudoers, cron, systemd, udev, pam.d, profile, ld.so...),
   unverified display, executables in the install.
 - **Fast path:** focus starts in the password field; for a plain `run` (no
-  shell or interpreter, one word per argument) with nothing to warn about,
+  shell, interpreter or program runner in any word, no spaces or shell
+  syntax in an argument) with nothing to warn about,
   type it and press Enter. Scripts, installs, `sh -c` and any flag need a
   click, and a dialog right after another one ignores keys for longer.
 - **Cancel:** button, Esc, closing the window, or timeout (default 120 s).
@@ -227,9 +228,10 @@ itself "claude"). Plan:
 - Run approved commands as transient systemd units (`PrivateNetwork=`,
   `ProtectSystem=strict`, `ReadWritePaths=`, `CapabilityBoundingSet=`,
   `NoNewPrivileges=`), so `enforced` can say `kernel` truthfully and a PAM
-  session applies. Until then: best effort. (Done already: each command has
-  a cgroup of its own, killed as a whole when it exits, and outlives a
-  daemon restart.)
+  session applies, and so a command outlives a daemon restart (today its
+  output goes to the daemon, and stopping the daemon ends it). Until then:
+  best effort. (Done already: each command has a cgroup of its own, killed
+  as a whole when it exits.)
 - libaudit `USER_AUTH` / `USER_CMD` records; store the shown text by sha256.
 
 ### M2 detail: hardening from the pre-install review

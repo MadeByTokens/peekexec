@@ -1123,27 +1123,40 @@ fn new_id() -> String {
     )
 }
 
-/// Longest requester string an audit line quotes, and most arguments it
-/// lists; the request's sha256 identifies the rest. journald cuts a line
-/// longer than its `LineMax` (48 KiB by default) into records of their
-/// own, and the later ones would begin with requester text.
+/// Most bytes of one quoted requester string in an audit line, and most
+/// arguments it lists; the request's sha256 identifies the rest. journald
+/// cuts a line longer than its `LineMax` (48 KiB by default) into records
+/// of their own, and the later ones would begin with requester text. With
+/// these, a line stays under about 21 KiB.
 const AUDIT_FIELD: usize = 512;
 const AUDIT_ARGS: usize = 32;
 
-/// Debug-quoted (control characters cannot forge log lines) and cut.
+/// Quoted in plain ASCII (control and other characters as `\u{...}`, so
+/// nothing can forge a line or a record) and cut after [`AUDIT_FIELD`]
+/// bytes of the quoted form.
 fn quoted(s: &str) -> String {
-    let n = s.chars().count();
-    if n <= AUDIT_FIELD {
-        return format!("{s:?}");
+    let mut out = String::from("\"");
+    for (i, c) in s.chars().enumerate() {
+        let piece = match c {
+            '"' => "\\\"".to_string(),
+            '\\' => "\\\\".to_string(),
+            ' '..='~' => c.to_string(),
+            _ => format!("\\u{{{:x}}}", c as u32),
+        };
+        if out.len() + piece.len() > AUDIT_FIELD {
+            let rest = s.chars().count() - i;
+            return format!("{out}\"...(+{rest} chars)");
+        }
+        out.push_str(&piece);
     }
-    let head: String = s.chars().take(AUDIT_FIELD).collect();
-    format!("{head:?}…(+{} chars)", n - AUDIT_FIELD)
+    out.push('"');
+    out
 }
 
 fn quoted_list(items: &[String]) -> String {
     let mut parts: Vec<String> = items.iter().take(AUDIT_ARGS).map(|a| quoted(a)).collect();
     if items.len() > AUDIT_ARGS {
-        parts.push(format!("…(+{} more)", items.len() - AUDIT_ARGS));
+        parts.push(format!("...(+{} more)", items.len() - AUDIT_ARGS));
     }
     format!("[{}]", parts.join(", "))
 }
@@ -1320,16 +1333,17 @@ mod tests {
 
     #[test]
     fn audit_fields_are_bounded() {
-        assert_eq!(quoted("a\nb"), "\"a\\nb\"");
-        let long = "x".repeat(100_000);
-        let q = quoted(&long);
-        assert!(
-            q.len() < AUDIT_FIELD + 40 && q.ends_with("(+99488 chars)"),
-            "{q}"
-        );
-        let many = vec![long; 1000];
-        let l = quoted_list(&many);
-        assert!(l.len() < 20_000 && l.contains("(+968 more)"), "{}", l.len());
+        assert_eq!(quoted("a\nb\"\\"), r#""a\u{a}b\"\\""#);
+        assert_eq!(quoted("caf\u{e9}\u{e0041}"), r#""caf\u{e9}\u{e0041}""#);
+        // Bounded in bytes whatever the characters expand to.
+        for long in ["x".repeat(100_000), "\u{e0041}".repeat(100_000)] {
+            let q = quoted(&long);
+            assert!(q.is_ascii() && q.len() < AUDIT_FIELD + 30, "{}", q.len());
+            assert!(q.ends_with(" chars)"), "{q}");
+            let many = vec![long; 1000];
+            let l = quoted_list(&many);
+            assert!(l.len() < 18_000 && l.contains("(+968 more)"), "{}", l.len());
+        }
     }
 
     #[test]

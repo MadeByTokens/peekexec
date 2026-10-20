@@ -20,6 +20,24 @@ pub struct Line {
     pub continued: bool,
 }
 
+impl Line {
+    /// The indentation to draw and the text to draw after it, the same in
+    /// every view. A line the formatter split off is re-indented: its own
+    /// leading spaces and tabs (only those) are separator whitespace. Any
+    /// other line starts after a newline of the original, so its leading
+    /// whitespace is the text's own, and decides what Python, YAML or a
+    /// heredoc does with it: it is drawn exactly as written, with no
+    /// indentation added.
+    pub fn shown(&self) -> (usize, &str) {
+        let text = self.text.strip_suffix('\n').unwrap_or(&self.text);
+        if self.continued {
+            (self.indent, text.trim_start_matches([' ', '\t']))
+        } else {
+            (0, text)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tok {
     Word,

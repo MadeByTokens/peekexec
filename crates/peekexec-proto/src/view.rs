@@ -338,19 +338,10 @@ impl PromptView {
                 let mark = if l.continued { '↳' } else { ' ' };
                 // As the dialog does: only lines the formatter split are
                 // re-indented; others keep their own indentation.
-                let text = l.text.trim_end_matches('\n');
-                let text = if l.indent > 0 || l.continued {
-                    text.trim_start_matches([' ', '\t'])
-                } else {
-                    text
-                };
+                let (indent, text) = l.shown();
                 // Printed to a terminal: escape sequences must not act.
                 let text = Shown::line(text, usize::MAX);
-                line(format!(
-                    "{:>4}{mark} {}{text}",
-                    i + 1,
-                    "  ".repeat(l.indent)
-                ));
+                line(format!("{:>4}{mark} {}{text}", i + 1, "  ".repeat(indent)));
             }
         }
         line(String::new());

@@ -10,10 +10,11 @@ ExecStart=/usr/libexec/peekexec/peekexecd
 StandardError=journal
 # Each approved command runs in a cgroup of its own below this one, and
 # everything in it is killed when the command exits (setsid included).
+# Stopping the daemon ends running commands too (their output goes to it);
+# install.sh waits for them before it restarts the daemon.
 Delegate=yes
-# Stopping or restarting the daemon (an upgrade, a crash) ends the daemon
-# only: an approved command that is running (apt, dpkg) finishes.
-KillMode=process
+# The audit lines must not be dropped: only administrators can connect.
+LogRateLimitIntervalSec=0
 
 [Install]
 Also=peekexecd.socket

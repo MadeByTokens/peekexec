@@ -1,10 +1,14 @@
 //! A cgroup of its own for each approved command, so that when it exits
 //! everything it started is ended, including processes that left its
 //! process group (`setsid`, `nohup ... &` with job control, double forks).
-//! A process cannot leave a cgroup by itself: only a writer of the cgroup
-//! tree can move it, and the tree is the daemon's (the service has
-//! `Delegate=yes`). Processes handed to systemd (`systemd-run`,
-//! `systemctl start`) become units of systemd's own and are not ended.
+//! A process cannot leave a cgroup by itself unless it may write the cgroup
+//! tree: the tree is the daemon's (the service has `Delegate=yes`), and the
+//! approved command, being root, could move its processes out on purpose,
+//! as it could do anything else; this bounds what it starts by accident or
+//! by habit (`&`, `nohup`, `setsid`), not what it is written to escape.
+//! Processes handed to systemd (`systemd-run`, `systemctl start`) become
+//! units of systemd's own and are not ended; daemons the command starts
+//! itself (a FUSE mount, `dhclient`) are.
 //!
 //! The command enters its group itself, before `exec` (see
 //! [`CommandGroup::procs`]), so nothing it runs is ever outside it.
@@ -38,12 +42,23 @@ impl CommandGroup {
         let own = std::fs::read_to_string("/proc/self/cgroup")
             .map_err(|e| format!("/proc/self/cgroup: {e}"))?;
         let own = own_path(&own).ok_or("not in a cgroup v2 hierarchy")?;
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = Path::new(ROOT)
-            .join(own.trim_start_matches('/'))
-            .join(format!("peekexec-cmd-{}-{n}", std::process::id()));
-        std::fs::create_dir(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        Ok(CommandGroup { dir })
+        let parent = Path::new(ROOT).join(own.trim_start_matches('/'));
+        // A group of the same name may be left from an earlier run whose
+        // pid this one reuses (its processes still in it): take the next.
+        let mut last = None;
+        for _ in 0..16 {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = parent.join(format!("peekexec-cmd-{}-{n}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(CommandGroup { dir }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+                Err(e) => return Err(format!("create {}: {e}", dir.display())),
+            }
+        }
+        Err(format!(
+            "no free group name under {}: {last:?}",
+            parent.display()
+        ))
     }
 
     /// The file a process writes `0` to, to move itself into the group.
@@ -74,8 +89,9 @@ impl CommandGroup {
         while self.events("frozen") != Some(true) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let procs = std::fs::read_to_string(self.file("cgroup.procs")).unwrap_or_default();
-        for pid in procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
+        // Freezing covers the groups below, which the command may have
+        // made: their members are killed too.
+        for pid in members(&self.dir) {
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(pid),
                 nix::sys::signal::Signal::SIGKILL,
@@ -102,9 +118,9 @@ impl Group for CommandGroup {
     }
 }
 
-/// Groups left by an earlier run of the daemon (which ended while their
-/// commands ran): removed once empty. One that is not stays, with its
-/// processes, which are still part of what a human approved.
+/// Groups left by an earlier run of the daemon that ended abruptly:
+/// removed once empty (systemd kills their processes when it stops the
+/// service).
 pub fn remove_stale() {
     let Ok(own) = std::fs::read_to_string("/proc/self/cgroup") else {
         return;
@@ -120,6 +136,23 @@ pub fn remove_stale() {
             let _ = std::fs::remove_dir(e.path());
         }
     }
+}
+
+/// The processes in `dir` and in every group below it.
+fn members(dir: &Path) -> Vec<i32> {
+    let mut out: Vec<i32> = std::fs::read_to_string(dir.join("cgroup.procs"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.filter_map(Result::ok) {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                out.extend(members(&e.path()));
+            }
+        }
+    }
+    out
 }
 
 /// The cgroup v2 path in a `/proc/<pid>/cgroup` (its `0::` line).

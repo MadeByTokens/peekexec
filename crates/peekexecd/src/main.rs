@@ -86,7 +86,7 @@ fn run(args: Args) -> Result<(), String> {
         trust::check(&dialog, &[0]).map_err(|e| format!("refusing dialog program: {e}"))?;
     }
 
-    // Commands a previous run left running keep their groups; empty ones go.
+    // Groups an earlier run left, once empty.
     #[cfg(target_os = "linux")]
     if root {
         platform::linux::remove_stale_groups();

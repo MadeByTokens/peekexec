@@ -55,17 +55,9 @@ impl Highlighter {
                 .formatted
                 .iter()
                 .map(|l| {
-                    let text = l.text.trim_end_matches('\n');
-                    // Formatted view re-indents; the slice's own leading
-                    // spaces and tabs are replaced by the computed indent.
-                    // Only those: other whitespace (U+00A0, U+3000...) is
-                    // shown and marked.
-                    let text = if l.indent > 0 || l.continued {
-                        text.trim_start_matches([' ', '\t'])
-                    } else {
-                        text
-                    };
-                    (l.indent, l.continued, text.to_string())
+                    // Re-indented only where the formatter split a line.
+                    let (indent, text) = l.shown();
+                    (indent, l.continued, text.to_string())
                 })
                 .collect()
         };

@@ -60,6 +60,9 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    - the narrowest --write paths; --no-net unless you need the network
    - prefer `peekexec install` over `sh -c 'cp ...'` (the human sees the file)
    - prefer `peekexec script file.sh` over long one-liners
+   - everything your command leaves running (`&`, nohup, setsid, a daemon it
+     starts) is killed when it exits; start a long-running service with
+     `systemctl start`, which hands it to systemd
 
 7. What gets rejected (status "error", nothing shown to the human):
    - `run` only starts programs that root controls: a bare name is looked up

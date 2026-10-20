@@ -258,14 +258,17 @@ has a seat and is its active one"), never the absence of a warning sign
    own that it enters before `exec`. When it exits, everything in that
    cgroup is killed (`cgroup.kill`, or freeze and kill on kernels before
    5.14), so processes that left its process group (`setsid`, a background
-   job of a shell with job control, a double fork) end with it too. A
-   process cannot leave a cgroup by itself; work handed to systemd
-   (`systemd-run`, `systemctl start`) becomes a unit of systemd's own and is
-   not ended. Without a writable cgroup v2 hierarchy only the process group
-   is killed, and the journal says so. A running command does not depend on
-   the daemon: the service stops with `KillMode=process`, so restarting or
-   upgrading peekexecd lets an approved `apt` finish. The umask is 022, and
-   the audit login uid is set to the requester. `enforced`
+   job of a shell with job control, a double fork) end with it too, and so
+   do daemons it starts itself (a FUSE mount, `dhclient`). Work handed to
+   systemd (`systemd-run`, `systemctl start`) becomes a unit of systemd's
+   own and is not ended. This bounds what a command leaves running by habit
+   or by accident; being root, a command written to escape can move itself
+   out of its group. Without a writable cgroup v2 hierarchy only the
+   process group is killed, and the journal says so. Its output goes to the
+   daemon, so stopping the daemon ends running commands too: `install.sh`
+   waits for them before it restarts peekexecd, and a daemon that crashes
+   takes them with it. The umask is 022, and the audit login uid is set to
+   the requester. `enforced`
    reports `kernel`, `best_effort`, `builtin` (no command ran: peekexec
    wrote the file), `declared_only` or `not_requested` per limit.
 
@@ -291,8 +294,9 @@ has a seat and is its active one"), never the absence of a warning sign
   ground truth.
 - **`--why` is the requester's claim**, shown below everything the daemon
   checked and labelled unverified.
-- **Enter-to-approve** works only for a plain `run` (one program that is
-  not a shell or interpreter, each argument a single word), only when there
+- **Enter-to-approve** works only for a plain `run` (no word of it names a
+  shell, an interpreter or a program that runs another, such as `timeout`
+  or `xargs`, and no argument holds spaces or shell syntax), only when there
   is nothing to warn about, and only when no
   key was pressed while the window was opening (the human was typing into
   something else, perhaps a password); otherwise approving needs a pointer
@@ -323,9 +327,11 @@ command (argv, or script/install content hash), working directory, stated
 reason, outcome, exit code and any deny reason. An approved one is logged
 twice: before the command starts (so a command that ends the daemon or the
 machine is still on record) and when it ends. Requester strings are quoted
-and each is cut at 512 characters (32 arguments at most; the request's
-sha256 identifies the rest), so no line reaches journald's `LineMax` and is
-split into records that begin with requester text. The command's audit
+in plain ASCII and each is cut at 512 bytes (32 arguments at most; the
+request's sha256 identifies the rest), so no line reaches journald's
+`LineMax` and is split into records that begin with requester text, and
+the unit has no log rate limit, so a flood of refused requests cannot
+crowd out the record of an approved one. The command's audit
 login uid is the requester's.
 
 ## Out of scope
