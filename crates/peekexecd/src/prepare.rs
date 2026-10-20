@@ -280,7 +280,7 @@ pub fn prepare(
     };
 
     notes.extend(sensitive_targets(&sections, &enforced));
-    notes.extend(lasting_root(&sections));
+    notes.extend(lasting_root(&executed_text(req)));
     if ctx.dev {
         notes.push(format!(
             "DEVELOPMENT MODE: this runs as {}, not as root.",
@@ -1017,7 +1017,7 @@ const ROOT_GROUPS: &[&str] = &[
 /// request: a membership, a setuid bit, a capability, or something that
 /// runs again, or keeps running, after the request ends. A denylist: it
 /// warns, it does not decide. One note for all of them.
-fn lasting_root(sections: &[Section]) -> Option<String> {
+fn lasting_root(texts: &[String]) -> Option<String> {
     const SKIP: &[&str] = &[
         "sudo", "doas", "env", "nohup", "nice", "ionice", "time", "timeout", "exec", "command",
         "builtin", "then", "do", "else", "!", "{",
@@ -1028,8 +1028,8 @@ fn lasting_root(sections: &[Section]) -> Option<String> {
             hits.push(h);
         }
     };
-    for s in sections {
-        for command in s.raw.split(['\n', ';', '&', '|', '(', ')', '`']) {
+    for text in texts {
+        for command in text.split(['\n', ';', '&', '|', '(', ')', '`']) {
             let words: Vec<String> = command
                 .split_whitespace()
                 .map(|w| w.replace(['\'', '"', '\\'], ""))
@@ -1080,6 +1080,29 @@ fn lasting_root(sections: &[Section]) -> Option<String> {
             hits.join(", ")
         )
     })
+}
+
+/// The text of what runs, as commands: a `run`'s argv as one command line,
+/// and every argument of it that is code (`sh -c '...'`); a script's
+/// content. Not the view's sections, whose text is drawn for the eye
+/// (`argv[0] usermod`). Nothing for an install, which runs nothing.
+fn executed_text(req: &Request) -> Vec<String> {
+    match &req.action {
+        Action::Run { argv } => std::iter::once(argv.join(" "))
+            .chain(
+                argv.iter()
+                    .filter(|a| a.contains(char::is_whitespace))
+                    .cloned(),
+            )
+            .collect(),
+        Action::Script { content, args, .. } => {
+            vec![
+                String::from_utf8_lossy(content).into_owned(),
+                args.join(" "),
+            ]
+        }
+        Action::Install { .. } => Vec::new(),
+    }
 }
 
 /// A `chmod`/`install -m` mode that sets setuid or setgid: octal with a
@@ -1828,16 +1851,7 @@ mod tests {
 
     #[test]
     fn flags_root_beyond_the_request() {
-        let note = |text: &str| {
-            let section = Section {
-                title: Shown::fixed("x"),
-                invocation: vec![],
-                syntax: Syntax::Shell,
-                formatted: verbatim(text),
-                raw: text.into(),
-            };
-            lasting_root(&[section])
-        };
+        let note = |text: &str| lasting_root(&[text.to_string()]);
         for (text, want) in [
             ("usermod -aG docker u", "group docker"),
             ("sudo /usr/sbin/usermod -a -G wheel,video u", "group wheel"),
@@ -1873,6 +1887,33 @@ mod tests {
             n.contains("docker") && n.contains("setcap") && n.contains("crontab"),
             "{n}"
         );
+
+        // Found in what runs, through the whole of prepare: a plain run, a
+        // shell string, a script.
+        let run = |argv: &[&str]| {
+            req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            })
+        };
+        let has = |r: &Request, want: &str| {
+            prepare_for_tests(r)
+                .view
+                .notes
+                .iter()
+                .any(|n| n.contains(want))
+        };
+        assert!(has(
+            &run(&["usermod", "-aG", "docker", "u"]),
+            "group docker"
+        ));
+        assert!(has(&run(&["sh", "-c", "chmod u+s /x"]), "setuid"));
+        let script = req(Action::Script {
+            path: "/home/u/x.sh".into(),
+            content: b"#!/bin/sh\nsetcap cap_net_raw+ep /x\n".to_vec(),
+            args: vec![],
+        });
+        assert!(has(&script, "setcap"));
+        assert!(!has(&run(&["ls", "docker"]), "Gives root"));
     }
 
     #[test]
