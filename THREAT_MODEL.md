@@ -318,7 +318,12 @@ has a seat and is its active one"), never the absence of a warning sign
   arriving right after another gets a longer input guard, and the daemon
   refuses an Approve that comes sooner than the dialog allows one.
 - **The one-hour refusal of a denied request** is a courtesy for well-behaved
-  agents (any change makes a new request), not a control.
+  agents (any change makes a new request), not a control. It replays the
+  reason only to the requester it was given to (the registered agent
+  session, or the same process), and says when the display was not
+  verified, so another program cannot leave a "reason" for the agent to
+  read as the human's. Agents are told a reason may only narrow what they
+  do.
 
 ## Denial of service
 

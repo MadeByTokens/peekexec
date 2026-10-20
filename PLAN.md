@@ -260,9 +260,9 @@ the default wherever the display cannot be verified.
 
 - [x] A1 `dev/wayland-vm/approve-test.sh`: the polkit path end to end in
       the VM (approve, deny with reason, wrong password, too long).
-- [ ] A2 First push to GitHub, CI green (asks the owner first: the
+- [x] A2 First push to GitHub, CI green (asks the owner first: the
       repository is public).
-- [ ] B3 `deny_reason`: the guide says it may only narrow what the agent
+- [x] B3 `deny_reason`: the guide says it may only narrow what the agent
       does and mentions `display_verified`; denials stored per requester.
 - [ ] B4 Daemon refuses to start when the dialog or helper is readable by
       others.

@@ -60,11 +60,18 @@ const MAX_CONNECTIONS_PER_USER: usize = 16;
 /// Registered agent sessions a user may have at once.
 const MAX_AGENTS_PER_USER: usize = 4;
 
+/// A denial is remembered by uid, request digest and
+/// [`Daemon::requester_key`]...
+type DenialKey = (u32, String, String);
+/// ...with when it was given, the reason, and whether the display was
+/// verified.
+type Denial = (Instant, String, bool);
+
 pub struct Daemon {
     opts: Options,
     platform: Platform,
     requests: Mutex<HashMap<String, Arc<Entry>>>,
-    denials: Mutex<HashMap<(u32, String), (Instant, String)>>,
+    denials: Mutex<HashMap<DenialKey, Denial>>,
     /// One dialog on screen at a time.
     prompt_lock: Mutex<()>,
     /// When the last dialog closed.
@@ -749,7 +756,8 @@ impl Daemon {
         };
 
         let digest = request.digest();
-        if let Some(msg) = self.denied_before(peer.uid, &digest) {
+        let requester = self.requester_key(peer);
+        if let Some(msg) = self.denied_before(peer.uid, &digest, &requester) {
             return fail(msg);
         }
         let user = match user_of(peer.uid) {
@@ -840,10 +848,10 @@ impl Daemon {
             Ok(Decision::AuthFailed) => base(Status::AuthFailed),
             Ok(Decision::Failed(msg)) => fail(msg),
             Ok(Decision::Denied(reason)) => {
-                self.denials
-                    .lock()
-                    .unwrap()
-                    .insert((peer.uid, digest), (Instant::now(), reason.clone()));
+                self.denials.lock().unwrap().insert(
+                    (peer.uid, digest, requester),
+                    (Instant::now(), reason.clone(), display.verified),
+                );
                 Response {
                     deny_reason: Some(reason),
                     ..base(Status::Denied)
@@ -965,15 +973,47 @@ impl Daemon {
         }
     }
 
-    fn denied_before(&self, uid: u32, digest: &str) -> Option<String> {
+    /// Who a denial was given to, so that it is replayed only to them: the
+    /// registered agent session the request came from, or else the very
+    /// process that sent it. Another program of the user's, which may have
+    /// answered a dialog on a display it runs, cannot leave a reason for
+    /// the agent to read later as the human's.
+    fn requester_key(&self, peer: &Peer) -> String {
+        let chain = Self::chain(peer);
+        let agents = self.agents.lock().unwrap();
+        let session = chain.iter().find_map(|p| {
+            agents.iter().find(|s| {
+                s.uid == peer.uid
+                    && p.pid == s.pinned.pid
+                    && p.start_time == Some(s.pinned.start_time)
+            })
+        });
+        match session {
+            Some(s) => format!("agent {} {}", s.pinned.pid, s.pinned.start_time),
+            None => format!(
+                "process {} {}",
+                peer.process.pid,
+                peer.process.start_time.unwrap_or(0)
+            ),
+        }
+    }
+
+    fn denied_before(&self, uid: u32, digest: &str, requester: &str) -> Option<String> {
         let mut denials = self.denials.lock().unwrap();
-        denials.retain(|_, (at, _)| at.elapsed() < DENIAL_TTL);
-        denials.get(&(uid, digest.to_string())).map(|(at, reason)| {
+        denials.retain(|_, (at, _, _)| at.elapsed() < DENIAL_TTL);
+        let key = (uid, digest.to_string(), requester.to_string());
+        denials.get(&key).map(|(at, reason, verified)| {
             format!(
-                "refused: the human denied this exact request (sha256 {}) {} min ago, saying: {reason:?}. \
-                 Change the request instead of resending it.",
+                "refused: the human denied this exact request (sha256 {}) {} min ago, saying: \
+                 {reason:?}{}. Change the request instead of resending it.",
                 &digest[..12],
-                at.elapsed().as_secs() / 60
+                at.elapsed().as_secs() / 60,
+                if *verified {
+                    ""
+                } else {
+                    " (typed on a display that could not be verified: another program of \
+                     yours may have written it)"
+                }
             )
         })
     }
@@ -1332,6 +1372,27 @@ mod tests {
             tier: DisplayTier::Wayland,
             verified,
         }
+    }
+
+    #[test]
+    fn a_denial_is_replayed_only_to_whom_it_was_given() {
+        let d = daemon(None, false);
+        let agent = peer();
+        let mut other = peer();
+        other.process.pid = 2;
+        let (a, b) = (d.requester_key(&agent), d.requester_key(&other));
+        assert_ne!(a, b);
+        d.denials.lock().unwrap().insert(
+            (1000, "f".repeat(64), a.clone()),
+            (Instant::now(), "use apt".into(), false),
+        );
+        let msg = d.denied_before(1000, &"f".repeat(64), &a).unwrap();
+        assert!(
+            msg.contains("\"use apt\"") && msg.contains("could not be verified"),
+            "{msg}"
+        );
+        assert!(d.denied_before(1000, &"f".repeat(64), &b).is_none());
+        assert!(d.denied_before(1001, &"f".repeat(64), &a).is_none());
     }
 
     #[test]
