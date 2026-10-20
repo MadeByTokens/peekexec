@@ -261,7 +261,9 @@ mod tests {
     #[test]
     fn open_directories_are_checked_by_object() {
         let open = |p: &str| std::fs::File::open(p).unwrap();
-        let r = check_dir(&open("/usr/share"), "/usr/share", &[0]);
+        // Not /usr/share: GitHub's ubuntu-24.04 runner makes it writable by
+        // everyone, and then it is rightly not trusted.
+        let r = check_dir(&open("/etc"), "/etc", &[0]);
         assert!(r.is_ok(), "{r:?}");
         // Sticky and world-writable: fine above a directory, not as it.
         let err = check_dir(&open("/tmp"), "/tmp", &[0]).unwrap_err();

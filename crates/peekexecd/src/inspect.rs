@@ -917,7 +917,7 @@ mod tests {
             "-y",
             "/proc/cpuinfo",
             "/dev/null",
-            "/usr/share",
+            "/etc/ssl",
             "/dev/stdout",
             "/proc/self/status",
             "/dev/fd/3",
