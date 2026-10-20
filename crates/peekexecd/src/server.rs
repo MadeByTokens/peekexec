@@ -838,6 +838,12 @@ impl Daemon {
                     ),
                 );
             }
+            // Counted as it goes on screen, so it is the queue the human
+            // would approve into.
+            if let Some(note) = self.waiting_note(peer.uid, id) {
+                prepared.view.enter_approves = false;
+                prepared.view.notes.insert(0, note);
+            }
             let d = if cancel.load(Ordering::SeqCst) {
                 Ok(Decision::Cancelled)
             } else {
@@ -980,6 +986,29 @@ impl Daemon {
                 ..base
             },
         }
+    }
+
+    /// How many more requests of this user wait behind request `id`, as a
+    /// note: approving one after another as they come is how a queue of
+    /// requests gets approved unread.
+    fn waiting_note(&self, uid: u32, id: &str) -> Option<Shown> {
+        let waiting = self
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, e)| *k != id && e.owner == uid && e.result.lock().unwrap().is_none())
+            .count();
+        (waiting > 0).then(|| {
+            display_line(
+                &format!(
+                    "{waiting} more request{} from you {} waiting after this one. Read each.",
+                    if waiting == 1 { "" } else { "s" },
+                    if waiting == 1 { "is" } else { "are" }
+                ),
+                200,
+            )
+        })
     }
 
     /// Who a denial was given to, so that it is replayed only to them: the
@@ -1407,6 +1436,37 @@ mod tests {
             .filter(|&g| g != gid)
             .collect();
         assert!(!is_admin(&user(others)));
+    }
+
+    #[test]
+    fn the_queue_behind_a_request_is_counted() {
+        let d = daemon(None, false);
+        let entry = |owner: u32, done: bool| {
+            let e = Entry {
+                owner,
+                finished: Mutex::new(None),
+                cancel: AtomicBool::new(false),
+                result: Mutex::new(None),
+                done: Condvar::new(),
+            };
+            if done {
+                e.finish(Response::error("x"));
+            }
+            Arc::new(e)
+        };
+        {
+            let mut r = d.requests.lock().unwrap();
+            r.insert("r-shown".into(), entry(1000, false));
+            r.insert("r-done".into(), entry(1000, true));
+            r.insert("r-other-user".into(), entry(1001, false));
+        }
+        assert!(d.waiting_note(1000, "r-shown").is_none());
+        d.requests
+            .lock()
+            .unwrap()
+            .insert("r-next".into(), entry(1000, false));
+        let n = d.waiting_note(1000, "r-shown").unwrap();
+        assert!(n.starts_with("1 more request from you is waiting"), "{n}");
     }
 
     #[test]
