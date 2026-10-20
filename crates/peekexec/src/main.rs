@@ -234,6 +234,11 @@ fn socket() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(wire::SOCKET))
 }
 
+/// Whether `path` is the socket the installed daemon listens on.
+fn standard_socket(path: &std::path::Path) -> bool {
+    path == std::path::Path::new(wire::SOCKET)
+}
+
 /// The uid the daemon at the other end of `conn` runs as.
 fn daemon_uid(conn: &UnixStream) -> std::io::Result<u32> {
     #[cfg(target_os = "linux")]
@@ -247,16 +252,18 @@ fn daemon_uid(conn: &UnixStream) -> std::io::Result<u32> {
     }
 }
 
-/// The reply, and whether root sent it. Anything that can set this
+/// The reply, and whether peekexecd sent it. Anything that can set this
 /// process's environment can name another socket (PEEKEXEC_SOCKET), and a
 /// program of the user's listening there could forge any answer, a
-/// `deny_reason` included. Only a daemon running as root speaks for the
-/// human.
+/// `deny_reason` included. Only a daemon running as root, on the standard
+/// socket, speaks for the human: a socket elsewhere may belong to another
+/// root-started service (a socket unit whose service runs unprivileged
+/// reports root too).
 fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), String> {
     let path = socket();
     let exchange = || -> std::io::Result<(A, bool)> {
         let mut conn = UnixStream::connect(&path)?;
-        let from_root = daemon_uid(&conn)? == 0;
+        let from_root = daemon_uid(&conn)? == 0 && standard_socket(&path);
         wire::write_msg(&mut conn, msg)?;
         let reply = wire::read_msg(&mut BufReader::new(conn))?.ok_or_else(|| {
             std::io::Error::new(
@@ -288,8 +295,8 @@ fn preview(req: Request, json: bool) -> ExitCode {
         Ok((PreviewReply::Ok { view }, from_root)) => {
             if !from_root && !json {
                 eprintln!(
-                    "peekexec: the daemon at {} does not run as root: this is not necessarily \
-                     what the human would see",
+                    "peekexec: {} is not the installed peekexecd (not root, or not its \
+                     standard socket): this is not necessarily what the human would see",
                     socket().display()
                 );
             }
@@ -419,8 +426,9 @@ fn print_human(resp: &Response) {
     use std::io::Write;
     if resp.dev_mode {
         eprintln!(
-            "peekexec: the daemon at {} does not run as root (development mode, or a program \
-             posing as peekexecd): nothing ran as root, and this answer is not from the human",
+            "peekexec: {} is not the installed peekexecd (not root, or not its standard \
+             socket: development mode, or a program posing as peekexecd): nothing ran as \
+             root, and this answer is not from the human",
             socket().display()
         );
     }
@@ -577,6 +585,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::terminal_safe;
+
+    #[test]
+    fn only_the_standard_socket_speaks_for_the_human() {
+        use super::standard_socket;
+        use std::path::Path;
+        assert!(standard_socket(Path::new(peekexec_proto::wire::SOCKET)));
+        assert!(!standard_socket(Path::new("/run/other/peekexec.sock")));
+        assert!(!standard_socket(Path::new("/tmp/peekexec.sock")));
+    }
 
     #[test]
     fn text_from_a_non_root_daemon_cannot_drive_the_terminal() {

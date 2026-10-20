@@ -371,8 +371,9 @@ login uid is the requester's.
   environment or PATH (a `.envrc`, a Makefile, a prompt injection) can put
   another `peekexec` first in PATH, or name another socket in
   `PEEKEXEC_SOCKET`, and forge any answer, a `deny_reason` included. The
-  second is caught: the client checks that the daemon runs as root and
-  otherwise reports `dev_mode: true`. The first is not. Neither gets root:
+  second is caught: the client reports `dev_mode: true` unless the daemon
+  runs as root and on the standard socket (a socket elsewhere may belong
+  to another service started by root). The first is not. Neither gets root:
   that still takes the human.
 - Physical attacks on an unlocked machine.
 - Judging whether an approved command is a good idea.

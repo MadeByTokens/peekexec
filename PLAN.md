@@ -277,7 +277,7 @@ the default wherever the display cannot be verified.
 - [x] C8b "N more requests waiting" note.
 - [x] C8c Neutral agent-session badge.
 - [x] C9a Client escapes daemon text and output unless the daemon is root.
-- [ ] C9b `PEEKEXEC_SOCKET` set means `dev_mode`.
+- [x] C9b `PEEKEXEC_SOCKET` set means `dev_mode`.
 - [ ] C10a Ancestry walk: parent re-read, started before its child.
 - [ ] C10b No world-writable sticky directory in a trusted chain.
 - [ ] C10c No vfat/exfat/ntfs/cifs/nfs/fuse filesystem in a trusted chain.

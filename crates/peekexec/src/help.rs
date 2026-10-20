@@ -56,8 +56,9 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    kernel enforces it), "best_effort" (applied, but a root process can undo
    it: --no-net), "builtin" (peekexec wrote the file itself; no command ran),
    "declared_only" (the human saw it, but it was not enforced: --write), or
-   "not_requested". "dev_mode": true means the daemon that answered does
-   not run as root: nothing ran as root, and the answer (deny_reason too) is
+   "not_requested". "dev_mode": true means the daemon that answered is not
+   the installed one (it does not run as root, or PEEKEXEC_SOCKET named
+   another socket): nothing ran as root, and the answer (deny_reason too) is
    not the human's. Expect it only if you started a development daemon.
 
 6. Requests the human can judge at a glance:
