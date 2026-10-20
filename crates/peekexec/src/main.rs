@@ -310,8 +310,10 @@ fn preview(req: Request, json: bool) -> ExitCode {
                     out["dev_mode"] = true.into();
                 }
                 println!("{out}");
-            } else {
+            } else if from_root {
                 print!("{}", view.to_text(found.len()));
+            } else {
+                print!("{}", terminal_safe(&view.to_text(found.len())));
             }
             ExitCode::SUCCESS
         }
@@ -427,14 +429,31 @@ fn print_human(resp: &Response) {
     let id = line(resp.request_id.as_deref(), "?");
     match resp.status {
         Status::Approved => {
-            let _ = std::io::stdout().write_all(resp.stdout.as_deref().unwrap_or("").as_bytes());
-            let _ = std::io::stderr().write_all(resp.stderr.as_deref().unwrap_or("").as_bytes());
+            let (out, err) = (
+                resp.stdout.as_deref().unwrap_or(""),
+                resp.stderr.as_deref().unwrap_or(""),
+            );
+            // A root daemon passes the command's own bytes through, as sudo
+            // does. Anything else could send escape sequences that rewrite
+            // the warning above: those are shown, not obeyed.
+            let (out, err) = if resp.dev_mode {
+                (terminal_safe(out), terminal_safe(err))
+            } else {
+                (out.to_string(), err.to_string())
+            };
+            let _ = std::io::stdout().write_all(out.as_bytes());
+            let _ = std::io::stderr().write_all(err.as_bytes());
         }
         Status::Pending => {
             eprintln!("peekexec: waiting for the human; check with `peekexec wait {id}`")
         }
         Status::Denied => eprintln!(
-            "peekexec: denied by the human: {}",
+            "peekexec: denied by {}: {}",
+            if resp.dev_mode {
+                "whoever answered (not the human)"
+            } else {
+                "the human"
+            },
             line(resp.deny_reason.as_deref(), "(no reason given)")
         ),
         Status::Cancelled => eprintln!("peekexec: cancelled"),
@@ -442,6 +461,16 @@ fn print_human(resp: &Response) {
         Status::Timeout => eprintln!("peekexec: no answer before the timeout"),
         Status::Error => eprintln!("peekexec: {}", line(resp.error.as_deref(), "unknown error")),
     }
+}
+
+/// Text from a daemon that does not run as root, for a terminal: every
+/// line escaped as one-line fields are (control and hidden characters as
+/// `⟨U+XXXX⟩`), so it cannot move the cursor or erase what was printed.
+fn terminal_safe(text: &str) -> String {
+    text.split('\n')
+        .map(|l| Shown::line(l, usize::MAX).into_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn request_or_exit(action: &ActionCmd, json: bool) -> Result<Request, ExitCode> {
@@ -542,5 +571,17 @@ fn main() -> ExitCode {
             json,
         ),
         Cmd::Unregister => send(ClientMsg::Unregister, json),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_safe;
+
+    #[test]
+    fn text_from_a_non_root_daemon_cannot_drive_the_terminal() {
+        let t = terminal_safe("ok\n\x1b[2A\x1b[2Kforged\n");
+        assert_eq!(t, "ok\n⟨U+001B⟩[2A⟨U+001B⟩[2Kforged\n");
+        assert!(!t.contains('\x1b'));
     }
 }
