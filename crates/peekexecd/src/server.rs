@@ -209,7 +209,7 @@ impl Daemon {
                 let _ = write_msg(
                     &mut conn,
                     &Response::error(format!(
-                        "uid {} is not in an administrator group ({})",
+                        "uid {} is not in the administrator group (the first of {} that exists)",
                         peer.uid,
                         ADMIN_GROUPS.join(", ")
                     )),
@@ -420,7 +420,7 @@ impl Daemon {
         // findings: admins only, like any request.
         if !self.opts.dev && !is_admin(&user) {
             return Err(format!(
-                "user {} is not in an administrator group ({})",
+                "user {} is not in the administrator group (the first of {} that exists)",
                 user.name,
                 ADMIN_GROUPS.join(", ")
             ));
@@ -775,7 +775,7 @@ impl Daemon {
         };
         if !self.opts.dev && !is_admin(&user) {
             return fail(format!(
-                "user {} is not in an administrator group ({}); peekexec only asks administrators",
+                "user {} is not in the administrator group (the first of {} that exists); peekexec only asks administrators",
                 user.name,
                 ADMIN_GROUPS.join(", ")
             ));
@@ -1143,13 +1143,14 @@ fn admin_gid() -> Option<u32> {
 /// supplementary groups), never from the caller's egid: a shell started
 /// with `newgrp sudo` before the user left the group must not count
 /// (design rule 2).
+///
+/// The administrator group is the first of [`ADMIN_GROUPS`] that exists,
+/// the very group the socket is opened to: on a system that has `sudo` and
+/// also a `wheel` with another meaning, a member of only `wheel` is not an
+/// administrator.
 #[cfg(target_os = "linux")]
 fn is_admin(user: &User) -> bool {
-    use nix::unistd::{Gid, Group};
-    user.groups
-        .iter()
-        .filter_map(|&g| Group::from_gid(Gid::from_raw(g)).ok().flatten())
-        .any(|g| ADMIN_GROUPS.contains(&g.name.as_str()))
+    admin_gid().is_some_and(|gid| user.groups.contains(&gid))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1381,6 +1382,31 @@ mod tests {
             tier: DisplayTier::Wayland,
             verified,
         }
+    }
+
+    #[test]
+    fn only_the_first_admin_group_counts() {
+        let Some(gid) = admin_gid() else {
+            eprintln!("skipped: no administrator group here");
+            return;
+        };
+        let user = |groups: Vec<u32>| User {
+            name: "u".into(),
+            home: "/home/u".into(),
+            uid: 1000,
+            gid: 1000,
+            groups,
+        };
+        assert!(is_admin(&user(vec![1000, gid])));
+        assert!(!is_admin(&user(vec![1000])));
+        // Another of the names, existing besides the first, does not count.
+        let others: Vec<u32> = ADMIN_GROUPS
+            .iter()
+            .filter_map(|n| nix::unistd::Group::from_name(n).ok().flatten())
+            .map(|g| g.gid.as_raw())
+            .filter(|&g| g != gid)
+            .collect();
+        assert!(!is_admin(&user(others)));
     }
 
     #[test]
