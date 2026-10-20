@@ -258,7 +258,7 @@ good `--help` and a shell are enough for agents); `install.sh`
 `--expect-sha256` waits for signed releases; console approval becomes
 the default wherever the display cannot be verified.
 
-- [ ] A1 `dev/wayland-vm/approve-test.sh`: the polkit path end to end in
+- [x] A1 `dev/wayland-vm/approve-test.sh`: the polkit path end to end in
       the VM (approve, deny with reason, wrong password, too long).
 - [ ] A2 First push to GitHub, CI green (asks the owner first: the
       repository is public).

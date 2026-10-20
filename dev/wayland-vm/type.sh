@@ -4,7 +4,7 @@
 set -eu
 VM_DIR=${VM_DIR:-$HOME/vms/peekexec-noble}
 python3 - "$VM_DIR/qmp.sock" "${1:?usage: type.sh TEXT}" <<'EOF'
-import json, socket, sys
+import json, socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
 f = s.makefile("rw")
@@ -15,7 +15,9 @@ def cmd(c):
     if "error" in r:
         sys.exit(r["error"]["desc"])
 cmd({"execute": "qmp_capabilities"})
-keys = [{"space": "spc"}.get(ch, ch) for ch in sys.argv[2]] + ["ret"]
+keys = [{" ": "spc"}.get(ch, ch) for ch in sys.argv[2]] + ["ret"]
 for k in keys:
     cmd({"execute": "send-key", "arguments": {"keys": [{"type": "qcode", "data": k}]}})
+    # Faster than this, the dialog (egui) drops some keys.
+    time.sleep(0.05)
 EOF
