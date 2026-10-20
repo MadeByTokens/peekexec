@@ -136,8 +136,8 @@ has a seat and is its active one"), never the absence of a warning sign
    a `bash -c '…'` that looks exactly like the agent's own shell. Scripts and
    programs visible in the chain (`sh build.sh`, `make`, `python3`) are
    flagged and disable Enter, but their absence is no proof. Telling the
-   agent's own requests apart needs a channel only the agent holds (the
-   planned MCP transport). Nor does it prove the agent was not compromised;
+   agent's own requests apart would need a channel only the agent holds,
+   which peekexec does not have. Nor does it prove the agent was not compromised;
    its `--why` remains a claim.
 2. **Shown ↔ executed.**
    - Script and install contents travel inside the request. Scripts run from a

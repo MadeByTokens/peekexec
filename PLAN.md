@@ -172,10 +172,10 @@ Crates: `nix`, `libc`, `egui`/`eframe`, `syntect`, `similar`, `clap`, `serde`,
 |---|---|
 | **M0** ✅ | Plan, threat model, CLI spec; workspace with platform traits; `preview` and `help` work; Linux peer identification |
 | **M1** ✅ | Linux MVP: daemon, egui dialog (fast path, Cancel, Formatted/Raw, Unicode marks, Deny with reason), PAM, snapshot execution, trusted-program rule, env allowlist, `--json`, pidfd-pinned peer, `--no-net` via netns, `--dev` mode, systemd units + install script |
-| **M2** | **Wayland via the desktop's polkit prompt** (validated in a VM, see below); **trustworthy caller identity** (registered agent sessions, then an MCP channel); real containment by running approved commands as transient systemd units; remaining review items below |
+| **M2** | **Wayland via the desktop's polkit prompt** (validated in a VM, see below); **trustworthy caller identity** (registered agent sessions); real containment by running approved commands as transient systemd units; remaining review items below |
 | **M3** | Packaging + CI matrix → **first public release** |
 | **M4** | macOS backends + Homebrew |
-| **M5** | MCP server + Claude Code skill, dedicated-VT approver, FIDO2 |
+| **M5** | FIDO2 (the dedicated-VT approver moved into M2; an MCP channel was dropped: agents use the CLI) |
 
 ### M2 detail: verified display on Wayland
 
@@ -218,10 +218,12 @@ itself "claude"). Plan:
    agent's session", with scripts and programs in between flagged. It cannot
    tell the agent's own commands from a program that exec'd into a shell;
    that needs step 2.
-2. **MCP channel.** Requests arrive over a private pipe between the agent and
-   a root-installed `peekexec mcp` process; scripts the agent runs cannot
-   reach it, so "the agent's own tool call" becomes something the system can
-   check.
+2. **MCP channel: dropped.** A private pipe between the agent and a
+   `peekexec mcp` process would let the system check "the agent's own tool
+   call", but a prompt-injected agent would call that tool just the same,
+   and agents do well with the CLI and its `--help`. The console approval
+   (every request read in full, outside the session) covers most of what
+   the label would.
 
 ### M2 detail: containment and audit
 
@@ -247,3 +249,44 @@ itself "claude"). Plan:
   the Wayland work gives verified paths there).
 - Expired passwords: report "password expired" instead of a generic failure.
 
+
+### Fourth review: follow-ups (checklist)
+
+From the fourth review (2026-10-19). One commit per item, each tested
+first; ticked when committed. Decided with the owner: no MCP channel (a
+good `--help` and a shell are enough for agents); `install.sh`
+`--expect-sha256` waits for signed releases; console approval becomes
+the default wherever the display cannot be verified.
+
+- [ ] A1 `dev/wayland-vm/approve-test.sh`: the polkit path end to end in
+      the VM (approve, deny with reason, wrong password, too long).
+- [ ] A2 First push to GitHub, CI green (asks the owner first: the
+      repository is public).
+- [ ] B3 `deny_reason`: the guide says it may only narrow what the agent
+      does and mentions `display_verified`; denials stored per requester.
+- [ ] B4 Daemon refuses to start when the dialog or helper is readable by
+      others.
+- [ ] B5 Flags for lasting root: group changes, setuid chmod, setcap,
+      systemd-run, at/batch, crontab, `systemctl enable`.
+- [ ] B6 Facts say the output goes back to the requester.
+- [ ] B7a Results expire from when they finished.
+- [ ] B7b `is_admin` uses the first admin group only.
+- [ ] B7c The dialog's Enter path honours the approve delay.
+- [ ] B7d `Shown` escapes characters with zero advance.
+- [ ] C8a Diff against the previous request when one follows soon.
+- [ ] C8b "N more requests waiting" note.
+- [ ] C8c Neutral agent-session badge.
+- [ ] C9a Client escapes daemon text and output unless the daemon is root.
+- [ ] C9b `PEEKEXEC_SOCKET` set means `dev_mode`.
+- [ ] C10a Ancestry walk: parent re-read, started before its child.
+- [ ] C10b No world-writable sticky directory in a trusted chain.
+- [ ] C10c No vfat/exfat/ntfs/cifs/nfs/fuse filesystem in a trusted chain.
+- [ ] C10d Password buffers wiped (daemon reader, egui undo).
+- [ ] D11a `install.sh` refuses to run inside the service.
+- [ ] D11c Rust toolchain pinned for CI.
+- [ ] D11d `forbid(unsafe_code)` where there is none; unsafe-doc lint.
+- [ ] D11e schemars behind a feature (not linked into the daemon).
+- [ ] E12 Console (VT) approval, the default on unverified displays:
+      prototype in the VM, then module, renderer, approval path, docs.
+- [ ] E14 Commands as transient systemd units: kernel-enforced `--write`
+      and `--no-net`, output a new daemon can reattach to.
