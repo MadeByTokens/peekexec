@@ -63,6 +63,11 @@ const MAX_KEPT_ERROR: usize = 4096;
 /// Results hold what root printed: they go when they expire, whether or not
 /// anyone connects.
 const SWEEP_EVERY: Duration = Duration::from_secs(60);
+/// Audit lines for requests refused before any dialog, per user and minute.
+/// Nothing that reached a human is limited. Without a limit, a flood of
+/// refusals (no human needed) could rotate the record of an approved command
+/// out of the journal.
+const REFUSALS_LOGGED_PER_MINUTE: u32 = 30;
 /// A request within this long of the one a user saw before is compared
 /// with it.
 const COMPARE_WINDOW: Duration = Duration::from_secs(600);
@@ -97,6 +102,7 @@ pub struct Daemon {
     denials: Mutex<HashMap<DenialKey, Denial>>,
     /// The request each user saw last, to compare the next one with.
     last_shown: Mutex<HashMap<u32, LastShown>>,
+    refusals: Mutex<HashMap<u32, RefusalLog>>,
     /// One dialog on screen at a time.
     prompt_lock: Mutex<()>,
     /// When the last dialog closed.
@@ -107,6 +113,36 @@ pub struct Daemon {
     agents: Mutex<Vec<AgentSession>>,
     /// Users with a registration waiting for the human (one at a time).
     registering: Mutex<std::collections::HashSet<u32>>,
+}
+
+/// Refusals logged in the current minute, and those that were not.
+#[derive(Default)]
+struct RefusalLog {
+    since: Option<Instant>,
+    logged: u32,
+    dropped: u32,
+}
+
+impl RefusalLog {
+    /// Whether to log this refusal, and how many went unlogged before it.
+    fn admit(&mut self, now: Instant) -> (bool, u32) {
+        let new_minute = self
+            .since
+            .map_or(true, |t| now.duration_since(t) >= Duration::from_secs(60));
+        let mut dropped = 0;
+        if new_minute {
+            dropped = std::mem::take(&mut self.dropped);
+            self.since = Some(now);
+            self.logged = 0;
+        }
+        if self.logged < REFUSALS_LOGGED_PER_MINUTE {
+            self.logged += 1;
+            (true, dropped)
+        } else {
+            self.dropped += 1;
+            (false, dropped)
+        }
+    }
 }
 
 struct Entry {
@@ -170,6 +206,7 @@ impl Daemon {
             requests: Mutex::default(),
             denials: Mutex::default(),
             last_shown: Mutex::default(),
+            refusals: Mutex::default(),
             prompt_lock: Mutex::new(()),
             last_prompt: Mutex::new(None),
             connections: Mutex::default(),
@@ -361,9 +398,13 @@ impl Daemon {
                     &cancel,
                 )
             }
-            ClientMsg::Unregister => self.unregister(&peer),
+            ClientMsg::Unregister => {
+                self.event(&peer, "unregister", &[]);
+                self.unregister(&peer)
+            }
             ClientMsg::Cancel { id } => match self.lookup(&id, peer.uid) {
                 Some(entry) => {
+                    self.event(&peer, "cancel", &[("id", &id)]);
                     entry.cancel.store(true, Ordering::SeqCst);
                     entry
                         .wait(Some(Duration::from_secs(10)))
@@ -388,6 +429,28 @@ impl Daemon {
             .get(id)
             .filter(|e| e.owner == uid && !e.expired())
             .cloned()
+    }
+
+    /// See [`REFUSALS_LOGGED_PER_MINUTE`].
+    fn refusal_may_be_logged(&self, peer: &Peer) -> bool {
+        let (log, dropped) = self
+            .refusals
+            .lock()
+            .unwrap()
+            .entry(peer.uid)
+            .or_default()
+            .admit(Instant::now());
+        if dropped > 0 {
+            audit_event(peer, "not-logged", &[("refused", &dropped.to_string())]);
+        }
+        log
+    }
+
+    /// An audit event no human took part in, under the same limit.
+    fn event(&self, peer: &Peer, event: &str, fields: &[(&str, &str)]) {
+        if self.refusal_may_be_logged(peer) {
+            audit_event(peer, event, fields);
+        }
     }
 
     /// Drop this user's oldest finished requests past the limits.
@@ -434,6 +497,8 @@ impl Daemon {
             if pending >= MAX_PENDING_PER_USER {
                 // Answered here and not kept: a flood of refused requests
                 // does not grow the table.
+                drop(requests);
+                self.event(&peer, "refused-too-many-waiting", &[]);
                 entry.finish(Response::error(format!(
                     "refused: {pending} requests are already waiting for the human; \
                      wait for them before sending more"
@@ -451,7 +516,10 @@ impl Daemon {
         let worker_id = id.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
             let mut response = d.process(&peer, &request, &worker_id, &worker_entry.cancel);
-            audit(&peer, &request, &worker_id, &response);
+            // `display_tier` is set only for a request that reached a dialog.
+            if response.display_tier.is_some() || d.refusal_may_be_logged(&peer) {
+                audit(&peer, &request, &worker_id, &response);
+            }
             if let Some(error) = &mut response.error {
                 if let Some((end, _)) = error.char_indices().nth(MAX_KEPT_ERROR) {
                     error.truncate(end);
@@ -597,6 +665,11 @@ impl Daemon {
         cancel: &AtomicBool,
     ) -> Response {
         let id = format!("s-{}", &new_id()[2..]);
+        self.event(
+            peer,
+            "register",
+            &[("id", &id), ("name", name), ("why", why.unwrap_or(""))],
+        );
         let fail = |m: String| Response {
             request_id: Some(id.clone()),
             ..Response::error(m)
@@ -907,6 +980,7 @@ impl Daemon {
             }
             return fail(e);
         }
+        let reached_dialog;
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
             let recent = self
@@ -939,7 +1013,8 @@ impl Daemon {
                 self.decide(&prepared, &display, &user, peer, cancel)
             };
             // Only what reached a dialog is "the request you saw".
-            if !withdrawn && !matches!(d, Err(_) | Ok(Decision::Failed(_))) {
+            reached_dialog = !withdrawn && !matches!(d, Err(_) | Ok(Decision::Failed(_)));
+            if reached_dialog {
                 self.remember_shown(peer.uid, request);
             }
             // A dialog that failed may still have been on screen: when in
@@ -952,7 +1027,12 @@ impl Daemon {
 
         let mut response = match decision {
             Ok(Decision::Approved) => {
-                audit_line(peer, request, id, "status=starting");
+                audit_line(
+                    peer,
+                    request,
+                    id,
+                    &format!("status=starting {}", runs(&prepared.exec)),
+                );
                 self.execute(&prepared, id, base(Status::Approved))
             }
             Ok(Decision::Cancelled) => base(Status::Cancelled),
@@ -972,8 +1052,11 @@ impl Daemon {
             Err(e) => fail(e),
         };
         response.enforced = Some(prepared.enforced.clone());
-        response.display_tier = Some(display.tier);
-        response.display_verified = Some(display.verified);
+        // Only where a dialog was reached: the audit limit goes by this.
+        if reached_dialog {
+            response.display_tier = Some(display.tier);
+            response.display_verified = Some(display.verified);
+        }
         if let Some(dir) = &prepared.snapshot_dir {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1464,6 +1547,38 @@ fn audit_line(peer: &Peer, request: &Request, id: &str, outcome: &str) {
     );
 }
 
+/// A line for something that is not a request's outcome.
+fn audit_event(peer: &Peer, event: &str, fields: &[(&str, &str)]) {
+    // Each field quoted and cut on its own: one cannot push out another.
+    let fields: String = fields
+        .iter()
+        .map(|(k, v)| format!(" {k}={}", quoted(v)))
+        .collect();
+    eprintln!(
+        "peekexecd: audit uid={} pid={} exe={} event={event}{fields}",
+        peer.uid,
+        peer.process.pid,
+        quoted(peer.process.exe.as_deref().unwrap_or("?")),
+    );
+}
+
+/// What root is about to use, once it is resolved. The request says what
+/// was asked for (`ls`, a link, a directory to install into).
+fn runs(exec: &Execution) -> String {
+    match exec {
+        Execution::Command(plan) => format!(
+            "program={} final_argv={} final_cwd={}",
+            quoted(&plan.program),
+            quoted_list(&plan.argv),
+            quoted(&plan.cwd)
+        ),
+        Execution::Install { dest, .. } => {
+            format!("final_dest={}", quoted(&dest.display().to_string()))
+        }
+        Execution::Nothing => String::new(),
+    }
+}
+
 fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
     let outcome = format!(
         "status={}{}{}{}",
@@ -1860,5 +1975,17 @@ mod tests {
         t.insert("new".into(), entry(10, 1024));
         Daemon::trim_kept(&mut t, 1000);
         assert!(t.contains_key("new") && !t.contains_key("old"));
+    }
+
+    #[test]
+    fn refusals_are_logged_up_to_a_rate_and_counted_past_it() {
+        let mut log = RefusalLog::default();
+        let t = Instant::now();
+        for _ in 0..REFUSALS_LOGGED_PER_MINUTE {
+            assert_eq!(log.admit(t), (true, 0));
+        }
+        assert_eq!(log.admit(t), (false, 0));
+        assert_eq!(log.admit(t), (false, 0));
+        assert_eq!(log.admit(t + Duration::from_secs(61)), (true, 2));
     }
 }

@@ -379,17 +379,26 @@ does not affect peekexec's X11 path.
 
 ## Audit
 
-Each request is logged to the journal with the requester's uid and pid, the
-command (argv, or script/install content hash), working directory, stated
-reason, outcome, exit code and any deny reason. An approved one is logged
-twice: before the command starts (so a command that ends the daemon or the
-machine is still on record) and when it ends. Requester strings are quoted
-in plain ASCII and each is cut at 512 bytes (32 arguments at most; the
-request's sha256 identifies the rest), so no line reaches journald's
-`LineMax` and is split into records that begin with requester text, and
-the unit has no log rate limit, so a flood of refused requests cannot
-crowd out the record of an approved one. The command's audit
-login uid is the requester's.
+Each request that reaches a dialog is logged to the journal with the
+requester's uid and pid, the command (argv, or script/install content hash),
+working directory, stated reason, outcome, exit code and any deny reason.
+An approved one is logged twice: before the command starts, with what root
+resolved it to (the program, the final arguments and directory, the final
+install target), so a command that ends the daemon or the machine is still on
+record, and when it ends. Registrations, unregistering and cancelling are
+logged; previews are not.
+
+Requester strings are quoted in plain ASCII and each is cut at 512 bytes (32
+arguments at most; the request's sha256 identifies the rest), so no line
+reaches journald's `LineMax` and is split into records that begin with
+requester text. The unit has no log rate limit, so nothing is dropped when
+written. journald still removes the oldest lines when it reaches its size
+limit, so requests refused before any dialog, which need no human, are
+logged at most 30 a minute per user, with a count of the rest: a flood cannot
+rotate an approved command out of the journal in any short time, though
+the journal's retention is not peekexec's to promise. The command's audit
+login uid is set to the requester's where the kernel allows it (best effort:
+a process that already has one keeps it).
 
 ## Out of scope
 
