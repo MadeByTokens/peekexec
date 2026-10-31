@@ -1,5 +1,9 @@
 # Review checklist: requester inputs × daemon uses
 
+This is the working list for security reviews. Each table below takes one thing a
+requester can control (a row) and asks what happens at each place the daemon uses
+it (a column). It is dense on purpose, and is meant to be walked through, not read.
+
 Reviews check every cell against the [design rules](../THREAT_MODEL.md#design-rules)
 (R1–R7). A new feature adds rows (new inputs) or columns (new uses); a cell
 nobody has filled in is where the next hole is. A row is one *part* of an

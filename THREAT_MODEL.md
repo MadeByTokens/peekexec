@@ -1,5 +1,17 @@
 # peekexec — threat model
 
+This is the detailed version of what peekexec defends against, and how. If you
+want the short, plain version, read the [README](README.md) first.
+
+**In short.** The requester (usually an AI agent) is not trusted. It can ask for
+anything, and it can lie about why. peekexec's job is to make sure a human sees
+what will really run, that what runs is what they saw, and that nothing runs
+without them. The weak spot is the display: a program running as you can often
+see and touch your windows, so how much of this holds depends on your desktop
+(see [Display tiers](#display-tiers)).
+
+Known gaps are listed in [Known limits](#known-limits).
+
 ## Scope
 
 A single-seat Linux desktop where the person at the keyboard is an
@@ -32,7 +44,9 @@ It does not promise:
 - that the approved command is safe (the human decides; flags help);
 - anything about files and directories the command reads while running;
 - containment: `--write` is declared only, `--no-net` is best effort;
-- protection from a malicious program running as the same user on X11.
+- protection from a malicious program running as the same user on X11;
+- protection on Wayland from a requester that planted code in `$HOME` before
+  the login it acts in (a GNOME Shell extension).
 
 ## Design rules
 
@@ -199,101 +213,8 @@ has a seat and is its active one"), never the absence of a warning sign
    (boundary 4), which the daemon first checks would actually ask. PAM
    prompts the dialog cannot answer (a username, an OTP code) fail closed.
 4. **Dialog ↔ human (the display).** Whoever runs the display server sees every
-   key typed into the dialog. So the display is never taken from the
-   requester's environment when it can be verified. On X11, the daemon accepts
-   only an X server that is inside the cgroup scope of the user's active local
-   logind session, descends from that session's leader, runs a root-owned
-   `Xorg` started for the session's VT, and is the only process meeting all
-   that. Otherwise (Wayland, or no logind) peekexec's window is found through
-   the user's environment and cannot be trusted (`display_verified: false`),
-   so it becomes read-only: the human clicks Continue there, and the password
-   goes into the desktop's own polkit prompt for the `org.peekexec.approve`
-   action (the user's own password, `auth_self`, never remembered; only
-   the active local session may be asked at all: `allow_any` and
-   `allow_inactive` are `no`). Since the Continue click may come from a
-   display the requester runs, the daemon first asks polkit without user
-   interaction and refuses if it would allow with no one asked (a local
-   rule granting the action, a remembered authorization). That prompt is drawn by
-   the authentication agent registered at login. On GNOME that is the shell
-   itself, the compositor, which a requester cannot reroute; on other
-   desktops it is an ordinary program of the user's, which a requester could
-   end and replace with its own. So the path is used only with positive
-   evidence that GNOME Shell holds it: the session's controller, as logind
-   records it (the one process that took control of the session's devices,
-   the compositor on Wayland), resolved to a pid by the bus daemon, is a
-   `gnome-shell` of the user's from a binary root controls. A requester can
-   start a shell or an agent of its own, but not take the session from the
-   compositor, which cannot be replaced without ending the session. X11
-   sessions are refused too, as their controller is not `gnome-shell`.
-   That evidence is about the binary, and GNOME Shell's code and settings
-   also come from the user's own files: it is a user unit, so a drop-in or
-   `environment.d` can add to its environment at the next login, and it
-   loads extensions from `$HOME`. A shell with native code from a file
-   root does not control is refused (each executable mapping in `/proc`,
-   judged by the mapped file itself, just before asking). That is a
-   tripwire, not proof: one look, at native code from files. Anonymous
-   memory passes, and JavaScript leaves no such mark, so an extension is
-   not detected: **a requester that writes `$HOME` and survives a re-login can
-   run inside the process that draws the prompt.** Only a prompt outside
-   the user's session removes that (tier 3). The prompt
-   shows a summary written by the daemon.
-   The daemon's facts come first: the limits, where the request came from,
-   the working directory and every warning. Then the command in full: every
-   argument and every line of content, indentation kept (as a count: GNOME
-   centres the text), each content line marked `| `, with blank lines and
-   trailing spaces shown (either can end a command that looks continued),
-   then the environment. Nothing is cut. The prompt does
-   not scroll, so the daemon lays the message out as GNOME draws it
-   (measured in the VM: about 45 `x` widths per line, wrapped at spaces,
-   `-` and `/`, each character counted at its widest in the Ubuntu and
-   Cantarell fonts, a word wider than a line broken and marked `⟨+⟩` so it
-   is not clipped) and counts every screen line. The whole message must fit
-   in 22 of them, which keeps the password field on a screen 768 pixels
-   tall (root can raise it with `--prompt-lines` for larger screens). A
-   request that does not fit is refused on this path rather than approved
-   with part of it below the screen's edge or visible only in the window
-   that cannot be verified. That leaves room for a few short lines of
-   script; longer work is split into steps. Those measurements hold for
-   GNOME 46 at its default text size, and a user's program can change the
-   text size, so fitting is not relied on: the prompt opens by saying it
-   ends with `■ END`, a line requester text cannot imitate (every
-   character outside ASCII in it is a token), and a human who does not see
-   that line knows the prompt was cut and cancels. With the field out of
-   view the password can still be typed; that human has been told not to.
-   The prompt has
-   no colour or markers, so every character outside printable ASCII is
-   written as `⟨U+XXXX⟩`, runs of spaces collapse into a count, and the
-   number of suspicious characters comes first. The summary is
-   passed so that polkit inserts it verbatim (no `$(...)` expansion). The
-   subject is the requesting process (`unix-process`: pid, start time, uid).
-   polkit would prefer an agent registered for that very process over the
-   session's, and a process may register one for any process of its own user,
-   so a requester could otherwise receive and fake the prompt itself. The
-   daemon therefore first registers a *fallback* agent of its own for the
-   subject: polkit allows one agent per subject, so this blocks the requester
-   from registering one, while `fallback` keeps the session's agent in use.
-   If the slot is already taken, peekexec refuses (tested with `pkttyagent
-   --process`). Because polkit asks the agent of the requester's login
-   session, the requester must be in a session of the user's that has a
-   seat and is that seat's active session, or in none (apps under
-   `user@.service`, where polkit uses the display session). Any other
-   session (ssh, `ssh localhost`, which logind counts as active and does
-   not mark remote, an inactive console), whose agent the requester could
-   have chosen, is refused before polkit is asked. A requester with no
-   agent in its session gets an error. Residual risk: another agent that
-   registered before GNOME Shell did at login (one started from the
-   session's autostart) would go unnoticed (GNOME Shell then reports that
-   it could not register its own). A program of the user's that could
-   attach to the shell would own the prompt, so the path also needs positive
-   evidence that it cannot: `ptrace_scope` of 1 or more, or a shell that is
-   not dumpable. Some distributions default to 0: there the path is refused,
-   and the error says what to set.
-   Where there is no prompt that can be trusted (the polkit action is not
-   installed, or the desktop is not GNOME), the request is refused before
-   anything is shown: typing the password into the unverified window would
-   hand it to whoever runs that display. An administrator can allow that
-   anyway by starting the daemon with `--allow-unverified-display`; every
-   such dialog then says the display could not be verified.
+   key typed into the dialog, so this boundary needs the most care. It has its
+   own section: [The display in detail](#the-display-in-detail).
 5. **Executed command → system.** It runs as full root, in a cgroup of its
    own that it enters before `exec`. When it exits, everything in that
    cgroup is killed (`cgroup.kill`, or freeze and kill on kernels before
@@ -312,9 +233,142 @@ has a seat and is its active one"), never the absence of a warning sign
    daemon, so stopping the daemon ends running commands too: `install.sh`
    waits for them before it restarts peekexecd, and a daemon that crashes
    takes them with it. The umask is 022, and the audit login uid is set to
-   the requester. `enforced`
+   the requester where the kernel allows it. `enforced`
    reports `kernel`, `best_effort`, `builtin` (no command ran: peekexec
    wrote the file), `declared_only` or `not_requested` per limit.
+
+## The display in detail
+
+Whoever runs the display server sees every key typed into the dialog. So the
+display is never taken from the requester's environment when it can be
+verified, and the password goes only where it is safe to send it.
+
+### X11: verified, then the dialog takes the password
+
+The daemon accepts an X server only if all of this is true:
+
+- it is inside the cgroup scope of the user's active local logind session;
+- it descends from that session's leader;
+- it is a root-owned `Xorg` started for the session's VT;
+- it is the only process that meets all of the above.
+
+This is checked before the queue, and again when the queue reaches the request,
+as a request can wait for many minutes. In practice this means GDM: other
+display managers start Xorg outside the session scope, and are refused.
+
+### Anything else: the window is read-only
+
+On Wayland, or without logind, peekexec's window is found through the user's
+environment and cannot be trusted (`display_verified: false`). The requester may
+even be running that display. So the window only shows the request. The human
+clicks Continue there, and the password goes into the desktop's own polkit
+prompt for the `org.peekexec.approve` action. That action uses the user's own
+password (`auth_self`), is never remembered, and is only for the active local
+session (`allow_any` and `allow_inactive` are `no`).
+
+Since the Continue click may come from a display the requester runs, the daemon
+first asks polkit without user interaction. If polkit would allow the request
+with no one asked (a local rule, a remembered authorization), it refuses.
+
+### Why only GNOME
+
+That prompt is drawn by the authentication agent registered at login. On GNOME
+that is the shell itself, the compositor, which a requester cannot reroute. On
+other desktops it is an ordinary program of the user's, which a requester could
+end and replace with its own.
+
+So the path needs positive evidence that GNOME Shell holds the prompt. The
+session's controller, as logind records it (the one process that took control of
+the session's devices), is resolved to a pid by the bus daemon, and must be a
+`gnome-shell` of the user's from a binary root controls. A requester can start a
+shell or an agent of its own, but cannot take the session from the compositor
+without ending it. X11 sessions fail this too, as their controller is not
+`gnome-shell`.
+
+### What that evidence does not prove
+
+It proves which binary was started, not what the shell is running. GNOME Shell's
+code and settings also come from the user's own files: it is a user unit, so a
+drop-in or `environment.d` can add to its environment at the next login, and it
+loads extensions from `$HOME`.
+
+- **Native code:** each executable mapping in `/proc`, judged by the mapped file
+  itself, must come from a file root controls, checked just before asking. This
+  is a tripwire, not proof. It is one look, and anonymous memory passes.
+- **Extensions:** JavaScript leaves no such mark, so an extension is not detected.
+  **A requester that writes `$HOME` and survives a re-login can run inside the
+  process that draws the prompt.** Only a prompt outside the user's session
+  removes that (tier 3).
+- **Attaching to the shell:** a program of the user's that could attach would own
+  the prompt, so the path needs positive evidence that it cannot:
+  `ptrace_scope` of 1 or more, or a shell that is not dumpable. Where
+  `ptrace_scope` is 0 the path is refused, and the error says what to set.
+- **An agent that got there first:** one registered before GNOME Shell at login
+  (from the session's autostart) would go unnoticed. GNOME Shell then reports that
+  it could not register its own.
+
+### What the prompt says
+
+The prompt is the only trustworthy view on this path, so the daemon writes a
+summary that stands on its own. It is passed so that polkit inserts it verbatim
+(no `$(...)` expansion).
+
+- **Order:** the daemon's facts come first (the limits, where the request came
+  from, the working directory, every warning), so nothing the requester sends
+  can push them out of view. Then the command, then the environment.
+- **Completeness:** every argument and every line of content, with nothing cut.
+- **Lines:** each content line is marked `| `. GNOME centres the text, so
+  indentation is written as a count. Blank lines and trailing spaces are shown,
+  as either can end a command that looks continued.
+- **Hidden text:** the prompt has no colours, so every character outside printable
+  ASCII is written as `⟨U+XXXX⟩`, runs of spaces become a count, and the number of
+  suspicious characters comes first.
+
+### Fitting on the screen
+
+The prompt does not scroll, so the daemon lays the message out as GNOME draws it
+(measured in the VM: about 45 `x` widths per line, wrapped at spaces, `-` and
+`/`, each character counted at its widest in the Ubuntu and Cantarell fonts, a
+word wider than a line broken and marked `⟨+⟩` so it is not clipped) and counts
+every screen line. The whole message must fit in 22 of them, which keeps the
+password field on a screen 768 pixels tall. Root can raise this with
+`--prompt-lines`. A request that does not fit is refused on this path. That
+leaves room for a few short lines of script, so longer work is split into steps.
+
+Those measurements hold for GNOME 46 at its default text size, and a user's
+program can change the text size, so fitting is not relied on. The prompt opens
+by saying it ends with `■ END`, a line requester text cannot imitate (every
+character outside ASCII in it is a token). A human who does not see that line
+knows the prompt was cut. This proves the bottom edge only: a wider font could
+still clip a word on the right, which has not been tested. With the field out of
+view a password can still be typed; that human has been told not to.
+
+### Keeping the prompt on the right agent
+
+The subject is the requesting process (`unix-process`: pid, start time, uid).
+polkit would prefer an agent registered for that very process over the
+session's, and a process may register one for any process of its own user, so a
+requester could otherwise receive and fake the prompt itself. The daemon
+therefore first registers a *fallback* agent of its own for the subject: polkit
+allows one agent per subject, so this blocks the requester from registering one,
+while `fallback` keeps the session's agent in use. If the slot is already taken,
+peekexec refuses (tested with `pkttyagent --process`).
+
+Because polkit asks the agent of the requester's login session, the requester
+must be in a session of the user's that has a seat and is that seat's active
+session, or in none (apps under `user@.service`, where polkit uses the display
+session). Any other session (ssh, `ssh localhost`, which logind counts as active
+and does not mark remote, an inactive console), whose agent the requester could
+have chosen, is refused before polkit is asked. A requester with no agent in its
+session gets an error.
+
+### No prompt that can be trusted
+
+Where the polkit action is not installed, or the desktop is not GNOME, the
+request is refused before anything is shown: typing the password into the
+unverified window would hand it to whoever runs that display. An administrator
+can allow that anyway by starting the daemon with `--allow-unverified-display`;
+every such dialog then says the display could not be verified.
 
 ## Display tiers
 
@@ -408,6 +462,27 @@ rotate an approved command out of the journal in any short time, though
 the journal's retention is not peekexec's to promise. The command's audit
 login uid is set to the requester's where the kernel allows it (best effort:
 a process that already has one keeps it).
+
+## Known limits
+
+These are open, and known. Details of the smaller ones are in
+[docs/notes/fifth-review.md](docs/notes/fifth-review.md).
+
+- **Tier 2 and shell extensions.** See
+  [What that evidence does not prove](#what-that-evidence-does-not-prove).
+  Console approval (planned) is the real answer.
+- **The moment the prompt opens.** On Wayland the requester chooses when, and the
+  prompt has no input guard, so it could appear just as the human types a password
+  elsewhere.
+- **Containment.** `--write` is not enforced and `--no-net` is best effort, until
+  commands run as transient systemd units (planned).
+- **Enter-to-approve on X11.** The allowlist limits what Enter can approve; it does
+  not stop a same-user program from pressing it.
+- **Tested on few systems.** Ubuntu 22.04 and 24.04, GNOME 46 for the prompt, kernel
+  6.8. SELinux, other distributions, and kernels without `SO_PEERPIDFD` have not been
+  exercised.
+- **No outside review.** Everything here has been reviewed only by its authors'
+  own tools and agents.
 
 ## Out of scope
 

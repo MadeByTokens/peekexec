@@ -1,7 +1,9 @@
 # Security
 
-peekexec is pre-alpha and has not been audited. Read
-[THREAT_MODEL.md](THREAT_MODEL.md) for what it is meant to hold against.
+peekexec is pre-alpha, and no independent expert has audited it. The
+[README](README.md#what-it-wont-protect-you-from) lists what it won't protect you
+from in plain words, and [THREAT_MODEL.md](THREAT_MODEL.md) goes through it in
+detail.
 
 ## Reporting a vulnerability
 
@@ -22,6 +24,23 @@ Known and documented, not vulnerabilities by themselves: the X11 limits
 (any program of the same user can see and drive windows), unverified Wayland
 displays, `--write` being declared only, `--no-net` being best effort, files
 read at runtime not being shown.
+
+## What the installer puts on your system
+
+`packaging/install.sh` first copies the built binaries into a root-only staging
+directory, checks them there, and refuses a test build. It then installs:
+
+- `/usr/local/bin/peekexec`, the client;
+- `/usr/libexec/peekexec/peekexecd` and `peekexec-ui`, mode 0711: executable but
+  not readable by users, so the copies that run as you can't be attached to;
+- `peekexecd.socket` and `peekexecd.service` in `/etc/systemd/system`, with a
+  drop-in that sets the socket's group to `--admin-group`;
+- `/usr/share/polkit-1/actions/org.peekexec.approve.policy`, which the Wayland
+  path needs (skipped if polkit is not installed);
+- `/etc/pam.d/peekexec`, unless it exists already.
+
+The daemon runs as root and starts on first use, through the socket. Only members
+of the admin group can connect.
 
 ## `unsafe` inventory
 

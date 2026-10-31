@@ -5,6 +5,9 @@ human the exact command, script or file being installed, binds the approval
 to what was shown, and reports honestly what it does and does not limit. Built
 so AI coding agents can ask for root with a reason the human can read.
 
+This file is for people working on peekexec: the design, and what comes next.
+For what it is and how to use it, see the [README](README.md).
+
 ## The problem
 
 pkexec's dialog says "run /bin/sh as super user". You cannot see the command or

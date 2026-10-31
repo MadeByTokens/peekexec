@@ -1,89 +1,136 @@
 # peekexec
 
+**Peek, then exec.** When a program asks for root, peekexec shows you exactly
+what it wants to run before you type your password.
+
+It was built for AI coding agents. They often need root for a step or two, and
+the usual prompt tells you almost nothing: pkexec asks for your password to
+"run /bin/sh as super user". peekexec shows you the real command instead, along
+with who is asking and why.
+
 > [!WARNING]
-> **Experimental software. Use at your own risk.**
+> **This is experimental, pre-alpha software, and no independent security
+> expert has reviewed it.** It installs a service that runs as root, and a bug
+> in it could give a local program root without your approval. It comes with
+> no warranty.
 >
-> peekexec installs a daemon that runs as **root** and runs commands as root
-> once a human approves them. It is pre-alpha and has **not** been audited by
-> independent security experts; bugs in it could let a local program gain root
-> without approval. It comes with no warranty (see the licenses). Do not
-> install it on shared or multi-user machines, or on machines you cannot
-> afford to lose.
+> Use it on your own single-user machine, and not on shared machines or ones
+> you can't afford to lose.
 >
-> What it is good for today: on your own single-user machine, letting you
-> catch an agent's *mistakes* before they run as root. It is not a defence
-> against an agent that is trying to get root behind your back (nothing that
-> runs as your user is; see [When to use something else](#when-to-use-something-else)).
-> Until an outside security review has been done, treat it as pre-alpha.
->
-> Read [THREAT_MODEL.md](THREAT_MODEL.md) for what it does and
-> does not protect against, and report problems privately as described in
-> [SECURITY.md](SECURITY.md).
+> **It helps you catch an agent's mistakes. It does not stop an agent that is
+> deliberately trying to get root.** Please read
+> [What it won't protect you from](#what-it-wont-protect-you-from).
 
-**peek**, then **exec**: an approval dialog for root commands that shows the
-human what they are approving: the exact command, the full script, or the
-file being installed, plus who is asking and why. Built so AI coding agents
-can ask for root with a reason the human can read, and get a structured
-answer back.
+## What it looks like
 
-> Linux only. On X11 the password goes into peekexec's dialog, where any
-> program running as you, one your agent starts included, can read it as
-> you type. On GNOME on Wayland (where peekexec cannot verify its own
-> window) you read the request in peekexec's window and type the password
-> into GNOME Shell's own polkit prompt, which repeats the whole request.
-> Elsewhere peekexec refuses unless an administrator allows the unverified
-> dialog; see [THREAT_MODEL.md](THREAT_MODEL.md).
-
-pkexec asks for your password to "run /bin/sh as super user". peekexec shows:
-
-- the command's argv (each argument on a line of its own), the script's bytes,
-  or the installed file's content (with a diff when it replaces a file),
-  highlighted, with every non-ASCII and control character, long runs of
-  spaces or tabs, and blank-line padding marked;
-- who connected (uid from the kernel; the process chain, with processes whose
-  executable root does not own marked as such) and the reason they give
-  (labelled unverified);
-- for a registered agent session (`peekexec register`, approved once): whether
-  the request comes from inside that agent's process tree, and which scripts
-  or programs sit in between;
-- what it declares it will touch, and how much of that is actually enforced.
-
-You approve with your password, cancel, or deny with a written reason that the
-requester receives.
+An agent asks for root like this:
 
 ```bash
-peekexec run --json --why "reload udev rules for the ST-LINK probe" -- udevadm control --reload-rules
-peekexec install --json --why "add the vendor's udev rule" 49-stlink.rules /etc/udev/rules.d/
-peekexec script --json --why "set up the toolchain" ./setup.sh
-peekexec register --json --name "Claude Code" --why "label my requests"   # once per session
-peekexec help agents     # the guide for automated callers
+peekexec run --why "reload udev rules for the ST-LINK probe" -- udevadm control --reload-rules
 ```
 
-## What it does and does not promise
+A window opens on your desktop, showing:
 
-| | |
+- **What will run.** Every argument on its own line, or the full script with
+  syntax colours, or the file being installed, with the changes if it replaces
+  a file.
+- **Anything hidden.** Invisible characters, look-alike letters, and long runs
+  of spaces or blank lines are marked, so they can't disguise anything.
+- **Who is asking,** and the reason they give. The reason is labelled
+  "unverified", because it's only their claim.
+- **Warnings,** such as a file that could make root run something later (cron,
+  sudoers, systemd), or a request that arrived right after another one.
+
+Then you choose:
+
+- **Approve** with your password. What runs is what you were shown: scripts
+  run from a private copy, so editing the file afterwards changes nothing.
+- **Cancel.** Nothing runs.
+- **Deny with a reason.** Your message goes back to the agent, so you can say
+  "use the vendor's rules file instead".
+
+If the request has anything risky about it, you have to click Approve. For
+simple read-only commands you can just type your password and press Enter.
+
+## Will it work on my desktop?
+
+peekexec only asks for your password somewhere it trusts, so it refuses to run
+on setups it can't check.
+
+| Your desktop | What happens |
 |---|---|
-| **Bound to what was shown** | The argv, script bytes, environment, install content and target, and working directory that run are the ones shown. Scripts run from a root-owned snapshot; programs must be root-owned with root-owned parent directories; the working directory is opened when shown and entered by descriptor. |
-| **Not shown** | Files and directories the command reads while it runs (`cp ./x /etc/` shows the command, not `./x`). Use `peekexec install` for files. |
-| **Limits** | `--write` is declared only. `--no-net` puts the command in a new network namespace: this stops well-behaved programs, but a root process can rejoin the host network, so it is reported as `best_effort`. Neither is containment. |
-| **Who is asking** | The uid comes from the kernel and decides everything. Process names and command lines are chosen by the processes themselves and are informational. |
-| **The human channel** | On X11, any program running as you, including one your agent starts, can see and drive the dialog and read the password as you type it (as with sudo and pkexec). Treat `deny_reason` as the human's advice, not an authenticated instruction. |
+| **GNOME on Wayland** | Works. You read the request in peekexec's window, then type your password into GNOME's own prompt, which repeats the request. Requests must be short (see below). |
+| **GNOME on X11 with GDM** | Works. Everything happens in peekexec's window, but any program running as you can see what you type there. |
+| **Wayland with `ptrace_scope` set to 0** | Refused until you run `sysctl kernel.yama.ptrace_scope=1`. Some distributions may default to 0. |
+| **KDE, Sway, other Wayland desktops** | Refused. |
+| **X11 with another login manager** (LightDM, SDDM), `startx` | Refused. |
+| **SSH, no desktop, containers, WSL** | Refused. peekexec needs a person at a local desktop. |
+| **macOS, Windows** | Not supported. |
+
+An administrator can allow the refused desktops by starting the daemon with
+`--allow-unverified-display`, but your password then goes into a window that
+another program may be able to read.
+
+So far it has only been tested on Ubuntu 22.04 and 24.04. Other distributions
+may work, but nobody has tried them yet.
+
+## What it won't protect you from
+
+Please read this part before you rely on it.
+
+- **An agent that wants to cheat, on X11.** Any program running as you can read
+  the password as you type it, then click Approve itself. That includes any
+  program your agent starts. sudo and pkexec have the same weakness, so
+  peekexec isn't worse, but it doesn't fix this.
+- **An agent that wants to cheat, on Wayland, if it planned ahead.** Your
+  password goes into GNOME's prompt, which is much harder to attack. But a
+  program that can write to your home folder could install a GNOME Shell
+  extension, wait for your next login, and tamper with that prompt.
+  peekexec can't detect this.
+- **Commands that are bad ideas.** Once approved, a command runs as full root.
+  peekexec flags common dangers, but its lists can't be complete.
+- **Files the command reads.** You see `cp ./x /etc/`, not what's inside `./x`,
+  and that file can change after you approve. Use `peekexec install`, which
+  shows you the content.
+- **What a command does while it runs.** `--write` only tells you what the
+  command says it will touch; nothing enforces it. `--no-net` stops ordinary
+  programs from using the network, but a program running as root can undo it.
+- **Your screen settings, on Wayland.** GNOME's prompt can't scroll. If you
+  don't see the line starting with **■ END**, part of the request is off
+  screen: cancel it.
+
+Some other things worth knowing:
+
+- **The output goes back to the agent.** If you approve `cat /etc/shadow`, the
+  agent receives it.
+- **Requests must be short on Wayland.** About 22 lines of 45 characters,
+  warnings included, on a 768-pixel-tall screen. Longer requests are refused,
+  so agents have to split them into steps.
+- **"Who is asking" is partly a claim.** Your user id is certain. Process names
+  are chosen by the processes themselves. If you register an agent, peekexec
+  can show that a request came from inside its session, but anything the agent
+  started could have sent it.
+- **There's no terminal.** Commands can't prompt you for anything, so interactive
+  commands won't work.
+- **Stopping or upgrading peekexec ends running commands.** The installer waits
+  for them first.
+
+If you're not sure how much to trust it, read every script in full, and switch
+to the **Raw** view if anything looks odd.
 
 ## When to use something else
 
-- **Interactive root work** (shells, editors, prompts): `sudo` / `sudo-rs` or
-  `run0`. peekexec gives commands no terminal.
-- **SSH, servers, policy rules** ("this user may run X without a password"):
-  `sudo-rs`, `doas`, polkit rules. peekexec needs a local graphical session.
-- **Containing a root command**: `systemd-run` / `run0` with sandboxing
-  properties (`PrivateNetwork=`, `ProtectSystem=strict`, ...).
-- **A malicious agent running as your user**: nothing at this level helps
-  (sudo and pkexec included). Run the agent as another user or in a VM.
+| You want | Use |
+|---|---|
+| A root shell, or commands that need a terminal | `sudo`, `sudo-rs` or `run0` |
+| SSH, servers, or "this user may run X" rules | `sudo-rs`, `doas` or polkit rules |
+| To limit what a root command can touch | `systemd-run` or `run0` with sandboxing options |
+| Protection from an agent you don't trust | Run the agent as another user, or in a VM |
 
-## Try it without installing (development mode)
+## Try it without installing
 
-Development mode runs the whole flow (dialog, your real password via PAM,
-snapshot, execution) as **your own user**, so nothing runs as root.
+Development mode runs everything (the window, your password, the snapshot) as
+**your own user**, so nothing runs as root. You'll need Rust 1.95 or newer.
 
 ```bash
 cargo build
@@ -92,50 +139,67 @@ export PEEKEXEC_SOCKET=$XDG_RUNTIME_DIR/peekexec-dev.sock
 target/debug/peekexec run --why "say hi" -- sh -c 'echo hi && id -un'
 ```
 
-## Install (root)
+## Install
+
+Build as your normal user, then run the installer as root:
 
 ```bash
 cargo build --release --locked
-pkexec "$PWD/packaging/install.sh" --admin-group=sudo   # or: sudo
+pkexec "$PWD/packaging/install.sh" --admin-group=sudo
+```
+
+**`--admin-group` matters.** Every member of that group can use peekexec, and
+gets full root with their own password, even if sudoers limits them. If you
+leave it out, the installer lists your options and their members, then stops.
+
+Run the installer yourself, from a folder only you can write to. It installs
+whatever binaries it finds there, so don't let an agent run it for you: you'd
+be shown the install script, not the root service it installs.
+
+To remove peekexec:
+
+```bash
 pkexec "$PWD/packaging/install.sh" --uninstall
 ```
 
-The script copies the built binaries into a root-only staging directory,
-refuses a test build, then installs:
+The full list of installed files is in [SECURITY.md](SECURITY.md#what-the-installer-puts-on-your-system).
 
-- `/usr/local/bin/peekexec`;
-- `/usr/libexec/peekexec/{peekexecd,peekexec-ui}`, mode 0711 (executable but
-  not readable by users, so the copies that run as you are non-dumpable);
-- `peekexecd.socket` and `peekexecd.service` in `/etc/systemd/system`, with
-  a drop-in that sets the socket's group;
-- `/usr/share/polkit-1/actions/org.peekexec.approve.policy`, which the
-  Wayland path needs (skipped if polkit is not installed);
-- `/etc/pam.d/peekexec`, unless it exists.
+## Using it from an agent
 
-It still runs as root from your checkout and installs whatever binaries
-are there, so build and install from a tree only you can write, and run it
-yourself: an agent asking to run it through `peekexec script` would show
-you the script, not the root daemon it installs. Packages are planned.
+`peekexec help agents` is the complete guide, written for agents to read. The
+commands look like this:
 
-Only administrators can connect to the daemon at all: the members of the
-group you name with `--admin-group`, whatever sudoers or polkit grant them.
-They approve with their own password, the same model as sudo.
+```bash
+peekexec run --json --why "..." -- COMMAND          # run a command
+peekexec install --json --why "..." FILE /etc/...   # put a file in place, and show it
+peekexec script --json --why "..." ./setup.sh       # run a script, and show it
+peekexec preview run -- COMMAND                     # see what the human will see
+peekexec register --json --name "My Agent" --why "..."   # label your session
+```
 
-On X11, the display is verified under GDM only: other display managers
-start the X server outside the session, and such requests are refused.
+With `--json`, the agent gets a structured answer: whether it was approved, the
+command's output, and your reason if you denied it. An agent can't approve,
+pre-approve or skip the window; there's no option for that.
 
-## Develop
+## Learn more
+
+| Read this | For |
+|---|---|
+| [THREAT_MODEL.md](THREAT_MODEL.md) | What holds against whom, in detail, and why |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability, what's installed, `unsafe` code |
+| [docs/cli.md](docs/cli.md) | The full command-line and JSON reference |
+| [PLAN.md](PLAN.md) | Design, architecture and what's planned |
+| [docs/review-checklist.md](docs/review-checklist.md) | How security reviews are done |
+| [docs/notes/fifth-review.md](docs/notes/fifth-review.md) | The latest review, and what it left open |
+
+To work on peekexec itself:
 
 ```bash
 cargo test --workspace --features peekexecd/test-approver   # includes end-to-end tests
 cargo test -p peekexecd -- --ignored pam                    # real PAM (may count toward lockout)
-dev/wayland-vm/README.md                                    # Ubuntu 24.04 Wayland test VM
 ```
 
-- [PLAN.md](PLAN.md): design, architecture, milestones
-- [THREAT_MODEL.md](THREAT_MODEL.md): what holds against whom
-- [SECURITY.md](SECURITY.md): reporting vulnerabilities, `unsafe` inventory
-- [docs/cli.md](docs/cli.md): the CLI contract
+`dev/wayland-vm/README.md` sets up the Ubuntu 24.04 test VM.
 
 ## License
 
