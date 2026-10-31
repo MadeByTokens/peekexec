@@ -252,10 +252,14 @@ pub fn verify(
         }
         _ => return Err("facts do not match the request".into()),
     }
+    // The path shown is the kernel's name for the object held. Looking the
+    // shown path up instead would follow a link swapped in between, and
+    // that lookup and the descriptor would agree on the wrong directory.
     let held = nix::sys::stat::fstat(cwd_fd.as_raw_fd()).map_err(|e| format!("fstat: {e}"))?;
-    let shown = std::fs::metadata(&inspection.cwd).map_err(|e| format!("cwd: {e}"))?;
     let is_dir = held.st_mode & libc::S_IFMT == libc::S_IFDIR;
-    if !is_dir || (held.st_dev as u64, held.st_ino as u64) != (shown.dev(), shown.ino()) {
+    let name = std::fs::read_link(format!("/proc/self/fd/{}", cwd_fd.as_raw_fd()))
+        .map_err(|e| format!("cwd: {e}"))?;
+    if !is_dir || name != Path::new(&inspection.cwd) {
         return Err(format!(
             "the directory descriptor is not {:?}",
             inspection.cwd
@@ -1162,5 +1166,89 @@ mod tests {
             .contains("cannot be read without root"));
         assert_eq!(e.len, 12, "what stat shows anyone who can reach it");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn fcwd_scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pe-fcwd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn fcwd_inspection(cwd: &str) -> Inspection {
+        let program = trust::resolve_program("true", "/", &[0]).unwrap();
+        Inspection {
+            cwd: cwd.into(),
+            cwd_warning: None,
+            facts: Facts::Run {
+                program: program.to_str().unwrap().into(),
+                file_args_note: None,
+            },
+        }
+    }
+
+    fn fcwd_run(cwd: &str) -> Request {
+        req(
+            Action::Run {
+                argv: vec!["true".into()],
+            },
+            cwd,
+        )
+    }
+
+    // Control: the honest case passes.
+    #[test]
+    fn the_canonical_path_of_the_descriptor_verifies() {
+        let got = verify(
+            &fcwd_run("/etc"),
+            &fcwd_inspection("/etc"),
+            &dir_fd("/etc"),
+            &[0],
+        );
+        assert_eq!(got, Ok(None));
+    }
+
+    // The shown path is a link in a directory the user owns; the descriptor
+    // is the link's target. What the human reads is not what the command
+    // runs in, so verify must refuse it (or at the very least warn).
+    #[test]
+    fn a_shown_path_that_is_a_link_to_the_descriptor_is_refused() {
+        let d = fcwd_scratch("leaf");
+        let shown = d.join("project");
+        std::os::unix::fs::symlink("/etc", &shown).unwrap();
+        let shown = shown.to_str().unwrap().to_string();
+        let got = verify(
+            &fcwd_run(&shown),
+            &fcwd_inspection(&shown),
+            &dir_fd("/etc"),
+            &[0],
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(
+            !matches!(got, Ok(None)),
+            "shown {shown}, descriptor /etc: verified with no warning"
+        );
+    }
+
+    // The same through a link higher up: a lstat of the last component alone
+    // would not catch this one, so the fix has to cover the whole path.
+    #[test]
+    fn a_shown_path_through_a_link_to_the_descriptor_is_refused() {
+        let d = fcwd_scratch("mid");
+        let up = d.join("up");
+        std::os::unix::fs::symlink("/", &up).unwrap();
+        let shown = up.join("etc");
+        let shown = shown.to_str().unwrap().to_string();
+        let got = verify(
+            &fcwd_run(&shown),
+            &fcwd_inspection(&shown),
+            &dir_fd("/etc"),
+            &[0],
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+        assert!(
+            !matches!(got, Ok(None)),
+            "shown {shown}, descriptor /etc: verified with no warning"
+        );
     }
 }

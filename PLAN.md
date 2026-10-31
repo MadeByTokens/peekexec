@@ -305,7 +305,7 @@ then a bypass pass. In order of priority:
       scale or height was left out: the requester controls them.
 - [x] F3 Tier 2: limit stated; native code in the shell from outside
       root-controlled paths refused. Extensions stay undetectable: E12.
-- [ ] F4 Working directory: shown path taken from the descriptor.
+- [x] F4 Working directory: shown path taken from the descriptor.
 - [ ] F5 Replies: one budget by encoded size; "outcome unknown" in the client.
 - [ ] F6 Allowlist of `#!` interpreter families.
 - [ ] F7 Enter-to-approve: remove, or an allowlist of inert programs (owner
