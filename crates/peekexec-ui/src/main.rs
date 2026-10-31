@@ -170,8 +170,14 @@ impl Dialog {
 
     /// Every way of approving goes through here, so each one waits out the
     /// approve delay (Enter as much as the button).
+    /// What the daemon holds Approve to: the guard against stray input as
+    /// well as the delay, so a click is not refused as if it were a forgery.
+    fn approve_after_ms(&self) -> u32 {
+        self.view.approve_delay_ms.max(self.view.input_guard_ms)
+    }
+
     fn approve(&mut self, ctx: &egui::Context, now: f64) {
-        let early = delay_left(self.view.approve_delay_ms, self.opened_at, now) > 0.0;
+        let early = delay_left(self.approve_after_ms(), self.opened_at, now) > 0.0;
         if early || self.busy || (self.view.wants_password && self.password.is_empty()) {
             return;
         }
@@ -600,7 +606,7 @@ impl Dialog {
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(8.0);
-                let wait = delay_left(self.view.approve_delay_ms, Some(opened), now);
+                let wait = delay_left(self.approve_after_ms(), Some(opened), now);
                 let ready = wait <= 0.0
                     && !self.busy
                     && (!self.view.wants_password || !self.password.is_empty());

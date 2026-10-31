@@ -127,7 +127,7 @@ has a seat and is its active one"), never the absence of a warning sign
    it) and the program it runs, and ends when that process exits or execs
    another program. Each later request is matched
    against the kernel's ancestry of the connecting process, and the dialog
-   says either "from <agent>'s session" with the chain in between, or "not
+   says either "inside <agent>'s session" with the chain in between, or "not
    from a registered agent session".
 
    *What it proves:* the request came from inside that agent's process tree.

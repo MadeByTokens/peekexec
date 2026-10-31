@@ -325,4 +325,19 @@ mod tests {
         assert!(err.contains("nosuid"), "{err}");
         assert!(!on_nosuid_mount(Path::new("/usr/bin")));
     }
+
+    #[test]
+    fn a_sticky_directory_above_is_refused_by_both_walks() {
+        let dir = std::env::temp_dir().join(format!("pe-sticky-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let me = nix::unistd::geteuid().as_raw();
+        let owners = [0, me];
+        let by_name = check(&dir, &owners).unwrap_err();
+        assert!(by_name.contains("/tmp is writable by other"), "{by_name}");
+        let f = std::fs::File::open(&dir).unwrap();
+        let by_fd = check_dir(&f, "d", &owners).unwrap_err();
+        assert!(by_fd.contains("a directory above d is writable"), "{by_fd}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

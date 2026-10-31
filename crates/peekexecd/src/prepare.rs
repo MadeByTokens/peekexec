@@ -333,7 +333,7 @@ pub fn prepare(
         requester,
         requester_user: display_line(&user.name, 64),
         pinned: peer.pinned,
-        cwd: display_line(&workdir.path, 300),
+        cwd: display_line(&workdir.path, 4096),
         run_as: if ctx.dev {
             display_line(&format!("{} (development mode, NOT root)", user.name), 120)
         } else {
@@ -573,7 +573,9 @@ fn prompt_text(view: &PromptView) -> String {
             body.push_str(&format!("  {}\n", ascii(l)));
         }
         for l in s.formatted.iter().filter_map(prompt_line) {
-            body.push_str(&format!("    {l}\n"));
+            // Marked by the daemon, so content cannot pass for the lines
+            // around it: the prompt is centred, and has no other structure.
+            body.push_str(&format!("| {l}\n"));
         }
     }
     let mut m = String::new();
@@ -603,7 +605,10 @@ fn prompt_text(view: &PromptView) -> String {
     // built: only cut here (escaping again would mangle its tokens).
     let from = match &view.provenance {
         Provenance::InSession { agent, since, .. } => {
-            format!("{}'s session (registered {since})", ascii(&cut(agent, 60)))
+            format!(
+                "inside {}'s session (registered {since}); anything it runs can ask",
+                ascii(&cut(agent, 60))
+            )
         }
         Provenance::Unregistered => view
             .requester
@@ -1295,7 +1300,9 @@ fn install_section(
     content: &[u8],
     notes: &mut Vec<String>,
 ) -> Section {
-    let binary = content.contains(&0) || std::str::from_utf8(content).is_err();
+    // Text with a bad byte is still text to read: it is shown as scripts
+    // are, with the byte marked. Only NUL makes a file data.
+    let binary = content.contains(&0);
     let (raw, syntax) = if binary {
         let kind = if content.starts_with(b"\x7fELF") {
             notes.push(format!("Installs an executable program into {dest}."));
@@ -2131,8 +2138,8 @@ mod tests {
         assert!(!v.wants_password);
         let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
         assert!(m.starts_with("peekexec: run as root?"));
-        assert!(m.contains("    a &&"), "{m}");
-        assert!(m.contains("    f $("), "all six lines fit: {m}");
+        assert!(m.contains("| a &&"), "{m}");
+        assert!(m.contains("| f $("), "all six lines fit: {m}");
         assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
         assert!(m.contains("its output goes back to the requester"), "{m}");
         assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
@@ -2151,7 +2158,7 @@ mod tests {
         // requester sent: the command, then its variables.
         let facts = m.find("writes /etc/udev/rules.d").unwrap();
         let warning = m.find("⚠ Touches").unwrap();
-        let command = m.find("    a &&").unwrap();
+        let command = m.find("| a &&").unwrap();
         let env = m.find("env: DEBIAN").unwrap();
         assert!(facts < command && warning < command && command < env, "{m}");
         v.env.clear();
@@ -2196,11 +2203,18 @@ mod tests {
             raw: String::new(),
         }];
         let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
-        assert!(m.contains("\n    ⟨4 spaces⟩guarded()\n"), "{m}");
-        assert!(m.contains("\n    unguarded()\n"), "{m}");
-        assert!(m.contains("\n    ⟨U+00A0⟩x\n"), "{m}");
-        assert!(m.contains("\n    ⟨U+0009⟩r\n"), "{m}");
-        assert!(!m.contains("\n       \n"), "{m}");
+        assert!(m.contains("\n| ⟨4 spaces⟩guarded()\n"), "{m}");
+        assert!(m.contains("\n| unguarded()\n"), "{m}");
+        assert!(m.contains("\n| ⟨U+00A0⟩x\n"), "{m}");
+        assert!(m.contains("\n| ⟨U+0009⟩r\n"), "{m}");
+        assert!(
+            !m.contains(
+                "
+|    
+"
+            ),
+            "{m}"
+        );
 
         // The same inside `sh -c`, where the formatter indents lines after
         // `&&` and inside blocks: a heredoc keeps its own indentation.
@@ -2210,12 +2224,12 @@ mod tests {
             "/usr/bin/dash",
         )];
         let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
-        assert!(m.contains("\n    ⟨4 spaces⟩guarded()\n"), "{m}");
-        assert!(m.contains("\n    unguarded()\n"), "{m}");
+        assert!(m.contains("\n| ⟨4 spaces⟩guarded()\n"), "{m}");
+        assert!(m.contains("\n| unguarded()\n"), "{m}");
         // Centred text hides short indentation: it is counted too.
         v.sections[0].formatted = verbatim("if ok; then\n  guarded\nfi\n");
         let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
-        assert!(m.contains("\n    ⟨2 spaces⟩guarded\n"), "{m}");
+        assert!(m.contains("\n| ⟨2 spaces⟩guarded\n"), "{m}");
     }
 
     #[test]

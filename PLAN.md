@@ -314,8 +314,9 @@ then a bypass pass. In order of priority:
 - [x] F10 Request table bounded; `lookup` honours expiry; results swept.
 - [x] F11 Dialog header: bounded lists, warnings first, tabs wrap.
 - [x] F12 Audit: bound on refused-request lines; resolved targets logged.
-- [ ] F13 Low findings in the review notes, pinned tests for surviving
-      mutations (M1, M3, M4, M5, M6, M9, M14), doc corrections.
+- [x] F13 Low findings in the review notes, pinned tests for surviving
+      mutations (M1, M3, M6, M14), doc corrections. M4, M5, M9 need a
+      harness around the client or the queue.
 - [x] F14 Installer shows and confirms the admin group (`--admin-group`).
 - [x] F15 Yama: positive evidence required on the desktop-prompt path.
 - [ ] F16 Triage the notes' "Also found, not verified" list: verify each,

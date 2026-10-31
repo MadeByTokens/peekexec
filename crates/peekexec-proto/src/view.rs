@@ -321,7 +321,7 @@ impl PromptView {
                 Provenance::InSession {
                     agent, since, path, ..
                 } => format!(
-                    "{agent}'s session (registered {since}): {agent} → {}",
+                    "inside {agent}'s session, where anything it runs can ask (registered {since}): {agent} → {}",
                     join(path, " → ")
                 ),
             }

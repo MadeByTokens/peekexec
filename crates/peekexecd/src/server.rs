@@ -1832,8 +1832,11 @@ mod tests {
         d.remember_shown(1000, &run(&["apt-get", "install", "-y", "jq"]));
         // "The same again" with one more argument: compared.
         let mut v = view(3);
+        v.enter_approves = true;
         let next = run(&["apt-get", "install", "-y", "jq", "netcat-openbsd"]);
         d.compare_with_last(1000, &next, &mut v);
+        assert!(!v.enter_approves, "a compared request takes a click");
+        assert_eq!(v.findings(), 0, "the comparison is not what runs");
         let diff = v.sections.last().unwrap();
         assert!(
             diff.comparison && diff.raw.contains("+\"netcat-openbsd\""),

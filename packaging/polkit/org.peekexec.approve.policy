@@ -16,7 +16,7 @@
        for this action makes peekexecd refuse: no human would be asked. -->
   <action id="org.peekexec.approve">
     <description>Approve a peekexec request</description>
-    <message>Approve a peekexec request (details in the peekexec window)</message>
+    <message>peekexec request. If this line is all you see, cancel: the request is not shown.</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>
