@@ -1,0 +1,475 @@
+diff --git a/crates/peekexecd/src/inspect.rs b/crates/peekexecd/src/inspect.rs
+index 5b09dcd..d99fcdb 100644
+--- a/crates/peekexecd/src/inspect.rs
++++ b/crates/peekexecd/src/inspect.rs
+@@ -1163,4 +1163,115 @@ mod tests {
+         assert_eq!(e.len, 12, "what stat shows anyone who can reach it");
+         std::fs::remove_dir_all(&dir).unwrap();
+     }
++
++    fn fcwd_scratch(tag: &str) -> PathBuf {
++        let d = std::env::temp_dir().join(format!("pe-fcwd-{tag}-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&d);
++        std::fs::create_dir_all(&d).unwrap();
++        d
++    }
++
++    fn fcwd_inspection(cwd: &str) -> Inspection {
++        let program = trust::resolve_program("true", "/", &[0]).unwrap();
++        Inspection {
++            cwd: cwd.into(),
++            cwd_warning: None,
++            facts: Facts::Run {
++                program: program.to_str().unwrap().into(),
++                file_args_note: None,
++            },
++        }
++    }
++
++    fn fcwd_run(cwd: &str) -> Request {
++        req(
++            Action::Run {
++                argv: vec!["true".into()],
++            },
++            cwd,
++        )
++    }
++
++    // Control: the honest case passes.
++    #[test]
++    fn fcwd_control_canonical_path_verifies() {
++        let got = verify(&fcwd_run("/etc"), &fcwd_inspection("/etc"), &dir_fd("/etc"), &[0]);
++        assert_eq!(got, Ok(None));
++    }
++
++    // The shown path is a link in a directory the user owns; the descriptor
++    // is the link's target. What the human reads is not what the command
++    // runs in, so verify must refuse it (or at the very least warn).
++    #[test]
++    fn fcwd_shown_path_is_a_symlink_to_the_descriptor() {
++        let d = fcwd_scratch("leaf");
++        let shown = d.join("project");
++        std::os::unix::fs::symlink("/etc", &shown).unwrap();
++        let shown = shown.to_str().unwrap().to_string();
++        let got = verify(&fcwd_run(&shown), &fcwd_inspection(&shown), &dir_fd("/etc"), &[0]);
++        std::fs::remove_dir_all(&d).unwrap();
++        assert!(
++            !matches!(got, Ok(None)),
++            "shown {shown}, descriptor /etc: verified with no warning"
++        );
++    }
++
++    // The same through a link higher up: a lstat of the last component alone
++    // would not catch this one, so the fix has to cover the whole path.
++    #[test]
++    fn fcwd_shown_path_passes_through_a_symlink() {
++        let d = fcwd_scratch("mid");
++        let up = d.join("up");
++        std::os::unix::fs::symlink("/", &up).unwrap();
++        let shown = up.join("etc");
++        let shown = shown.to_str().unwrap().to_string();
++        let got = verify(&fcwd_run(&shown), &fcwd_inspection(&shown), &dir_fd("/etc"), &[0]);
++        std::fs::remove_dir_all(&d).unwrap();
++        assert!(
++            !matches!(got, Ok(None)),
++            "shown {shown}, descriptor /etc: verified with no warning"
++        );
++    }
++
++    #[test]
++    fn finterp_flagless_make_sed_awk_are_refused() {
++        let mut accepted = Vec::new();
++        for s in [
++            "#!/usr/bin/make\nall:\n",
++            "#!/usr/bin/sed\ns/a/b/\n",
++            "#!/usr/bin/awk\n{ print }\n",
++            "#!/usr/bin/env make\nall:\n",
++            "#!/usr/bin/env sed\ns/a/b/\n",
++        ] {
++            if let Ok(r) = interpreter(s.as_bytes(), &[0]) {
++                accepted.push((s.lines().next().unwrap().to_string(), r));
++            }
++        }
++        assert!(accepted.is_empty(), "accepted: {accepted:?}");
++    }
++
++    #[test]
++    fn finterp_only_real_interpreters_are_allowed() {
++        let mut accepted = Vec::new();
++        for p in ["tar", "git", "vim", "find", "make", "rsync"] {
++            let s = format!("#!/usr/bin/{p}\nx\n");
++            if interpreter(s.as_bytes(), &[0]).is_ok() {
++                accepted.push(p);
++            }
++        }
++        assert!(accepted.is_empty(), "accepted: {accepted:?}");
++    }
++
++    // CPython ends a line at a bare CR too, so the cookie below is on its
++    // line 2 (confirmed separately with python3).
++    #[test]
++    fn fcr_cookie_after_a_bare_cr_is_seen() {
++        assert!(read_as_shown(b"\r# coding: utf-7\nprint(1)\n", true).is_err());
++    }
++
++    // Control: the same cookie after a line feed is refused today.
++    #[test]
++    fn fcr_control_cookie_after_lf_is_refused() {
++        assert!(read_as_shown(b"\n# coding: utf-7\nprint(1)\n", true).is_err());
++    }
+ }
+diff --git a/crates/peekexecd/src/prepare.rs b/crates/peekexecd/src/prepare.rs
+index 8cd6e77..bbe6cef 100644
+--- a/crates/peekexecd/src/prepare.rs
++++ b/crates/peekexecd/src/prepare.rs
+@@ -2119,4 +2119,154 @@ mod tests {
+         assert!(s.raw.starts_with("Not text: an executable program"));
+         assert_eq!(notes.len(), 1);
+     }
++
++    fn v_run(argv: &[&str]) -> Request {
++        req(Action::Run {
++            argv: argv.iter().map(|a| a.to_string()).collect(),
++        })
++    }
++
++    fn v_sh(text: &str) -> Request {
++        v_run(&["sh", "-c", text])
++    }
++
++    /// `view.enter_approves` as a non-development daemon would compute it:
++    /// the dev-mode note is left out.
++    fn v_enter(r: &Request) -> bool {
++        let p = prepare_for_tests(r);
++        let notes = p
++            .view
++            .notes
++            .iter()
++            .filter(|n| !n.starts_with("DEVELOPMENT MODE"))
++            .count();
++        plain_run(r, &p.exec) && notes == 0 && p.view.findings() == 0
++    }
++
++    // F-enter: name-only classification, with a plan made by hand so that
++    // programs missing on this host (toybox, socat) count too.
++    #[test]
++    fn fenter_programs_that_run_others_are_not_plain() {
++        let mut plain = Vec::new();
++        for name in [
++            "tar", "git", "prlimit", "setarch", "logsave", "ip", "vim", "rsync", "ssh",
++            "ipython3", "socat", "apt-get", "dpkg", "toybox", "gcc", "sg", "systemd-nspawn",
++        ] {
++            let r = v_run(&[name, "x"]);
++            let exec = Execution::Command(ExecPlan {
++                program: format!("/usr/bin/{name}"),
++                argv: vec![name.into(), "x".into()],
++                env: BTreeMap::new(),
++                cwd: "/".into(),
++                cwd_fd: None,
++                write: None,
++                no_net: false,
++                audit_uid: None,
++            });
++            if plain_run(&r, &exec) {
++                plain.push(name);
++            }
++        }
++        assert!(plain.is_empty(), "classify as plain: {plain:?}");
++    }
++
++    // F-enter through the whole of prepare, on what is installed here.
++    #[test]
++    fn fenter_full_view_real_programs() {
++        let mut eligible = Vec::new();
++        for argv in [
++            &["prlimit", "/usr/bin/id"][..],
++            &["setarch", "x86_64", "/usr/bin/id"],
++            &["logsave", "/dev/null", "/usr/bin/id"],
++            &["ip", "netns", "exec", "n", "/usr/bin/id"],
++            &["sg", "adm", "id"],
++            &["dpkg", "-i", "x.deb"],
++            &["apt-get", "install", "./x.deb"],
++            &["git", "status"],
++            &["tar", "xf", "x.tar"],
++        ] {
++            if v_enter(&v_run(argv)) {
++                eligible.push(argv.join(" "));
++            }
++        }
++        assert!(eligible.is_empty(), "Enter-eligible: {eligible:#?}");
++    }
++
++    #[test]
++    fn fenter_argument_count_is_bounded() {
++        let many: Vec<String> = (0..5000).map(|i| format!("a{i}")).collect();
++        let mut argv = vec!["ls"];
++        argv.extend(many.iter().map(String::as_str));
++        assert!(!v_enter(&v_run(&argv)), "5000 arguments stay Enter-eligible");
++    }
++
++    #[test]
++    fn fmode_every_form_is_flagged() {
++        let cases: Vec<(&str, Request)> = vec![
++            ("chmod 5755", v_run(&["chmod", "5755", "/x"])),
++            ("chmod 3755", v_run(&["chmod", "3755", "/x"])),
++            ("usermod -aGdocker", v_run(&["usermod", "-aGdocker", "u"])),
++            ("usermod --groups=docker", v_run(&["usermod", "--groups=docker", "u"])),
++            ("install --mode=4755", v_run(&["install", "--mode=4755", "a", "/x"])),
++            ("install -Dm4755", v_run(&["install", "-Dm4755", "a", "/x"])),
++            ("sh: if usermod", v_sh("if usermod -aG docker u; then :; fi")),
++            ("sh: while chmod", v_sh("while chmod 4755 /x; do :; done")),
++            ("sh: until setcap", v_sh("until setcap cap_x+ep /x; do :; done")),
++            ("sh: backslash-newline usermod", v_sh("usermod \\\n -aG docker u")),
++            ("sh: backslash-newline chmod", v_sh("chmod \\\n 4755 /x")),
++        ];
++        let mut missed = Vec::new();
++        for (name, r) in &cases {
++            if lasting_root(&executed_text(r)).is_none() {
++                missed.push(format!("{name} (Enter-eligible: {})", v_enter(r)));
++            }
++        }
++        assert!(missed.is_empty(), "not flagged: {missed:#?}");
++    }
++
++    // Control: the forms the existing test covers.
++    #[test]
++    fn fmode_control_covered_forms() {
++        for r in [
++            v_run(&["chmod", "4755", "/x"]),
++            v_run(&["chmod", "u+s", "/x"]),
++            v_run(&["usermod", "-aG", "docker", "u"]),
++            v_run(&["install", "-m4755", "a", "/x"]),
++            v_run(&["install", "-m", "4755", "a", "/x"]),
++        ] {
++            assert!(lasting_root(&executed_text(&r)).is_some());
++        }
++    }
++
++    // F-interp: the awk/sed test above covers `-f` only.
++    #[test]
++    fn finterp_no_script_argument_reaches_an_option_parser() {
++        let r = req(Action::Script {
++            path: "/home/u/x".into(),
++            content: b"#!/usr/bin/sed\ns/a/b/\n".to_vec(),
++            args: vec!["-n".into()],
++        });
++        let p = prepare_for_tests(&r);
++        let Execution::Command(plan) = p.exec else {
++            panic!("not a command")
++        };
++        assert!(plan.argv.iter().any(|a| a == "--"), "{:?}", plan.argv);
++    }
++
++    // What the dialog does with such a file, for the severity of F-cr.
++    #[test]
++    fn fcr_show_view_of_a_bare_cr() {
++        let r = req(Action::Script {
++            path: "/home/u/x".into(),
++            content: b"\r# coding: utf-7\nexec python3 \"$0\"\n".to_vec(),
++            args: vec![],
++        });
++        let p = prepare_for_tests(&r);
++        eprintln!(
++            "findings={} notes={:?} enter={}",
++            p.view.findings(),
++            p.view.notes,
++            p.view.enter_approves
++        );
++    }
+ }
+diff --git a/crates/peekexecd/src/server.rs b/crates/peekexecd/src/server.rs
+index c9b76d4..05e9a80 100644
+--- a/crates/peekexecd/src/server.rs
++++ b/crates/peekexecd/src/server.rs
+@@ -1673,4 +1673,80 @@ mod tests {
+             .unwrap();
+         assert_eq!(v.approval, Approval::Password);
+     }
++
++    #[cfg(feature = "test-approver")]
++    fn v_daemon() -> Daemon {
++        let platform = crate::platform::linux::platform("peekexec");
++        let opts = Options {
++            socket: PathBuf::from("/nonexistent"),
++            dev: true,
++            dialog: PathBuf::from("/nonexistent"),
++            snapshot_root: std::env::temp_dir().join("pe-fbaseline"),
++            allow_unverified_display: false,
++            prompt_lines: prepare::PROMPT_SCREEN_LINES,
++            test_approver: Some("approve".into()),
++        };
++        Daemon::new(opts, platform)
++    }
++
++    #[cfg(feature = "test-approver")]
++    fn v_run(argv: &[&str]) -> Request {
++        Request {
++            action: Action::Run {
++                argv: argv.iter().map(|a| a.to_string()).collect(),
++            },
++            why: None,
++            write: None,
++            no_net: false,
++            env: Default::default(),
++            cwd: "/".into(),
++            timeout_secs: 60,
++        }
++    }
++
++    #[cfg(feature = "test-approver")]
++    fn v_peer() -> Peer {
++        let mut p = peer();
++        p.uid = nix::unistd::getuid().as_raw();
++        p.gid = nix::unistd::getgid().as_raw();
++        p
++    }
++
++    // Cancelled before any dialog opened: nothing was shown to anyone, so
++    // nothing may become "the request you saw".
++    #[cfg(feature = "test-approver")]
++    #[test]
++    fn fbaseline_cancelled_before_a_dialog_is_not_remembered() {
++        let d = v_daemon();
++        let p = v_peer();
++        let cancel = AtomicBool::new(true);
++        let r = d.process(&p, &v_run(&["true"]), "r-1", &cancel);
++        assert_eq!(r.status, Status::Cancelled, "{r:?}");
++        assert!(
++            d.last_shown.lock().unwrap().get(&p.uid).is_none(),
++            "a request no human saw is the comparison baseline"
++        );
++    }
++
++    // What it costs: request A is shown; B (A plus a change) is withdrawn
++    // before any dialog; B again must still be compared with A.
++    #[cfg(feature = "test-approver")]
++    #[test]
++    fn fbaseline_a_withdrawn_request_does_not_hide_the_change() {
++        let d = v_daemon();
++        let p = v_peer();
++        let shown = v_run(&["apt-get", "install", "-y", "jq"]);
++        let next = v_run(&["apt-get", "install", "-y", "jq", "netcat-openbsd"]);
++        d.remember_shown(p.uid, &shown);
++        let cancel = AtomicBool::new(true);
++        let r = d.process(&p, &next, "r-2", &cancel);
++        assert_eq!(r.status, Status::Cancelled, "{r:?}");
++        let mut v = view(3);
++        d.compare_with_last(p.uid, &next, &mut v);
++        assert!(
++            v.sections.last().unwrap().comparison,
++            "no comparison with the request actually shown; notes {:?}",
++            v.notes
++        );
++    }
+ }
+diff --git a/crates/peekexecd/tests/e2e.rs b/crates/peekexecd/tests/e2e.rs
+index 01a8764..9e30df6 100644
+--- a/crates/peekexecd/tests/e2e.rs
++++ b/crates/peekexecd/tests/e2e.rs
+@@ -611,3 +611,106 @@ fn a_finished_run_leaves_no_thread_behind() {
+     std::thread::sleep(Duration::from_millis(200));
+     assert!(threads() <= before + 2, "{before} -> {}", threads());
+ }
++
++fn reply_of(d: &Daemon, request: Request) -> std::io::Result<Response> {
++    call(&d.socket, &ClientMsg::Run { request })
++}
++
++// Control: output under the cap, with nothing to escape.
++#[test]
++fn freply_control_one_mib() {
++    let d = Daemon::start("approve");
++    let r = reply_of(&d, sh("head -c 1000000 /dev/zero | tr '\\000' a")).unwrap();
++    assert_eq!(r.stdout.map(|s| s.len()), Some(1_000_000));
++}
++
++// One stream, under OUTPUT_CAP, of bytes JSON escapes to six.
++#[test]
++fn freply_finished_command_reaches_the_client_escapes() {
++    let d = Daemon::start("approve");
++    let r = reply_of(&d, sh("head -c 6000000 /dev/zero"));
++    assert!(r.is_ok(), "the command ran; the reply did not arrive: {:?}", r.err());
++}
++
++// Both streams, plain text, each at most OUTPUT_CAP.
++#[test]
++fn freply_finished_command_reaches_the_client_two_streams() {
++    let d = Daemon::start("approve");
++    let r = reply_of(
++        &d,
++        sh("head -c 17000000 /dev/zero | tr '\\000' a; head -c 17000000 /dev/zero | tr '\\000' a >&2"),
++    );
++    assert!(r.is_ok(), "the command ran; the reply did not arrive: {:?}", r.err());
++}
++
++#[test]
++fn freply_wait_reaches_the_client() {
++    let d = Daemon::start("approve");
++    let p = d.send(&ClientMsg::Submit {
++        request: sh("head -c 6000000 /dev/zero"),
++    });
++    let id = p.request_id.unwrap();
++    let r: std::io::Result<Response> = call(
++        &d.socket,
++        &ClientMsg::Wait {
++            id,
++            timeout_secs: Some(20),
++        },
++    );
++    assert!(r.is_ok(), "wait: {:?}", r.err());
++}
++
++fn rss_kib(pid: u32) -> u64 {
++    std::fs::read_to_string(format!("/proc/{pid}/status"))
++        .unwrap()
++        .lines()
++        .find_map(|l| l.strip_prefix("VmRSS:"))
++        .unwrap()
++        .trim()
++        .trim_end_matches(" kB")
++        .trim()
++        .parse()
++        .unwrap()
++}
++
++// Requests refused in validation, one at a time: what the daemon keeps must
++// not grow with their size. 200 x 1 MiB of echoed path.
++#[test]
++fn ftable_refused_submits_do_not_hold_their_text() {
++    let d = Daemon::start("approve");
++    let before = rss_kib(d.child.id());
++    let path = "x".repeat(1 << 20);
++    let mut one = None;
++    for _ in 0..200 {
++        let mut request = sh("true");
++        request.write = Some(vec![path.clone()]);
++        let p = d.send(&ClientMsg::Submit { request });
++        let id = p.request_id.expect("kept: it has an id");
++        let r = d.send(&ClientMsg::Wait {
++            id,
++            timeout_secs: Some(5),
++        });
++        assert_eq!(r.status, Status::Error, "{r:?}");
++        one = r.error.map(|e| e.len());
++    }
++    let after = rss_kib(d.child.id());
++    let grown = after.saturating_sub(before);
++    eprintln!("rss {before} -> {after} kB; one error is {one:?} bytes");
++    assert!(grown < 32 * 1024, "grew {grown} kB, error length {one:?}");
++}
++
++// A destination that cannot be examined is not a new file. As root this
++// error (ELOOP) is reachable; EIO or a FUSE error would act the same.
++#[test]
++fn fstat_unexaminable_destination_is_refused() {
++    let dir = std::env::temp_dir().join(format!("pe-fstat-{}", std::process::id()));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).unwrap();
++    let dest = dir.join("loop");
++    std::os::unix::fs::symlink(&dest, &dest).unwrap();
++    assert!(std::fs::metadata(&dest).is_err());
++    let r = peekexecd::exec::install(&dest, b"new\n", "r-v");
++    let link = std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink();
++    std::fs::remove_dir_all(&dir).unwrap();
++    assert!(r.is_err(), "installed over it; still a link: {link}");
++}

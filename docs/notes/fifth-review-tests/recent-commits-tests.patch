@@ -1,0 +1,356 @@
+diff --git a/crates/peekexec-core/src/textcheck.rs b/crates/peekexec-core/src/textcheck.rs
+index 62ed4ef..862bc79 100644
+--- a/crates/peekexec-core/src/textcheck.rs
++++ b/crates/peekexec-core/src/textcheck.rs
+@@ -115,6 +115,16 @@ mod tests {
+         scan(text).into_iter().map(|f| f.kind).collect()
+     }
+ 
++    #[test]
++    fn zz_dump_classes() {
++        let Some(p) = std::env::var_os("PE_DUMP") else { return };
++        let mut o = String::new();
++        for c in (0u32..0x110000).filter_map(char::from_u32) {
++            o.push_str(&format!("{:x} {:?}\n", c as u32, classify(c)));
++        }
++        std::fs::write(p, o).unwrap();
++    }
++
+     #[test]
+     fn zero_width_glyphs_are_invisible() {
+         for c in [
+diff --git a/crates/peekexec/src/main.rs b/crates/peekexec/src/main.rs
+index 771e42e..b9a6a2d 100644
+--- a/crates/peekexec/src/main.rs
++++ b/crates/peekexec/src/main.rs
+@@ -595,6 +595,22 @@ mod tests {
+         assert!(!standard_socket(Path::new("/tmp/peekexec.sock")));
+     }
+ 
++    #[test]
++    fn vp_terminal_safe_shapes() {
++        for s in [
++            "a\rb", "a\x08b", "\u{9b}2Ax", "\u{202e}abc", "a\u{2028}b", "\x1b]0;t\x07",
++            "a\u{0483}b", "x\u{FFF9}y", "\r\n\r\n",
++        ] {
++            let t = terminal_safe(s);
++            let bad: Vec<char> = t
++                .chars()
++                .filter(|c| *c != '\n' && (c.is_control() || peekexec_core::textcheck::classify(*c)
++                    .is_some_and(|k| !matches!(k, peekexec_core::textcheck::FindingKind::NonAscii))))
++                .collect();
++            assert!(bad.is_empty(), "{s:?} -> {t:?}");
++        }
++    }
++
+     #[test]
+     fn text_from_a_non_root_daemon_cannot_drive_the_terminal() {
+         let t = terminal_safe("ok\n\x1b[2A\x1b[2Kforged\n");
+diff --git a/crates/peekexecd/src/platform/linux/peer.rs b/crates/peekexecd/src/platform/linux/peer.rs
+index ee8527f..06f56f4 100644
+--- a/crates/peekexecd/src/platform/linux/peer.rs
++++ b/crates/peekexecd/src/platform/linux/peer.rs
+@@ -23,26 +23,7 @@ impl PeerInfo for ProcPeerInfo {
+ 
+         let process = process_info(pid);
+         let cwd = readlink(pid, "cwd");
+-        let mut ancestry = Vec::new();
+-        let mut child = (pid, process.start_time);
+-        while let Some(ppid) = parent_pid(child.0).filter(|&p| p > 1) {
+-            if ancestry.len() == MAX_ANCESTRY {
+-                // Cut, not followed: an agent session beyond this depth is
+-                // not found, so the request counts as unregistered.
+-                break;
+-            }
+-            let parent = process_info(ppid);
+-            // A pid names the parent only while the child still has it:
+-            // read again after describing it, and it must have started no
+-            // later than the child (a reused pid starts later). Otherwise
+-            // the walk ends here, and the request counts as from fewer
+-            // ancestors, never from someone else's.
+-            if !genuine_parent(child.1, parent.start_time, parent_pid(child.0), ppid) {
+-                break;
+-            }
+-            child = (ppid, parent.start_time);
+-            ancestry.push(parent);
+-        }
++        let ancestry = walk((pid, process.start_time), parent_pid, process_info);
+         // Still alive after we read /proc, so the pid was not reused meanwhile.
+         let pinned = pidfd.as_ref().is_some_and(|fd| pidfd_alive(fd, pid));
+         Ok(Peer {
+@@ -239,6 +220,27 @@ fn genuine_parent(
+     matches!((child_start, parent_start), (Some(c), Some(p)) if p <= c) && ppid_now == Some(ppid)
+ }
+ 
++fn walk(
++    start: (u32, Option<u64>),
++    parent_pid: impl Fn(u32) -> Option<u32>,
++    process_info: impl Fn(u32) -> ProcessInfo,
++) -> Vec<ProcessInfo> {
++    let mut ancestry = Vec::new();
++    let mut child = start;
++    while let Some(ppid) = parent_pid(child.0).filter(|&p| p > 1) {
++        if ancestry.len() == MAX_ANCESTRY {
++            break;
++        }
++        let parent = process_info(ppid);
++        if !genuine_parent(child.1, parent.start_time, parent_pid(child.0), ppid) {
++            break;
++        }
++        child = (ppid, parent.start_time);
++        ancestry.push(parent);
++    }
++    ancestry
++}
++
+ fn parent_pid(pid: u32) -> Option<u32> {
+     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+     parse_ppid(&stat)
+@@ -255,6 +257,43 @@ fn parse_ppid(stat: &str) -> Option<u32> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn vp_a_reused_pid_does_not_join_the_chain() {
++        use std::cell::Cell;
++        // Requester 300 (started 300), child of intermediate 200 (started
++        // 200). Unrelated to the agent 100 (started 100). After the walk has
++        // accepted 200, it exits and pid 200 is reused by a child of the
++        // agent, so /proc/200/stat now reads ppid 100, started 900.
++        let accepted = Cell::new(false);
++        let reads = Cell::new(0);
++        let parent = |pid: u32| match pid {
++            300 => {
++                reads.set(reads.get() + 1);
++                if reads.get() == 2 {
++                    accepted.set(true); // the re-read that accepts 200
++                }
++                Some(200)
++            }
++            200 if accepted.get() => Some(100), // pid 200 reused
++            200 => Some(50),
++            _ => None,
++        };
++        let info = |pid: u32| ProcessInfo {
++            pid,
++            exe: None,
++            cmdline: vec![],
++            start_time: Some(match pid {
++                200 if accepted.get() => 900,
++                p => p as u64,
++            }),
++        };
++        let chain: Vec<u32> = walk((300, Some(300)), parent, info)
++            .iter()
++            .map(|p| p.pid)
++            .collect();
++        assert!(!chain.contains(&100), "joined the agent: {chain:?}");
++    }
++
+     #[test]
+     fn a_parent_must_be_older_than_its_child_and_still_its_parent() {
+         assert!(genuine_parent(Some(200), Some(100), Some(7), 7));
+diff --git a/crates/peekexecd/src/prepare.rs b/crates/peekexecd/src/prepare.rs
+index 8cd6e77..7111373 100644
+--- a/crates/peekexecd/src/prepare.rs
++++ b/crates/peekexecd/src/prepare.rs
+@@ -1973,6 +1973,122 @@ mod tests {
+         assert!(s.raw.contains("+writes: /etc"), "{}", s.raw);
+     }
+ 
++    // ---- verification pass ----
++    fn vp_flagged(text: &str) -> bool {
++        lasting_root(&[text.to_string()]).is_some()
++    }
++
++    #[test]
++    fn vp_setuid_modes() {
++        let mut miss = vec![];
++        for t in [
++            "chmod 3755 f",            // setgid + sticky
++            "chmod 5755 f",            // setuid + sticky
++            "install --mode=4755 a b", // long form
++            "install --mode=u+s a b",
++            "chmod u-x+s f", // second op in a clause
++        ] {
++            if !vp_flagged(t) {
++                miss.push(t);
++            }
++        }
++        assert!(miss.is_empty(), "not flagged: {miss:?}");
++    }
++
++    #[test]
++    fn vp_group_shapes() {
++        let mut miss = vec![];
++        for t in [
++            "usermod -aGdocker u",
++            "usermod --groups=docker u",
++            "usermod -aG \\\n  docker u", // line continuation
++        ] {
++            if !vp_flagged(t) {
++                miss.push(t);
++            }
++        }
++        assert!(miss.is_empty(), "not flagged: {miss:?}");
++    }
++
++    #[test]
++    fn vp_command_positions() {
++        let mut miss = vec![];
++        for t in [
++            "if crontab c; then :; fi",
++            "while crontab c; do :; done",
++            "eval crontab c",
++            "sudo -u root crontab c",
++            "timeout 5s crontab c",
++            "env -u X crontab c",
++            "bash -c 'crontab c'", // in a script: nested shell
++        ] {
++            if !vp_flagged(t) {
++                miss.push(t);
++            }
++        }
++        assert!(miss.is_empty(), "not flagged: {miss:?}");
++    }
++
++    #[test]
++    fn vp_any_lasting_root_note_turns_enter_off() {
++        let p = prepare_for_tests(&req(Action::Run {
++            argv: vec!["usermod".into(), "-aG".into(), "docker".into(), "u".into()],
++        }));
++        assert!(!p.view.enter_approves);
++    }
++
++    #[test]
++    fn vp_half_means_half() {
++        // 40 lines, 12 modified: 30% of the lines, "at most half".
++        let before: String = (0..40).map(|i| format!("line {i}\n")).collect();
++        let now: String = (0..40)
++            .map(|i| {
++                if i < 12 {
++                    format!("evil {i}\n")
++                } else {
++                    format!("line {i}\n")
++                }
++            })
++            .collect();
++        assert!(comparison_section(&before, &now, "10:00").is_some());
++    }
++
++    #[test]
++    fn vp_different_requests_never_compare_equal() {
++        let run = |argv: &[&str]| {
++            req(Action::Run {
++                argv: argv.iter().map(|a| a.to_string()).collect(),
++            })
++        };
++        let script = |content: &[u8], args: &[&str]| {
++            req(Action::Script {
++                path: "/home/u/x.sh".into(),
++                content: content.to_vec(),
++                args: args.iter().map(|a| a.to_string()).collect(),
++            })
++        };
++        let mut bad = vec![];
++        for (name, a, b) in [
++            ("argv boundary", run(&["x", "a\nb"]), run(&["x", "a", "b"])),
++            (
++                "script args boundary",
++                script(b"#!/bin/sh\n", &["a b"]),
++                script(b"#!/bin/sh\n", &["a", "b"]),
++            ),
++            (
++                "invalid UTF-8 bytes",
++                script(b"#!/bin/sh\n# \xff\n", &[]),
++                script(b"#!/bin/sh\n# \xfe\n", &[]),
++            ),
++        ] {
++            assert_ne!(a.digest(), b.digest(), "{name}");
++            if comparable_text(&a) == comparable_text(&b) {
++                bad.push(name);
++            }
++        }
++        assert!(bad.is_empty(), "same text for different requests: {bad:?}");
++    }
++
+     #[test]
+     fn flags_root_beyond_the_request() {
+         let note = |text: &str| lasting_root(&[text.to_string()]);
+diff --git a/crates/peekexecd/src/server.rs b/crates/peekexecd/src/server.rs
+index c9b76d4..5f44b92 100644
+--- a/crates/peekexecd/src/server.rs
++++ b/crates/peekexecd/src/server.rs
+@@ -1507,6 +1507,46 @@ mod tests {
+         assert!(!is_admin(&user(others)));
+     }
+ 
++    #[test]
++    fn vp_a_request_withdrawn_unseen_is_not_what_the_user_saw() {
++        let platform = crate::platform::linux::platform("peekexec");
++        let d = Daemon::new(
++            Options {
++                socket: PathBuf::from("/nonexistent"),
++                dev: true,
++                dialog: PathBuf::from("/nonexistent"),
++                snapshot_root: PathBuf::from("/nonexistent"),
++                allow_unverified_display: false,
++                prompt_lines: prepare::PROMPT_SCREEN_LINES,
++                test_approver: Some("approve".into()),
++            },
++            platform,
++        );
++        let run = |argv: &[&str]| Request {
++            action: Action::Run {
++                argv: argv.iter().map(|a| a.to_string()).collect(),
++            },
++            why: None,
++            write: None,
++            no_net: false,
++            env: Default::default(),
++            cwd: "/".into(),
++            timeout_secs: 60,
++        };
++        let seen = run(&["ls", "-l", "/etc"]);
++        let unseen = run(&["ls", "-l", "/etc", "/root"]);
++        let mut p = peer();
++        p.uid = nix::unistd::getuid().as_raw();
++        d.remember_shown(p.uid, &seen);
++        // Withdrawn while it waited for the lock: no dialog ever showed it.
++        let r = d.process(&p, &unseen, "r-unseen", &AtomicBool::new(true));
++        assert_eq!(r.status, Status::Cancelled, "{r:?}");
++        // The same request again differs from what the human actually read.
++        let mut v = view(3);
++        d.compare_with_last(p.uid, &unseen, &mut v);
++        assert_eq!(v.sections.len(), 2, "no comparison: {:?}", v.notes);
++    }
++
+     #[test]
+     fn a_close_follow_up_is_compared_with_what_was_shown() {
+         let d = daemon(None, false);
+diff --git a/crates/peekexecd/src/trust.rs b/crates/peekexecd/src/trust.rs
+index 80446b6..d2a0f12 100644
+--- a/crates/peekexecd/src/trust.rs
++++ b/crates/peekexecd/src/trust.rs
+@@ -253,6 +253,21 @@ mod tests {
+         assert!(p.is_absolute());
+     }
+ 
++    #[test]
++    fn vp_sticky_above_is_refused_by_both_walks() {
++        let dir = std::env::temp_dir().join(format!("pe-vp-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
++        let me = nix::unistd::geteuid().as_raw();
++        let owners = [0, me];
++        let by_name = check(&dir, &owners).unwrap_err();
++        assert!(by_name.contains("/tmp is writable by other"), "{by_name}");
++        let f = std::fs::File::open(&dir).unwrap();
++        let by_fd = check_dir(&f, "d", &owners).unwrap_err();
++        assert!(by_fd.contains("a directory above d is writable"), "{by_fd}");
++        std::fs::remove_dir_all(&dir).unwrap();
++    }
++
+     #[test]
+     fn user_files_are_not_trusted_by_root() {
+         let Some(dir) = test_dir("trust") else {

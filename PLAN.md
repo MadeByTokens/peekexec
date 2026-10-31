@@ -30,8 +30,9 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the precise version.
    via systemd's sandboxing is planned.
 4. **Honest display tiers.** X11 with a verified X server; on displays it
    cannot verify (Wayland), the password goes into the desktop's own polkit
-   prompt, which repeats the decisive facts (flagged on every request only
-   where the polkit action is not installed); a dedicated VT or FIDO2 later.
+   prompt, which repeats the decisive facts (with no such prompt the request
+   is refused, unless an administrator allowed the unverified window); a
+   dedicated VT or FIDO2 later.
 
 ## The dialog
 
@@ -163,7 +164,7 @@ Crates: `nix`, `libc`, `egui`/`eframe`, `syntect`, `similar`, `clap`, `serde`,
   compile-time excluded from release builds; `packaging/install.sh` refuses
   a daemon binary that contains it.
 - macOS later: Homebrew formula built from source (no notarization needed).
-- Windows: out of scope (UAC already provides an elevation prompt); WSL works.
+- Windows: out of scope (UAC already provides an elevation prompt). WSL is untested.
 - License: MIT OR Apache-2.0.
 
 ## Milestones
@@ -290,3 +291,34 @@ the default wherever the display cannot be verified.
       prototype in the VM, then module, renderer, approval path, docs.
 - [ ] E14 Commands as transient systemd units: kernel-enforced `--write`
       and `--no-net`, output a new daemon can reattach to.
+
+### Fifth review: follow-ups (checklist)
+
+From the fifth review (2026-10-31); details and evidence in
+[docs/notes/fifth-review.md](docs/notes/fifth-review.md), failing tests in
+`docs/notes/fifth-review-tests/`. One commit per item, each tested first,
+then a bypass pass. In order of priority:
+
+- [ ] F1 A formatted `Line` never holds a newline; drawn spans rejoin to the
+      text (critical: the dialog's default view can differ from what runs).
+- [ ] F2 Desktop prompt: truncation visible on screen (end marker); refuse
+      when scale or height are not nominal.
+- [ ] F3 Tier 2: state the limit; refuse on code in the shell from outside
+      root-controlled paths; weighs on E12.
+- [ ] F4 Working directory: shown path taken from the descriptor.
+- [ ] F5 Replies: one budget by encoded size; "outcome unknown" in the client.
+- [ ] F6 Allowlist of `#!` interpreter families.
+- [ ] F7 Enter-to-approve: remove, or an allowlist of inert programs (owner
+      decides: the fast path was a requirement).
+- [ ] F8 Note gaps: `mode & 0o6000`, `--mode=`, `--groups=`, `if`/`while`,
+      backslash-newline; path note on relative and joined options.
+- [ ] F9 Comparison: remember only what a dialog showed; compare by digest.
+- [ ] F10 Request table bounded; `lookup` honours expiry.
+- [ ] F11 Dialog header: bounded lists, daemon facts first, tabs wrap.
+- [ ] F12 Audit: bound on refused-request lines; log every message.
+- [ ] F13 Low findings in the review notes, pinned tests for surviving
+      mutations (M1, M3, M4, M5, M6, M9, M14), doc corrections.
+- [ ] F14 Installer shows and confirms the admin group (`--admin-group`).
+- [ ] F15 Yama: positive evidence required on the desktop-prompt path.
+- [ ] F16 Triage the notes' "Also found, not verified" list: verify each,
+      then fix or drop it.
