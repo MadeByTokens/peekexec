@@ -29,10 +29,12 @@ pub enum Status {
     AuthFailed,
     /// The human did not respond in time.
     Timeout,
-    /// Invalid request or daemon unavailable; see `error`. Nothing ran.
+    /// Refused, invalid, or the daemon could not be reached: what was asked
+    /// did not start. See `error`.
     Error,
-    /// The request reached the daemon but no valid answer came back: it may
-    /// have run. Do not resend it; see `error`.
+    /// What became of the request cannot be said: it went out and no valid
+    /// answer came back, it started and was lost, or the daemon no longer
+    /// knows the id. It may have run. Do not resend it; see `error`.
     Unknown,
 }
 
@@ -84,8 +86,8 @@ impl Status {
             Status::Denied => "denied with a reason: read deny_reason, change your approach",
             Status::AuthFailed => "authentication failed (3 wrong passwords)",
             Status::Timeout => "timed out, no response from the human",
-            Status::Error => "invalid request or daemon unavailable, nothing ran: see error",
-            Status::Unknown => "sent, but no answer came back: it may have run, do not resend",
+            Status::Error => "refused, invalid, or daemon unavailable; it did not start: see error",
+            Status::Unknown => "what became of it cannot be said: it may have run, do not resend",
         }
     }
 }

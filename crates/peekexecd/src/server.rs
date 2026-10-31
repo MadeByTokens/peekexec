@@ -297,7 +297,7 @@ impl Daemon {
                 Some(entry) => entry
                     .wait(timeout_secs.map(|s| Duration::from_secs(s.into())))
                     .unwrap_or_else(|| pending(&id)),
-                None => Response::error(format!("no such request: {id}")),
+                None => forgotten(&id),
             },
             ClientMsg::Register {
                 name,
@@ -331,7 +331,7 @@ impl Daemon {
                         .wait(Some(Duration::from_secs(10)))
                         .unwrap_or_else(|| pending(&id))
                 }
-                None => Response::error(format!("no such request: {id}")),
+                None => forgotten(&id),
             },
         };
         let _ = write_msg(&mut conn, &reply);
@@ -986,7 +986,9 @@ impl Daemon {
     fn execute(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
         let outcome = match &prepared.exec {
             Execution::Command(plan) => exec::run(self.platform.sandbox.as_ref(), plan),
-            Execution::Install { dest, content } => exec::install(dest, content, id),
+            Execution::Install { dest, content } => {
+                exec::install(dest, content, id).map_err(exec::Failure::NotStarted)
+            }
             Execution::Nothing => Ok(exec::Outcome {
                 exit_code: 0,
                 stdout: String::new(),
@@ -1002,9 +1004,14 @@ impl Daemon {
                 output_truncated: o.truncated,
                 ..base
             },
-            Err(e) => Response {
+            Err(exec::Failure::NotStarted(e)) => Response {
                 status: Status::Error,
                 error: Some(format!("approved, but could not run: {e}")),
+                ..base
+            },
+            Err(exec::Failure::Started(e)) => Response {
+                status: Status::Unknown,
+                error: Some(format!("approved and started, then lost: {e}")),
                 ..base
             },
         }
@@ -1190,6 +1197,20 @@ fn hhmm(t: std::time::SystemTime) -> String {
         return String::new();
     }
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// An id the daemon does not hold: mistyped, another user's, expired, or
+/// from before a restart, which ended whatever it was running. Nothing here
+/// can say whether it ran.
+fn forgotten(id: &str) -> Response {
+    Response {
+        error: Some(format!(
+            "no such request: {}. Results are kept 15 minutes and do not survive a daemon \
+             restart, so if you sent it, it may have run",
+            Shown::line(id, 100)
+        )),
+        ..Response::new(Status::Unknown)
+    }
 }
 
 fn pending(id: &str) -> Response {

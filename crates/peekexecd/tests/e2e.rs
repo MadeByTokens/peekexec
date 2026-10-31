@@ -192,7 +192,7 @@ fn submit_wait_cancel() {
         id: "r-nope".into(),
         timeout_secs: Some(1),
     });
-    assert_eq!(r.status, Status::Error);
+    assert_eq!(r.status, Status::Unknown);
 }
 
 #[test]
@@ -666,4 +666,17 @@ fn wait_gets_the_result_of_a_command_with_large_output() {
         },
     );
     assert!(r.is_ok(), "wait: {:?}", r.err());
+}
+
+/// The daemon cannot say what became of an id it does not hold, and that
+/// must not read as "it did not run".
+#[test]
+fn an_id_the_daemon_does_not_hold_is_unknown() {
+    let d = Daemon::start("approve");
+    let r = d.send(&ClientMsg::Wait {
+        id: "r-gone".into(),
+        timeout_secs: Some(1),
+    });
+    assert_eq!(r.status, Status::Unknown, "{r:?}");
+    assert!(r.error.unwrap().contains("may have run"));
 }

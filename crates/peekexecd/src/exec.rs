@@ -25,8 +25,18 @@ pub struct Outcome {
 /// hold stdout open; without a limit the request would wait for it.
 pub const LINGER: Duration = Duration::from_secs(2);
 
-pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
-    let Started { mut child, group } = sandbox.spawn(plan).map_err(|e| e.to_string())?;
+/// Why there is no [`Outcome`]. The requester must be told which: a command
+/// that started may have done its work.
+#[derive(Debug)]
+pub enum Failure {
+    NotStarted(String),
+    Started(String),
+}
+
+pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, Failure> {
+    let Started { mut child, group } = sandbox
+        .spawn(plan)
+        .map_err(|e| Failure::NotStarted(e.to_string()))?;
     let out = child.stdout.take().expect("piped");
     let err = child.stderr.take().expect("piped");
     let deadline = Arc::new(Mutex::new(None));
@@ -48,9 +58,14 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
     // SAFETY: plain signal to the command's own process group.
     unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
     let ended = group.map(|g| g.end());
-    let status = child.wait().map_err(|e| format!("wait: {e}"))?;
-    let reader =
-        reader.map_err(|e| format!("cannot read the command's output ({e}); it was killed"))?;
+    let status = child
+        .wait()
+        .map_err(|e| Failure::Started(format!("wait: {e}")))?;
+    let reader = reader.map_err(|e| {
+        Failure::Started(format!(
+            "cannot read the command's output ({e}); it was killed"
+        ))
+    })?;
     if let Some(Err(e)) = ended {
         eprintln!("peekexecd: {e}");
     }

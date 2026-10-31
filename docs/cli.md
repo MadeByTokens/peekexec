@@ -42,9 +42,9 @@ EXIT CODES
   131    denied       denied with a reason: read deny_reason, change your approach
   132    auth_failed  authentication failed (3 wrong passwords)
   133    timeout      timed out, no response from the human
-  134    error        invalid request or daemon unavailable, nothing ran: see error
+  134    error        refused, invalid, or daemon unavailable; it did not start: see error
   135    pending      still waiting for the human (wait --timeout expired)
-  136    unknown      sent, but no answer came back: it may have run, do not resend
+  136    unknown      what became of it cannot be said: it may have run, do not resend
   A command that itself exits 126-255 is passed through unchanged:
   use --json and read "status" to tell the cases apart.
 
