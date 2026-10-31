@@ -1047,11 +1047,7 @@ fn lasting_root(texts: &[String]) -> Option<String> {
                             }
                         }
                     }
-                    "chmod"
-                        if args
-                            .iter()
-                            .any(|a| setuid_mode(a) || a.starts_with("--reference")) =>
-                    {
+                    "chmod" if args.iter().any(|a| setuid_mode(a) || copies_a_mode(a)) => {
                         hit("a setuid or setgid bit (chmod)".into());
                     }
                     "install" if args.iter().any(|a| setuid_mode(a)) => {
@@ -1107,38 +1103,36 @@ fn executed_text(req: &Request) -> Vec<String> {
     }
 }
 
+/// The value of `--name=value`, or of the short option `letter` with its
+/// value joined (`-aGdocker`), else the argument itself. A long option's
+/// name is not looked at: getopt takes any abbreviation of it.
+fn option_value(a: &str, letter: char) -> &str {
+    if let Some(rest) = a.strip_prefix("--") {
+        return rest.split_once('=').map_or(a, |(_, value)| value);
+    }
+    let short = a.strip_prefix('-').and_then(|o| o.find(letter));
+    short.map_or(a, |i| &a[i + 2..])
+}
+
 /// The group names in an argument of `usermod` and the like: `docker`,
 /// `a,b`, `--groups=a,b`, `-aGa,b`.
 fn group_names(a: &str) -> impl Iterator<Item = &str> {
-    let value = if let Some(v) = a.strip_prefix("--groups=") {
-        v
-    } else if let Some(i) = a
-        .strip_prefix('-')
-        .filter(|o| !o.starts_with('-'))
-        .and_then(|o| o.find('G'))
-    {
-        &a[i + 2..]
-    } else {
-        a
-    };
-    value.split(',')
+    option_value(a, 'G').split(',')
+}
+
+/// `--reference=FILE`, or the shortest abbreviation of it getopt could take.
+fn copies_a_mode(a: &str) -> bool {
+    a.strip_prefix("--").is_some_and(|rest| {
+        let name = rest.split('=').next().unwrap_or(rest);
+        !name.is_empty() && "reference".starts_with(name)
+    })
 }
 
 /// A `chmod`/`install -m` mode that sets setuid or setgid: octal with
 /// either bit (`4755`, `3755`), or symbolic with `s` (`u+s`, `g=rwxs`, `+s`,
 /// `u-x+s`), bare or as an option's value (`-m4755`, `-Dm4755`, `--mode=4755`).
 fn setuid_mode(a: &str) -> bool {
-    let a = if let Some(v) = a.strip_prefix("--mode=") {
-        v
-    } else if let Some(i) = a
-        .strip_prefix('-')
-        .filter(|o| !o.starts_with('-'))
-        .and_then(|o| o.find('m'))
-    {
-        &a[i + 2..]
-    } else {
-        a
-    };
+    let a = option_value(a, 'm');
     if a.len() >= 4 && a.chars().all(|c| c.is_digit(8)) {
         return u32::from_str_radix(a, 8).is_ok_and(|mode| mode & 0o6000 != 0);
     }
@@ -1153,31 +1147,34 @@ fn setuid_mode(a: &str) -> bool {
 /// out of the desktop prompt's summary.
 fn sensitive_targets(sections: &[Section], enforced: &Enforced, cwd: &str) -> Option<String> {
     let mut hits: Vec<&str> = Vec::new();
-    // The arguments are in the invocation lines, not in the content.
-    let texts = sections
-        .iter()
-        .flat_map(|s| {
+    // The arguments are in the invocation lines, not in the content; the
+    // working directory may be what is sensitive.
+    let texts = [cwd]
+        .into_iter()
+        .chain(sections.iter().flat_map(|s| {
             s.invocation
                 .iter()
                 .map(|l| l.as_str())
                 .chain([s.raw.as_str()])
-        })
+        }))
         .chain(enforced.write.iter().flatten().map(String::as_str));
     for text in texts {
         // Relative words mean what they do in the working directory.
+        let base = cwd.trim_end_matches('/');
         let joined: String = text
-            .split(|c: char| c.is_whitespace() || "=\"'".contains(c))
-            .filter(|w| !w.starts_with('/') && w.contains('/'))
-            .map(|w| format!("{}/{w} ", cwd.trim_end_matches('/')))
+            .split(|c: char| c.is_whitespace() || "=\"'`:;|&()<>{}".contains(c))
+            .filter(|w| !w.is_empty() && !w.starts_with(['/', '-']))
+            .map(|w| format!("{base}/{w} "))
             .collect();
         // `/etc//cron.d`, `/etc/./cron.d` and `/etc/x/../cron.d` name
         // /etc/cron.d too.
         // As written, and with `..` applied both ways it can mean.
         let forms = [
             text.to_string(),
-            joined.clone(),
             normalize_paths(text, false),
             normalize_paths(text, true),
+            normalize_paths(&joined, false),
+            normalize_paths(&joined, true),
         ];
         for &p in SENSITIVE {
             if forms.iter().any(|t| t.contains(p)) && !hits.contains(&p) {
@@ -1872,6 +1869,9 @@ mod tests {
             "chmod 3755 /x",
             "chmod u-x+s /x",
             "chmod --reference=/usr/bin/sudo /x",
+            "chmod --ref=/usr/bin/sudo /x",
+            "install --mod=4755 a /x",
+            "usermod --gr=docker u",
             "install --mode=4755 a /x",
             "install --mode=u+s a /x",
             "install -Dm4755 a /x",
@@ -1925,6 +1925,11 @@ mod tests {
             ("/etc", "cp x cron.d/y"),
             ("/etc", "dd of=sudoers.d/x"),
             ("/", "dd of=etc/cron.d/x"),
+            ("/etc", "cp x ./cron.d/y"),
+            ("/etc", "cp x a/../cron.d/y"),
+            ("/etc", "echo x >cron.d/y"),
+            ("/etc", "cp x crontab"),
+            ("/etc/cron.d", "cp x y"),
         ] {
             let section = Section {
                 comparison: false,
