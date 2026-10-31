@@ -121,7 +121,8 @@ GUIDE FOR AUTOMATED CALLERS
      every directory above it must be owned by root and not writable by
      others. To run a file you wrote, use `peekexec script FILE` (it is
      snapshotted: edits after submission have no effect).
-   - A script's #! line may pass only flags known to be harmless for its
+   - A script's #! line must name a shell, python, perl, ruby, lua, node or
+     php (or awk or sed with -f), and may pass only flags known to be harmless for its
      interpreter: shell flags (-e, -eu, -x...), python -I/-s/-E..., perl
      -w/-T..., and -f for awk and sed (their options end after the
      script: arguments are never read as options). Scripts and files you

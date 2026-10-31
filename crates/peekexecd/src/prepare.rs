@@ -178,7 +178,9 @@ pub fn prepare(
             let snapshot = argv.len() - 1;
             // `awk -f FILE` and `sed -f FILE` go on reading options (another
             // `-f`, `-e CODE`) from the arguments that follow.
-            if interp_arg.as_deref() == Some("-f") {
+            let family = crate::inspect::family(basename(&interp));
+            let reads_options = matches!(family, "awk" | "gawk" | "mawk" | "nawk" | "sed");
+            if reads_options && interp_arg.as_deref() == Some("-f") {
                 argv.push("--".into());
             }
             argv.extend(args.iter().cloned());
@@ -1793,6 +1795,21 @@ mod tests {
     /// However the desktop draws the prompt (a larger text size, a font not
     /// measured, a small screen), a human can tell it was cut: it opens by
     /// saying what it ends with, and only the daemon can write that.
+    /// `-f` to a shell means "no globbing", and takes no file.
+    #[test]
+    fn a_shell_flag_f_adds_no_end_of_options() {
+        let r = req(Action::Script {
+            path: "/home/u/x".into(),
+            content: b"#!/bin/sh -f\necho \"$1\"\n".to_vec(),
+            args: vec!["a".into()],
+        });
+        let p = prepare_for_tests(&r);
+        let Execution::Command(plan) = p.exec else {
+            panic!("not a command")
+        };
+        assert!(!plan.argv.iter().any(|a| a == "--"), "{:?}", plan.argv);
+    }
+
     #[test]
     fn a_cut_prompt_shows_it_was_cut() {
         let mut v = prepare_for_tests(&req(Action::Run {

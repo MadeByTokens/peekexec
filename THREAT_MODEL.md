@@ -154,7 +154,8 @@ has a seat and is its active one"), never the absence of a warning sign
      removed by a root job and the name taken by the user before the
      request runs), and not on a nosuid mount: removable media, disk images and FUSE
      mounted for a user are nosuid, and their files may claim any owner. A
-     script's `#!` interpreter is held to the same rule, and may receive only
+     script's `#!` interpreter is held to the same rule, must be a program
+     that runs a script (an allowlist of families), and may receive only
      flags allowlisted for that interpreter (`-e` is harmless to sh but means
      "run this code" to perl or awk). An interpreter must also read the text
      as shown: no script or installed file may declare a source encoding but

@@ -470,10 +470,12 @@ pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<Str
             return Err(format!("unsupported #!/usr/bin/env arguments: {name:?}"));
         }
         let resolved = path_str(&trust::resolve_program(&name, "/", owners)?)?;
+        interpreter_allowed(&resolved, None)?;
         return Ok((resolved, None));
     }
     let resolved = trust::resolve_program(prog, "/", owners)?;
     let resolved = path_str(&resolved)?;
+    interpreter_allowed(&resolved, arg.as_deref())?;
     if let Some(a) = &arg {
         if !shebang_flag_ok(basename(&resolved), a) {
             return Err(format!(
@@ -484,6 +486,27 @@ pub fn interpreter(content: &[u8], owners: &[u32]) -> Result<(String, Option<Str
         }
     }
     Ok((resolved, arg))
+}
+
+/// Only programs that run their first argument as a script. Others get the
+/// snapshot as a target or as text: `make` runs the working directory's
+/// Makefile, `sed` and `awk` without `-f` take the snapshot's path as their
+/// program, and either way what the human reads is not what runs, and later
+/// arguments reach an option parser.
+fn interpreter_allowed(resolved: &str, arg: Option<&str>) -> Result<(), String> {
+    let allowed = match family(basename(resolved)) {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "ash" | "python" | "perl" | "ruby"
+        | "lua" | "node" | "php" => true,
+        "awk" | "gawk" | "mawk" | "nawk" | "sed" => arg == Some("-f"),
+        _ => false,
+    };
+    if allowed {
+        return Ok(());
+    }
+    Err(format!(
+        "{resolved} cannot run a script: the #! line must name a shell, python, perl, ruby, \
+         lua, node or php, or awk or sed with -f"
+    ))
 }
 
 /// `#!` arguments go to the interpreter before the script, so they must not
@@ -510,7 +533,7 @@ fn shebang_flag_ok(interp: &str, arg: &str) -> bool {
 }
 
 /// An interpreter's name without its version (`python3.10` is `python`).
-fn family(interp: &str) -> &str {
+pub fn family(interp: &str) -> &str {
     interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
 
@@ -1250,5 +1273,28 @@ mod tests {
             !matches!(got, Ok(None)),
             "shown {shown}, descriptor /etc: verified with no warning"
         );
+    }
+
+    #[test]
+    fn only_interpreters_may_be_named_by_a_shebang() {
+        let mut accepted = Vec::new();
+        for s in [
+            "#!/usr/bin/make\nall:\n",
+            "#!/usr/bin/sed\ns/a/b/\n",
+            "#!/usr/bin/awk\n{ print }\n",
+            "#!/usr/bin/env make\nall:\n",
+            "#!/usr/bin/env sed\ns/a/b/\n",
+            "#!/usr/bin/tar\nx\n",
+            "#!/usr/bin/git\nx\n",
+            "#!/usr/bin/find\nx\n",
+        ] {
+            if let Ok(r) = interpreter(s.as_bytes(), &[0]) {
+                accepted.push((s.lines().next().unwrap().to_string(), r));
+            }
+        }
+        assert!(accepted.is_empty(), "accepted: {accepted:?}");
+        assert!(interpreter(b"#!/bin/sh\nid\n", &[0]).is_ok());
+        assert!(interpreter(b"#!/usr/bin/env sh\nid\n", &[0]).is_ok());
+        assert!(interpreter(b"#!/usr/bin/awk -f\n{ print }\n", &[0]).is_ok());
     }
 }

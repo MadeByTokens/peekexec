@@ -307,7 +307,7 @@ then a bypass pass. In order of priority:
       root-controlled paths refused. Extensions stay undetectable: E12.
 - [x] F4 Working directory: shown path taken from the descriptor.
 - [x] F5 Replies: one budget by encoded size; `unknown` status in the client.
-- [ ] F6 Allowlist of `#!` interpreter families.
+- [x] F6 Allowlist of `#!` interpreter families.
 - [ ] F7 Enter-to-approve: remove, or an allowlist of inert programs (owner
       decides: the fast path was a requirement).
 - [ ] F8 Note gaps: `mode & 0o6000`, `--mode=`, `--groups=`, `if`/`while`,
