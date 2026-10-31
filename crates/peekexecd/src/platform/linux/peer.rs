@@ -23,26 +23,7 @@ impl PeerInfo for ProcPeerInfo {
 
         let process = process_info(pid);
         let cwd = readlink(pid, "cwd");
-        let mut ancestry = Vec::new();
-        let mut child = (pid, process.start_time);
-        while let Some(ppid) = parent_pid(child.0).filter(|&p| p > 1) {
-            if ancestry.len() == MAX_ANCESTRY {
-                // Cut, not followed: an agent session beyond this depth is
-                // not found, so the request counts as unregistered.
-                break;
-            }
-            let parent = process_info(ppid);
-            // A pid names the parent only while the child still has it:
-            // read again after describing it, and it must have started no
-            // later than the child (a reused pid starts later). Otherwise
-            // the walk ends here, and the request counts as from fewer
-            // ancestors, never from someone else's.
-            if !genuine_parent(child.1, parent.start_time, parent_pid(child.0), ppid) {
-                break;
-            }
-            child = (ppid, parent.start_time);
-            ancestry.push(parent);
-        }
+        let ancestry = walk((pid, process.start_time), stat_of, process_info);
         // Still alive after we read /proc, so the pid was not reused meanwhile.
         let pinned = pidfd.as_ref().is_some_and(|fd| pidfd_alive(fd, pid));
         Ok(Peer {
@@ -217,8 +198,7 @@ fn process_info(pid: u32) -> ProcessInfo {
 }
 
 fn start_time_of(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_start_time(&stat)
+    Some(stat_of(pid)?.1)
 }
 
 /// Field 22 of /proc/<pid>/stat; fields are counted after the `(comm)`.
@@ -227,21 +207,45 @@ fn parse_start_time(stat: &str) -> Option<u64> {
     rest.split_whitespace().nth(19)?.parse().ok()
 }
 
-/// Whether the process described as `ppid` (started at `parent_start`) is
-/// still the parent of a child that started at `child_start`, whose parent
-/// pid now reads `ppid_now`.
-fn genuine_parent(
-    child_start: Option<u64>,
-    parent_start: Option<u64>,
-    ppid_now: Option<u32>,
-    ppid: u32,
-) -> bool {
-    matches!((child_start, parent_start), (Some(c), Some(p)) if p <= c) && ppid_now == Some(ppid)
+/// The ancestors of `start` (a pid and the start time it was described
+/// with), nearest first. At each step the pid must still be the process that
+/// was accepted (same start time, in the one read that gives its parent),
+/// and the parent must have started no later than it, and still be its
+/// parent when read again. A pid reused anywhere ends the walk: the request
+/// then counts as from fewer ancestors, never from someone else's.
+fn walk(
+    start: (u32, Option<u64>),
+    stat: impl Fn(u32) -> Option<(u32, u64)>,
+    info: impl Fn(u32) -> ProcessInfo,
+) -> Vec<ProcessInfo> {
+    let mut ancestry = Vec::new();
+    let mut child = start;
+    while ancestry.len() < MAX_ANCESTRY {
+        // Past the limit, cut, not followed: an agent session beyond it is
+        // not found, so the request counts as unregistered.
+        let Some(link) = stat(child.0) else {
+            break;
+        };
+        let (ppid, started) = link;
+        if child.1 != Some(started) || ppid <= 1 {
+            break;
+        }
+        let parent = info(ppid);
+        if !parent.start_time.is_some_and(|p| p <= started) || stat(child.0) != Some(link) {
+            break;
+        }
+        child = (ppid, parent.start_time);
+        ancestry.push(parent);
+    }
+    ancestry
 }
 
-fn parent_pid(pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    parse_ppid(&stat)
+/// Parent pid and start time from one read of `/proc/<pid>/stat`. As bytes:
+/// a process may name itself with anything, and must not end the walk.
+fn stat_of(pid: u32) -> Option<(u32, u64)> {
+    let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+    let stat = String::from_utf8_lossy(&stat);
+    Some((parse_ppid(&stat)?, parse_start_time(&stat)?))
 }
 
 /// The comm field (in parentheses) may itself contain spaces and ')', so
@@ -255,17 +259,77 @@ fn parse_ppid(stat: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
+    fn process(pid: u32, start: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            exe: None,
+            cmdline: vec![],
+            start_time: Some(start),
+        }
+    }
+
     #[test]
-    fn a_parent_must_be_older_than_its_child_and_still_its_parent() {
-        assert!(genuine_parent(Some(200), Some(100), Some(7), 7));
-        assert!(genuine_parent(Some(200), Some(200), Some(7), 7));
-        // Started after the child: a reused pid.
-        assert!(!genuine_parent(Some(200), Some(300), Some(7), 7));
-        // The child was reparented while we looked.
-        assert!(!genuine_parent(Some(200), Some(100), Some(1), 7));
-        // Unknown start times prove nothing.
-        assert!(!genuine_parent(None, Some(100), Some(7), 7));
-        assert!(!genuine_parent(Some(200), None, Some(7), 7));
+    fn the_walk_follows_a_chain_of_older_parents() {
+        let stat = |p| match p {
+            300 => Some((200, 30)),
+            200 => Some((100, 20)),
+            100 => Some((1, 10)),
+            _ => None,
+        };
+        let start = |p: u32| u64::from(p) / 10;
+        let chain = walk((300, Some(30)), stat, |p| process(p, start(p)));
+        let pids: Vec<u32> = chain.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [200, 100]);
+    }
+
+    /// The race 648e2ab named: pid 200 is accepted, exits, and its number
+    /// goes to a child of the agent (100). The new process's parent would
+    /// join the chain to the agent's session.
+    #[test]
+    fn a_pid_reused_after_it_was_accepted_ends_the_walk() {
+        use std::cell::Cell;
+        let reused = Cell::new(false);
+        let reads = Cell::new(0);
+        let stat = |p| match p {
+            300 => {
+                reads.set(reads.get() + 1);
+                if reads.get() == 2 {
+                    reused.set(true);
+                }
+                Some((200, 30))
+            }
+            200 if reused.get() => Some((100, 90)),
+            200 => Some((50, 20)),
+            _ => None,
+        };
+        let chain = walk((300, Some(30)), stat, |p| process(p, 20));
+        let pids: Vec<u32> = chain.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [200], "joined someone else's chain: {pids:?}");
+    }
+
+    #[test]
+    fn a_parent_younger_than_its_child_ends_the_walk() {
+        let stat = |_| Some((200, 30));
+        assert!(walk((300, Some(30)), stat, |p| process(p, 31)).is_empty());
+    }
+
+    #[test]
+    fn a_parent_that_changes_while_described_ends_the_walk() {
+        use std::cell::Cell;
+        let n = Cell::new(0);
+        let stat = |_| {
+            n.set(n.get() + 1);
+            Some((if n.get() == 1 { 200 } else { 201 }, 30))
+        };
+        assert!(walk((300, Some(30)), stat, |p| process(p, 20)).is_empty());
+    }
+
+    #[test]
+    fn a_process_name_that_is_not_utf8_does_not_end_the_walk() {
+        let raw = b"300 (\xff\xfe) S 200 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 12345 0 0";
+        let stat = String::from_utf8_lossy(raw);
+        assert_eq!(parse_ppid(&stat), Some(200));
+        assert_eq!(parse_start_time(&stat), Some(12345));
     }
 
     #[test]
