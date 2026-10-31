@@ -74,19 +74,27 @@ impl Highlighter {
             .enumerate()
             .map(|(i, (indent, continued, text))| {
                 let with_nl = format!("{text}\n");
-                let spans = match h.highlight_line(&with_nl, &self.syntaxes) {
+                let spans: Vec<(Color32, String)> = match h.highlight_line(&with_nl, &self.syntaxes)
+                {
                     Ok(regions) => regions
                         .into_iter()
                         .map(|(style, s)| {
                             let c = style.foreground;
-                            (
-                                Color32::from_rgb(c.r, c.g, c.b),
-                                s.trim_end_matches('\n').to_string(),
-                            )
+                            // Only the newline added above comes off.
+                            let s = s.strip_suffix('\n').unwrap_or(s);
+                            (Color32::from_rgb(c.r, c.g, c.b), s.to_string())
                         })
                         .filter(|(_, s)| !s.is_empty())
                         .collect(),
-                    Err(_) => vec![(default_fg(dark), text)],
+                    Err(_) => vec![],
+                };
+                // Colours are a hint; the text is not. If the spans are not
+                // exactly the line, draw the line without them.
+                let drawn: String = spans.iter().map(|(_, s)| s.as_str()).collect();
+                let spans = if drawn == text {
+                    spans
+                } else {
+                    vec![(default_fg(dark), text)]
                 };
                 DisplayLine {
                     number: i + 1,
@@ -291,6 +299,52 @@ mod tests {
         assert_eq!(blank_marker(&"\t".repeat(4000)).unwrap(), "⟨4000 tabs⟩");
         assert_eq!(blank_marker("\t\t\t").unwrap(), "⟨3 tabs⟩");
         assert_eq!(blank_marker(" \t\t\t").unwrap(), "⟨1 spaces, 3 tabs⟩");
+    }
+
+    fn shell_section(script: &str) -> Section {
+        Section {
+            title: peekexec_proto::view::Shown::line("t", 10),
+            invocation: vec![],
+            syntax: Syntax::Shell,
+            raw: script.to_string(),
+            formatted: peekexec_core::format::format_shell(script),
+            comparison: false,
+        }
+    }
+
+    fn drawn(l: &DisplayLine) -> String {
+        l.spans.iter().map(|(_, s)| s.as_str()).collect()
+    }
+
+    /// What is drawn is what the view holds. The formatter's slices rejoining
+    /// is not enough: this step used to drop what it was handed.
+    #[test]
+    fn every_drawn_line_is_the_text_it_was_given() {
+        let h = Highlighter::new();
+        for script in [
+            "cp $(echo /tmp/ok\nrm -rf /srv/data) /etc/x",
+            "cp `echo /tmp/ok\nrm -rf /srv/data` /etc/x",
+            "echo \"$(a\nb)\" 'c\nd'; e",
+            "echo 'unterminated\nmore",
+        ] {
+            let section = shell_section(script);
+            let lines = h.lines(&section, false, true);
+            assert_eq!(lines.len(), section.formatted.len(), "{script:?}");
+            assert!(lines.len() >= script.split('\n').count());
+            for (l, want) in lines.iter().zip(&section.formatted) {
+                assert_eq!(drawn(l), want.shown().1, "in {script:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn padding_inside_a_quoted_string_collapses_like_any_blank_lines() {
+        let h = Highlighter::new();
+        let script = format!("echo 'x{}y'; rm -rf /srv/data", "\n".repeat(200));
+        let lines = h.lines(&shell_section(&script), false, true);
+        assert!(lines.len() < 6, "{} rows", lines.len());
+        assert!(lines.iter().any(|l| l.collapsed.is_some()));
+        assert!(drawn(lines.last().unwrap()).contains("rm -rf /srv/data"));
     }
 
     #[test]

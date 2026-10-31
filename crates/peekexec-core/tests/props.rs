@@ -39,6 +39,14 @@ proptest! {
     }
 
     #[test]
+    fn formatter_lines_hold_at_most_their_own_final_newline(s in shellish()) {
+        for l in format_shell(&s) {
+            let body = l.text.strip_suffix('\n').unwrap_or(&l.text);
+            prop_assert!(!body.contains('\n'), "{:?}", l.text);
+        }
+    }
+
+    #[test]
     fn formatter_never_panics_on_any_string(s in any::<String>()) {
         let rejoined: String = format_shell(&s).iter().map(|l| l.text.as_str()).collect();
         prop_assert_eq!(rejoined, s);

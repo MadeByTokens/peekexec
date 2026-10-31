@@ -299,7 +299,7 @@ From the fifth review (2026-10-31); details and evidence in
 `docs/notes/fifth-review-tests/`. One commit per item, each tested first,
 then a bypass pass. In order of priority:
 
-- [ ] F1 A formatted `Line` never holds a newline; drawn spans rejoin to the
+- [x] F1 A formatted `Line` never holds a newline; drawn spans rejoin to the
       text (critical: the dialog's default view can differ from what runs).
 - [ ] F2 Desktop prompt: truncation visible on screen (end marker); refuse
       when scale or height are not nominal.

@@ -6,6 +6,10 @@
 //! original line if it ever fails). Breaks and indentation are added only
 //! for the eye; nothing is reworded. The lexer only chooses *where* to
 //! break; a lexer mistake can make the layout ugly, never wrong.
+//!
+//! A [`Line`] holds at most its own final newline. Every newline of the
+//! original ends a line, even inside `$(...)` or quotes, because a line is
+//! drawn as one row: what a newline separates must never look joined.
 
 use serde::{Deserialize, Serialize};
 
@@ -161,13 +165,35 @@ const CLOSERS: &[&str] = &["fi", "done", "esac", "}", "else", "elif"];
 
 /// Lay out a shell script for display. See the module docs for the guarantee.
 pub fn format_shell(script: &str) -> Vec<Line> {
-    let lines = layout(script);
+    let lines = split_at_newlines(layout(script));
     let rejoined: String = lines.iter().map(|l| l.text.as_str()).collect();
     if rejoined == script {
         lines
     } else {
         verbatim(script)
     }
+}
+
+/// The lexer keeps a word whole, and a word may hold newlines: end the line
+/// at each one. What follows starts after a newline of the original, so it
+/// is drawn as written (see [`Line::shown`]).
+fn split_at_newlines(lines: Vec<Line>) -> Vec<Line> {
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let body = line.text.strip_suffix('\n').unwrap_or(&line.text);
+        if !body.contains('\n') {
+            out.push(line);
+            continue;
+        }
+        for (i, text) in line.text.split_inclusive('\n').enumerate() {
+            out.push(Line {
+                text: text.to_string(),
+                indent: if i == 0 { line.indent } else { 0 },
+                continued: i == 0 && line.continued,
+            });
+        }
+    }
+    out
 }
 
 /// One display line per original line, unindented.
@@ -337,6 +363,36 @@ mod tests {
         let lines = format_shell("echo a\necho b && echo c\n");
         assert!(!lines[1].continued);
         assert!(lines[2].continued);
+    }
+
+    /// Newlines of the original inside a word (`$(...)`, quotes, backticks)
+    /// end a display line like any other: a line that holds one is drawn as
+    /// one row, or as rows with no number, and neither is what runs.
+    #[test]
+    fn a_line_never_holds_a_newline_of_the_original() {
+        for s in [
+            "cp $(echo /tmp/ok\nrm -rf /srv/data) /etc/x",
+            "cp `echo a\nrm b` c",
+            "echo 'x\n\n\ny'; rm z",
+            "echo \"$(a\nb)\" && c",
+            "echo 'trailing\n\n",
+        ] {
+            let lines = format_shell(s);
+            for l in &lines {
+                let body = l.text.strip_suffix('\n').unwrap_or(&l.text);
+                assert!(!body.contains('\n'), "{:?} in {s:?}", l.text);
+            }
+            let rejoined: String = lines.iter().map(|l| l.text.as_str()).collect();
+            assert_eq!(rejoined, s);
+        }
+    }
+
+    #[test]
+    fn a_line_after_an_inner_newline_is_a_line_of_the_original() {
+        let lines = format_shell("cp $(echo a\n  rm b) c");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].shown(), (0, "  rm b) c"));
+        assert!(!lines[1].continued);
     }
 
     #[test]
