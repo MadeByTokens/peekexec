@@ -237,7 +237,14 @@ has a seat and is its active one"), never the absence of a warning sign
    request that does not fit is refused on this path rather than approved
    with part of it below the screen's edge or visible only in the window
    that cannot be verified. That leaves room for a few short lines of
-   script; longer work is split into steps. The prompt has
+   script; longer work is split into steps. Those measurements hold for
+   GNOME 46 at its default text size, and a user's program can change the
+   text size, so fitting is not relied on: the prompt opens by saying it
+   ends with `■ END`, a line requester text cannot imitate (every
+   character outside ASCII in it is a token), and a human who does not see
+   that line knows the prompt was cut and cancels. With the field out of
+   view the password can still be typed; that human has been told not to.
+   The prompt has
    no colour or markers, so every character outside printable ASCII is
    written as `⟨U+XXXX⟩`, runs of spaces collapse into a count, and the
    number of suspicious characters comes first. The summary is

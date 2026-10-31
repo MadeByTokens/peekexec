@@ -301,8 +301,8 @@ then a bypass pass. In order of priority:
 
 - [x] F1 A formatted `Line` never holds a newline; drawn spans rejoin to the
       text (critical: the dialog's default view can differ from what runs).
-- [ ] F2 Desktop prompt: truncation visible on screen (end marker); refuse
-      when scale or height are not nominal.
+- [x] F2 Desktop prompt: truncation visible on screen (end marker). Measuring
+      scale or height was left out: the requester controls them.
 - [ ] F3 Tier 2: state the limit; refuse on code in the shell from outside
       root-controlled paths; weighs on E12.
 - [ ] F4 Working directory: shown path taken from the descriptor.

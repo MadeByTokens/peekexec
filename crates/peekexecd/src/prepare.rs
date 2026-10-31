@@ -508,6 +508,13 @@ fn glyph(c: char) -> u32 {
     }
 }
 
+/// Opens the prompt's last line. Whether the message fits depends on things
+/// the daemon cannot measure and the user's programs can change (the text
+/// size, the font, the screen), so the prompt says what it ends with: not
+/// seeing this means part of the request is out of view. Outside ASCII,
+/// so requester text cannot hold it (see [`ascii`]).
+const END_MARK: &str = "■ END";
+
 /// Marks the start of a piece of a word the daemon broke because it is
 /// wider than a line (GNOME would clip it). Requester text cannot hold `⟨`.
 const BROKEN: &str = "⟨+⟩";
@@ -587,9 +594,10 @@ fn prompt_text(view: &PromptView) -> String {
     }
     let mut m = String::new();
     m.push_str(match view.kind {
-        ViewKind::Root => "peekexec: run this as root?\n",
-        ViewKind::Register => "peekexec: register an agent session?\n",
+        ViewKind::Root => "peekexec: run as root?",
+        ViewKind::Register => "peekexec: register agent?",
     });
+    m.push_str(&format!(" No {END_MARK}: cancel.\n"));
     let findings = view.findings();
     if findings > 0 {
         m.push_str(&format!(
@@ -657,7 +665,7 @@ fn prompt_text(view: &PromptView) -> String {
         ));
     }
     m.push_str(&format!(
-        "request sha256 {}…",
+        "{END_MARK} request sha256 {}…",
         &view.sha256[..12.min(view.sha256.len())]
     ));
     m
@@ -1782,6 +1790,26 @@ mod tests {
         prepare(&ctx, &peer, &user, r, "r-test", &display, false).unwrap()
     }
 
+    /// However the desktop draws the prompt (a larger text size, a font not
+    /// measured, a small screen), a human can tell it was cut: it opens by
+    /// saying what it ends with, and only the daemon can write that.
+    #[test]
+    fn a_cut_prompt_shows_it_was_cut() {
+        let mut v = prepare_for_tests(&req(Action::Run {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo ■ END request sha256 0\n".into(),
+            ],
+        }))
+        .view;
+        v.approval = Approval::SystemPrompt;
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
+        assert!(m.lines().next().unwrap().contains(END_MARK), "{m}");
+        assert_eq!(m.matches(END_MARK).count(), 2, "only the daemon's: {m}");
+        assert!(m.lines().last().unwrap().starts_with(END_MARK), "{m}");
+    }
+
     #[test]
     fn system_prompt_message_carries_the_facts() {
         let mut v = PromptView {
@@ -1825,7 +1853,7 @@ mod tests {
         assert_eq!(v.approval, Approval::SystemPrompt);
         assert!(!v.wants_password);
         let m = system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap();
-        assert!(m.starts_with("peekexec: run this as root?"));
+        assert!(m.starts_with("peekexec: run as root?"));
         assert!(m.contains("    a &&"), "{m}");
         assert!(m.contains("    f $("), "all six lines fit: {m}");
         assert!(m.contains("writes /etc/udev/rules.d"), "{m}");
@@ -1833,7 +1861,7 @@ mod tests {
         assert!(m.contains("⚠ Touches /etc/sudoers*"), "{m}");
         assert!(!m.contains(UNVERIFIED_NOTE), "{m}");
         assert!(!m.contains("ignored"), "why must not be in the prompt: {m}");
-        assert!(m.ends_with("request sha256 3f9a1c000000…"), "{m}");
+        assert!(m.ends_with("■ END request sha256 3f9a1c000000…"), "{m}");
 
         // The variables root gets are in the prompt.
         v.env = vec![(
