@@ -611,3 +611,59 @@ fn a_finished_run_leaves_no_thread_behind() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(threads() <= before + 2, "{before} -> {}", threads());
 }
+
+fn reply_of(d: &Daemon, request: Request) -> std::io::Result<Response> {
+    call(&d.socket, &ClientMsg::Run { request })
+}
+
+// Control: output under the cap, with nothing to escape.
+#[test]
+fn freply_control_one_mib() {
+    let d = Daemon::start("approve");
+    let r = reply_of(&d, sh("head -c 1000000 /dev/zero | tr '\\000' a")).unwrap();
+    assert_eq!(r.stdout.map(|s| s.len()), Some(1_000_000));
+}
+
+// One stream, under OUTPUT_CAP, of bytes JSON escapes to six.
+#[test]
+fn a_finished_command_reaches_the_client_whatever_it_printed() {
+    let d = Daemon::start("approve");
+    let r = reply_of(&d, sh("head -c 6000000 /dev/zero"));
+    assert!(
+        r.is_ok(),
+        "the command ran; the reply did not arrive: {:?}",
+        r.err()
+    );
+}
+
+// Both streams, plain text, each at most OUTPUT_CAP.
+#[test]
+fn two_full_streams_reach_the_client() {
+    let d = Daemon::start("approve");
+    let r = reply_of(
+        &d,
+        sh("head -c 17000000 /dev/zero | tr '\\000' a; head -c 17000000 /dev/zero | tr '\\000' a >&2"),
+    );
+    assert!(
+        r.is_ok(),
+        "the command ran; the reply did not arrive: {:?}",
+        r.err()
+    );
+}
+
+#[test]
+fn wait_gets_the_result_of_a_command_with_large_output() {
+    let d = Daemon::start("approve");
+    let p = d.send(&ClientMsg::Submit {
+        request: sh("head -c 6000000 /dev/zero"),
+    });
+    let id = p.request_id.unwrap();
+    let r: std::io::Result<Response> = call(
+        &d.socket,
+        &ClientMsg::Wait {
+            id,
+            timeout_secs: Some(20),
+        },
+    );
+    assert!(r.is_ok(), "wait: {:?}", r.err());
+}

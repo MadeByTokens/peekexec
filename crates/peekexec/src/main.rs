@@ -259,11 +259,13 @@ fn daemon_uid(conn: &UnixStream) -> std::io::Result<u32> {
 /// socket, speaks for the human: a socket elsewhere may belong to another
 /// root-started service (a socket unit whose service runs unprivileged
 /// reports root too).
-fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), String> {
+fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), Failed> {
     let path = socket();
+    let sent = std::cell::Cell::new(false);
     let exchange = || -> std::io::Result<(A, bool)> {
         let mut conn = UnixStream::connect(&path)?;
         let from_root = daemon_uid(&conn)? == 0 && standard_socket(&path);
+        sent.set(true);
         wire::write_msg(&mut conn, msg)?;
         let reply = wire::read_msg(&mut BufReader::new(conn))?.ok_or_else(|| {
             std::io::Error::new(
@@ -274,18 +276,42 @@ fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), St
         Ok((reply, from_root))
     };
     exchange().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            return format!(
-                "cannot connect to {}: only members of the administrator group (sudo, wheel \
-                 or admin) may use peekexec. If you were just added to it, log out and back in.",
-                path.display()
-            );
+        let shown = Shown::line(&path.display().to_string(), 300);
+        // Once a request has gone out, a missing answer says nothing about
+        // what happened to it: "cannot reach" would invite running it again.
+        if sent.get() {
+            return Failed {
+                sent: true,
+                text: format!(
+                    "no valid answer from peekexecd at {shown} ({}): the request may have \
+                     run. Do not send it again; check what it would have changed, or ask \
+                     the user.",
+                    Shown::line(&e.to_string(), 300)
+                ),
+            };
         }
-        format!(
-            "cannot reach peekexecd at {}: {e}. Is peekexec installed and peekexecd.socket enabled?",
-            path.display()
-        )
+        let text = if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "cannot connect to {shown}: only members of the administrator group (sudo, \
+                 wheel or admin) may use peekexec. If you were just added to it, log out and \
+                 back in."
+            )
+        } else {
+            format!(
+                "cannot reach peekexecd at {shown}: {}. Is peekexec installed and \
+                 peekexecd.socket enabled?",
+                Shown::line(&e.to_string(), 300)
+            )
+        };
+        Failed { sent: false, text }
     })
+}
+
+/// Why [`call`] has no answer.
+struct Failed {
+    /// The message left this process, so it may have been acted on.
+    sent: bool,
+    text: String,
 }
 
 fn preview(req: Request, json: bool) -> ExitCode {
@@ -297,7 +323,7 @@ fn preview(req: Request, json: bool) -> ExitCode {
                 eprintln!(
                     "peekexec: {} is not the installed peekexecd (not root, or not its \
                      standard socket): this is not necessarily what the human would see",
-                    socket().display()
+                    Shown::line(&socket().display().to_string(), 300)
                 );
             }
             // Counted as the daemon and the dialog count them
@@ -332,7 +358,9 @@ fn preview(req: Request, json: bool) -> ExitCode {
             },
             json,
         ),
-        Err(unreachable) => {
+        Err(Failed {
+            text: unreachable, ..
+        }) => {
             if json {
                 let out = serde_json::json!({
                     "request": req,
@@ -342,7 +370,8 @@ fn preview(req: Request, json: bool) -> ExitCode {
                 });
                 println!("{out}");
             } else {
-                println!("({unreachable}\n Showing a local approximation instead.)\n");
+                let shown = Shown::line(&unreachable, 2000);
+                println!("({shown}\n Showing a local approximation instead.)\n");
                 print_local_preview(&req);
             }
             ExitCode::SUCCESS
@@ -429,7 +458,7 @@ fn print_human(resp: &Response) {
             "peekexec: {} is not the installed peekexecd (not root, or not its standard \
              socket: development mode, or a program posing as peekexecd): nothing ran as \
              root, and this answer is not from the human",
-            socket().display()
+            Shown::line(&socket().display().to_string(), 300)
         );
     }
     // Text from the daemon goes to a terminal: escaped, one line.
@@ -467,7 +496,9 @@ fn print_human(resp: &Response) {
         Status::Cancelled => eprintln!("peekexec: cancelled"),
         Status::AuthFailed => eprintln!("peekexec: authentication failed"),
         Status::Timeout => eprintln!("peekexec: no answer before the timeout"),
-        Status::Error => eprintln!("peekexec: {}", line(resp.error.as_deref(), "unknown error")),
+        Status::Error | Status::Unknown => {
+            eprintln!("peekexec: {}", line(resp.error.as_deref(), "unknown error"))
+        }
     }
 }
 
@@ -495,7 +526,11 @@ fn call_response(msg: &ClientMsg) -> Response {
             }
             resp
         }
-        Err(e) => Response::error(e),
+        Err(Failed { sent: false, text }) => Response::error(text),
+        Err(Failed { sent: true, text }) => Response {
+            error: Some(text),
+            ..Response::new(Status::Unknown)
+        },
     }
 }
 

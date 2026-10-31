@@ -17,6 +17,7 @@ pub struct Outcome {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
+    pub truncated: bool,
 }
 
 /// How long output is still read after the command exits. A background
@@ -58,11 +59,12 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, String> {
         .or_else(|| status.signal().map(|s| 128 + s))
         .unwrap_or(1);
     *deadline.lock().unwrap() = Some(Instant::now() + LINGER);
-    let [stdout, stderr] = reader.join().unwrap_or_default();
+    let [(stdout, out_cut), (stderr, err_cut)] = reader.join().unwrap_or_default();
     Ok(Outcome {
         exit_code,
         stdout,
         stderr,
+        truncated: out_cut || err_cut,
     })
 }
 
@@ -91,7 +93,10 @@ impl<T: Read + AsRawFd + Send> Stream for T {}
 /// Read both streams until each reaches end of file or, once `deadline` is
 /// set (the command has exited), until it passes. Up to [`OUTPUT_CAP`]
 /// bytes per stream are kept.
-fn capture(mut streams: [Box<dyn Stream>; 2], deadline: &Mutex<Option<Instant>>) -> [String; 2] {
+fn capture(
+    mut streams: [Box<dyn Stream>; 2],
+    deadline: &Mutex<Option<Instant>>,
+) -> [(String, bool); 2] {
     let mut bufs = [Vec::new(), Vec::new()];
     let mut dropped = [0usize; 2];
     let mut open = [true, true];
@@ -141,10 +146,13 @@ fn capture(mut streams: [Box<dyn Stream>; 2], deadline: &Mutex<Option<Instant>>)
     }
     std::array::from_fn(|i| {
         let mut s = String::from_utf8_lossy(&bufs[i]).into_owned();
-        if dropped[i] > 0 {
+        // A reply must fit a message once encoded (see OUTPUT_BUDGET).
+        let cut = peekexec_proto::wire::fit_output(&mut s).unwrap_or(0);
+        let truncated = dropped[i] > 0 || cut > 0;
+        if truncated {
             s.push_str(&format!(
                 "\n[peekexec: {} more bytes dropped]\n",
-                dropped[i]
+                dropped[i] + cut
             ));
         }
         if lingered && open[i] {
@@ -153,7 +161,7 @@ fn capture(mut streams: [Box<dyn Stream>; 2], deadline: &Mutex<Option<Instant>>)
                  still holds this output open]\n",
             );
         }
-        s
+        (s, truncated || (lingered && open[i]))
     })
 }
 
@@ -207,6 +215,7 @@ pub fn install(dest: &Path, content: &[u8], id: &str) -> Result<Outcome, String>
         exit_code: 0,
         stdout: format!("installed {} ({} bytes)\n", dest.display(), content.len()),
         stderr: String::new(),
+        truncated: false,
     })
 }
 

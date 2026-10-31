@@ -44,7 +44,7 @@ Status: ✓ held (how) · ⚠ open (planned fix) · — not used there.
 | `wait`/`cancel` id | owner checked; others' ids look nonexistent (✓) | own results only (✓) | — | — | — | — |
 | `register` name, pid | name escaped; pid must be the caller or an ancestor (✓) | — | escaped (✓) | escaped (✓) | nothing runs (✓) | Debug-quoted (✓) |
 | connection itself | SO_PEERCRED uid; admin group before reading, from the account's groups in the user database, never the caller's egid (✓ R2) | — | — | — | — | uid, pid (✓) |
-| volume | 32 MiB/message sent within 30 s, 16 connections (no thread or descriptor outlives one), 3 pending (✓) | — | — | — | output capped at 16 MiB/stream (✓) | — |
+| volume | 32 MiB/message sent within 30 s, 16 connections (no thread or descriptor outlives one), 3 pending (✓) | — | — | — | output capped at 16 MiB/stream, and at 14 MiB/stream as encoded so a reply always fits a message, reported in `output_truncated`; a reply that still fails is `unknown`, not "cannot reach" (✓) | — |
 
 ## What the requester can arrange around a request
 

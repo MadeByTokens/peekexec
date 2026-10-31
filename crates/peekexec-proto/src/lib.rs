@@ -29,12 +29,15 @@ pub enum Status {
     AuthFailed,
     /// The human did not respond in time.
     Timeout,
-    /// Invalid request or daemon unavailable; see `error`.
+    /// Invalid request or daemon unavailable; see `error`. Nothing ran.
     Error,
+    /// The request reached the daemon but no valid answer came back: it may
+    /// have run. Do not resend it; see `error`.
+    Unknown,
 }
 
 impl Status {
-    pub const ALL: [Status; 7] = [
+    pub const ALL: [Status; 8] = [
         Status::Approved,
         Status::Pending,
         Status::Cancelled,
@@ -42,6 +45,7 @@ impl Status {
         Status::AuthFailed,
         Status::Timeout,
         Status::Error,
+        Status::Unknown,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -53,6 +57,7 @@ impl Status {
             Status::AuthFailed => "auth_failed",
             Status::Timeout => "timeout",
             Status::Error => "error",
+            Status::Unknown => "unknown",
         }
     }
 
@@ -67,6 +72,7 @@ impl Status {
             Status::Timeout => Some(133),
             Status::Error => Some(134),
             Status::Pending => Some(135),
+            Status::Unknown => Some(136),
         }
     }
 
@@ -78,7 +84,8 @@ impl Status {
             Status::Denied => "denied with a reason: read deny_reason, change your approach",
             Status::AuthFailed => "authentication failed (3 wrong passwords)",
             Status::Timeout => "timed out, no response from the human",
-            Status::Error => "invalid request or daemon unavailable: see error",
+            Status::Error => "invalid request or daemon unavailable, nothing ran: see error",
+            Status::Unknown => "sent, but no answer came back: it may have run, do not resend",
         }
     }
 }
@@ -138,6 +145,11 @@ pub struct Response {
     pub stdout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
+    /// True when part of `stdout` or `stderr` was dropped. The text in those
+    /// fields that says so comes from the same stream as the command's own
+    /// output, so it proves nothing; this field does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_truncated: bool,
     /// The human's message to you, delivered by the root daemon (unless
     /// `dev_mode` is true). As trustworthy as the dialog it was typed into:
     /// see `display_verified`.
@@ -180,6 +192,7 @@ impl Response {
             exit_code: None,
             stdout: None,
             stderr: None,
+            output_truncated: false,
             deny_reason: None,
             enforced: None,
             display_tier: None,

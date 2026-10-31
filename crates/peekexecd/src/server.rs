@@ -991,6 +991,7 @@ impl Daemon {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
+                truncated: false,
             }),
         };
         match outcome {
@@ -998,6 +999,7 @@ impl Daemon {
                 exit_code: Some(o.exit_code),
                 stdout: Some(o.stdout),
                 stderr: Some(o.stderr),
+                output_truncated: o.truncated,
                 ..base
             },
             Err(e) => Response {

@@ -93,9 +93,9 @@ A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
   `cancel` for long waits.
 - `--json` output: `status`, `exit_code`, `stdout`, `stderr`, `deny_reason`,
   `enforced`, `sha256`, `request_id`, `error`, `display_tier`,
-  `display_verified`, `dev_mode`, `session`.
+  `display_verified`, `dev_mode`, `session`, `output_truncated`.
 - Exit codes: 0–125 the command's own; 130 cancelled, 131 denied, 132 auth
-  failed, 133 timeout, 134 error, 135 pending.
+  failed, 133 timeout, 134 error, 135 pending, 136 unknown.
 - Resending an identical request (same sha256) within an hour of a denial is
   refused, as a courtesy (any change makes a new request).
 - No flag lets the caller approve, pre-approve or skip the dialog (see the
@@ -306,7 +306,7 @@ then a bypass pass. In order of priority:
 - [x] F3 Tier 2: limit stated; native code in the shell from outside
       root-controlled paths refused. Extensions stay undetectable: E12.
 - [x] F4 Working directory: shown path taken from the descriptor.
-- [ ] F5 Replies: one budget by encoded size; "outcome unknown" in the client.
+- [x] F5 Replies: one budget by encoded size; `unknown` status in the client.
 - [ ] F6 Allowlist of `#!` interpreter families.
 - [ ] F7 Enter-to-approve: remove, or an allowlist of inert programs (owner
       decides: the fast path was a requirement).

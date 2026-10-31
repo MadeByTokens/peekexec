@@ -10,6 +10,36 @@ use serde::Serialize;
 /// Largest accepted message (scripts and installed files travel inline).
 pub const MAX_MSG: u64 = 32 * 1024 * 1024;
 
+/// What a command's output may take of a reply, per stream, as JSON. A
+/// reply must fit [`MAX_MSG`] once encoded, and encoding can multiply the
+/// size by six (a control character becomes `\\u0000`), so the budget is on
+/// the encoded length, not on the bytes the command wrote.
+pub const OUTPUT_BUDGET: usize = 14 * 1024 * 1024;
+
+/// Bytes `c` takes in a JSON string.
+fn encoded_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+        '\0'..='\u{1f}' => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Cut `text` to [`OUTPUT_BUDGET`] encoded bytes. Returns how many bytes
+/// were cut off, if any.
+pub fn fit_output(text: &mut String) -> Option<usize> {
+    let mut used = 0;
+    for (i, c) in text.char_indices() {
+        used += encoded_len(c);
+        if used > OUTPUT_BUDGET {
+            let cut = text.len() - i;
+            text.truncate(i);
+            return Some(cut);
+        }
+    }
+    None
+}
+
 /// Default daemon socket.
 pub const SOCKET: &str = "/run/peekexec/peekexec.sock";
 
@@ -88,5 +118,24 @@ mod tests {
     fn truncated_message_is_an_error() {
         let mut r = io::Cursor::new(b"{\"a\":".to_vec());
         assert!(read_msg::<_, serde_json::Value>(&mut r).is_err());
+    }
+
+    #[test]
+    fn output_fits_a_reply_however_it_encodes() {
+        for c in ['a', '\0', '"', 'é', '\u{fffd}', '\n'] {
+            let mut text = c.to_string().repeat(20 * 1024 * 1024);
+            let cut = fit_output(&mut text);
+            assert!(cut.is_some());
+            let encoded = serde_json::to_string(&text).unwrap();
+            assert!(
+                encoded.len() <= OUTPUT_BUDGET + 2,
+                "{c:?}: {}",
+                encoded.len()
+            );
+            assert!(2 * OUTPUT_BUDGET + 64 * 1024 < MAX_MSG as usize);
+        }
+        let mut short = "ok".to_string();
+        assert_eq!(fit_output(&mut short), None);
+        assert_eq!(short, "ok");
     }
 }
