@@ -23,7 +23,7 @@ if [ "${1:-}" = --install ]; then
     tar czf - -C "$repo" target/release/peekexec target/release/peekexecd \
         target/release/peekexec-ui packaging \
         | "$here/ssh.sh" 'rm -rf ~/pe && mkdir -p ~/pe && tar xzf - -C ~/pe &&
-            sudo ~/pe/packaging/install.sh --from="$HOME/pe" >/dev/null && echo installed' \
+            sudo ~/pe/packaging/install.sh --from="$HOME/pe" --admin-group=sudo >/dev/null && echo installed' \
             2>&1 | grep -v xauth
 fi
 

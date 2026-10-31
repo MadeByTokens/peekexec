@@ -321,16 +321,22 @@ impl Polkit {
     }
 }
 
-/// The logind session whose scope (`session-<id>.scope`) holds the
-/// process, if any. Scopes are root-owned: a process cannot move into one.
+/// The logind session whose scope holds the process, if any: exactly
+/// `/user.slice/user-<uid>.slice/session-<id>.scope`, which root owns.
 /// Apps under `user@.service` belong to none; polkit then uses the user's
 /// display session.
 fn session_of(cgroup: &str) -> Option<String> {
     cgroup
         .lines()
         .filter_map(|l| l.rsplit(':').next())
-        .flat_map(|path| path.split('/'))
-        .find_map(|part| part.strip_prefix("session-")?.strip_suffix(".scope"))
+        .find_map(|path| {
+            // Whole path: below `user@.service`, delegated to the user, a
+            // process can make a group of any name.
+            let mut parts = path.strip_prefix("/user.slice/user-")?.splitn(2, '/');
+            parts.next()?.strip_suffix(".slice")?;
+            let scope = parts.next()?;
+            scope.strip_prefix("session-")?.strip_suffix(".scope")
+        })
         .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()))
         .map(str::to_string)
 }
@@ -374,7 +380,8 @@ fn display_session(uid: u32) -> Result<String, String> {
 /// user's from a binary root controls. A requester can start a shell or an
 /// agent of its own, but not take the session from the compositor that
 /// holds it; and on Wayland the compositor cannot be replaced without
-/// ending the session. X11 sessions have no controller and are refused.
+/// ending the session. An X11 session's controller, where it has one, is
+/// Xorg, and is refused.
 fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
     let refused = |why: &str| {
         Err(format!(
@@ -517,6 +524,19 @@ fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scope_counts_only_at_its_own_place() {
+        let real = "0::/user.slice/user-1000.slice/session-2.scope\n";
+        assert_eq!(session_of(real).as_deref(), Some("2"));
+        for made in [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/session-2.scope\n",
+            "0::/user.slice/user-1000.slice/user@1000.service/session-2.scope\n",
+            "0::/session-2.scope\n",
+        ] {
+            assert_eq!(session_of(made), None, "{made}");
+        }
+    }
 
     #[test]
     fn a_file_mapped_under_a_trusted_name_is_judged_by_the_object() {

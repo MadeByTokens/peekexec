@@ -4,6 +4,11 @@
 //! supplies implementations under `platform/<os>/`. Porting means adding a
 //! backend directory, not touching the daemon logic.
 
+// An approver with no human must not exist in an optimized build, whatever
+// the packaging does.
+#[cfg(all(feature = "test-approver", not(debug_assertions)))]
+compile_error!("test-approver is for debug builds and tests only");
+
 pub mod exec;
 pub mod inspect;
 pub mod platform;

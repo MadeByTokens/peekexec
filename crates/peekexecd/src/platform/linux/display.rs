@@ -152,11 +152,15 @@ fn has_arg(cmdline: &[u8], want: &str) -> bool {
     cmdline.split(|&b| b == 0).any(|a| a == want.as_bytes())
 }
 
+/// Whole path: below `user@.service`, delegated to the user, a process can
+/// make a group of any name.
 fn in_scope(cgroup: &str, scope: &str) -> bool {
     cgroup.lines().any(|l| {
-        l.rsplit(':')
-            .next()
-            .is_some_and(|path| path.ends_with(&format!("/{scope}")))
+        l.rsplit(':').next().is_some_and(|path| {
+            path.strip_prefix("/user.slice/user-")
+                .and_then(|rest| rest.split_once('/'))
+                .is_some_and(|(user, rest)| user.ends_with(".slice") && rest == scope)
+        })
     })
 }
 
@@ -265,6 +269,10 @@ mod tests {
         let cg = "0::/user.slice/user-1000.slice/session-2.scope\n";
         assert!(in_scope(cg, "session-2.scope"));
         assert!(!in_scope(cg, "session-12.scope"));
+        assert!(!in_scope(
+            "0::/user.slice/user-1000.slice/user@1000.service/session-2.scope\n",
+            "session-2.scope"
+        ));
         assert!(!in_scope(
             "0::/user.slice/user-1000.slice/session-12.scope\n",
             "session-2.scope"

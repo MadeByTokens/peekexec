@@ -316,7 +316,7 @@ then a bypass pass. In order of priority:
 - [x] F12 Audit: bound on refused-request lines; resolved targets logged.
 - [ ] F13 Low findings in the review notes, pinned tests for surviving
       mutations (M1, M3, M4, M5, M6, M9, M14), doc corrections.
-- [ ] F14 Installer shows and confirms the admin group (`--admin-group`).
-- [ ] F15 Yama: positive evidence required on the desktop-prompt path.
+- [x] F14 Installer shows and confirms the admin group (`--admin-group`).
+- [x] F15 Yama: positive evidence required on the desktop-prompt path.
 - [ ] F16 Triage the notes' "Also found, not verified" list: verify each,
       then fix or drop it.

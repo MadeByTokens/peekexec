@@ -97,6 +97,16 @@ fn run(args: Args) -> Result<(), String> {
         unsafe {
             libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
         };
+        // At 1, every process is dumpable from exec on, which undoes what
+        // the binaries' mode 0711 is for: nothing here is safe to start.
+        let dumpable = std::fs::read_to_string("/proc/sys/fs/suid_dumpable").unwrap_or_default();
+        if dumpable.trim() == "1" {
+            return Err(
+                "refusing to start: fs.suid_dumpable is 1 (debugging), so programs of a user \
+                 could attach to the dialog and read the password"
+                    .into(),
+            );
+        }
         // The dialog collects the password: it must not be replaceable.
         trust::check(&dialog, &[0]).map_err(|e| format!("refusing dialog program: {e}"))?;
         // It and this binary (the inspection helper) must not be dumpable

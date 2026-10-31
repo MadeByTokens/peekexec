@@ -282,7 +282,7 @@ impl Daemon {
         // Only administrators can ever be asked, so nobody else gets to send
         // (and make the daemon buffer) a request at all.
         if !self.opts.dev {
-            let admin = user_of(peer.uid).is_ok_and(|u| is_admin(&u));
+            let admin = user_of(peer.uid).is_ok_and(|u| self.is_admin(&u));
             if !admin {
                 eprintln!(
                     "peekexecd: audit rejected uid={} pid={} exe={:?} reason=\"not an administrator\"",
@@ -431,6 +431,21 @@ impl Daemon {
             .cloned()
     }
 
+    /// An administrator is a member of the group the socket is open to.
+    /// That one fact, set at install, not worked out again from group names
+    /// here: the two could differ, and a group that is root or that cannot
+    /// be read means no one.
+    #[cfg(target_os = "linux")]
+    fn is_admin(&self, user: &User) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(&self.opts.socket).is_ok_and(|m| in_group(user, m.gid()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_admin(&self, _user: &User) -> bool {
+        false // M4: the macOS `admin` group via the platform layer
+    }
+
     /// See [`REFUSALS_LOGGED_PER_MINUTE`].
     fn refusal_may_be_logged(&self, peer: &Peer) -> bool {
         let (log, dropped) = self
@@ -572,7 +587,7 @@ impl Daemon {
         let user = user_of(peer.uid)?;
         // Preview builds the real view, with the inspection helper's
         // findings: admins only, like any request.
-        if !self.opts.dev && !is_admin(&user) {
+        if !self.opts.dev && !self.is_admin(&user) {
             return Err(format!(
                 "user {} is not in the administrator group (the first of {} that exists)",
                 user.name,
@@ -933,7 +948,7 @@ impl Daemon {
             Ok(u) => u,
             Err(e) => return fail(e),
         };
-        if !self.opts.dev && !is_admin(&user) {
+        if !self.opts.dev && !self.is_admin(&user) {
             return fail(format!(
                 "user {} is not in the administrator group (the first of {} that exists); peekexec only asks administrators",
                 user.name,
@@ -1452,18 +1467,10 @@ fn admin_gid() -> Option<u32> {
 /// with `newgrp sudo` before the user left the group must not count
 /// (design rule 2).
 ///
-/// The administrator group is the first of [`ADMIN_GROUPS`] that exists,
-/// the very group the socket is opened to: on a system that has `sudo` and
-/// also a `wheel` with another meaning, a member of only `wheel` is not an
-/// administrator.
-#[cfg(target_os = "linux")]
-fn is_admin(user: &User) -> bool {
-    admin_gid().is_some_and(|gid| user.groups.contains(&gid))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_admin(_user: &User) -> bool {
-    false // M4: the macOS `admin` group via the platform layer
+/// Whether `gid`, the socket's group, is one of the user's.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn in_group(user: &User, gid: u32) -> bool {
+    gid != 0 && user.groups.contains(&gid)
 }
 
 fn new_id() -> String {
@@ -1756,16 +1763,10 @@ mod tests {
             gid: 1000,
             groups,
         };
-        assert!(is_admin(&user(vec![1000, gid])));
-        assert!(!is_admin(&user(vec![1000])));
-        // Another of the names, existing besides the first, does not count.
-        let others: Vec<u32> = ADMIN_GROUPS
-            .iter()
-            .filter_map(|n| nix::unistd::Group::from_name(n).ok().flatten())
-            .map(|g| g.gid.as_raw())
-            .filter(|&g| g != gid)
-            .collect();
-        assert!(!is_admin(&user(others)));
+        assert!(in_group(&user(vec![1000, gid]), gid));
+        assert!(!in_group(&user(vec![1000]), gid));
+        // Root's group (a socket with no group set) is no one's.
+        assert!(!in_group(&user(vec![0]), 0));
     }
 
     #[test]

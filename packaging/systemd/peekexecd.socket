@@ -4,8 +4,8 @@ Description=peekexec request socket
 [Socket]
 ListenStream=/run/peekexec/peekexec.sock
 # Only administrators may connect: install.sh adds a drop-in
-# (peekexecd.socket.d/admin-group.conf) setting SocketGroup to this system's
-# administrator group (sudo, wheel or admin). The daemon checks again.
+# (peekexecd.socket.d/admin-group.conf) setting SocketGroup to the group named
+# at install. The daemon checks again, against this socket's group.
 SocketMode=0660
 DirectoryMode=0755
 

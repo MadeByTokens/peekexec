@@ -2,8 +2,12 @@
 # Install (or remove) peekexec from a release build of this repository.
 #
 #   cargo build --release --locked   # as your user, never as root
-#   pkexec "$PWD/packaging/install.sh"            # install
+#   pkexec "$PWD/packaging/install.sh" --admin-group=sudo     # install
 #   pkexec "$PWD/packaging/install.sh" --uninstall
+#
+# --admin-group names the group whose members may ask for root. peekexec
+# gives them full root for their own password, whatever sudoers says about
+# that group, so the choice is made by a person, once. Later upgrades keep it.
 #
 # Running this as root trusts every file in the tree: the binaries in
 # target/release and the files in packaging/ are installed as they are,
@@ -12,15 +16,19 @@
 # this script, not the root daemon it installs. --from names the tree when
 # the script runs from a copy.
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 
 action=install
 from=""
+admin_group=""
 for arg in "$@"; do
     case "$arg" in
         --uninstall) action=uninstall ;;
         --from=*) from=${arg#--from=} ;;
+        --admin-group=*) admin_group=${arg#--admin-group=} ;;
         *)
-            echo "usage: install.sh [--uninstall] [--from=REPO_DIR]" >&2
+            echo "usage: install.sh [--uninstall] [--from=REPO_DIR] [--admin-group=GROUP]" >&2
             exit 2
             ;;
     esac
@@ -72,7 +80,7 @@ if [ "$action" = uninstall ]; then
     rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
     rm -rf "$dropin"
     rm -rf "$libexec"
-    systemctl daemon-reload
+    systemctl daemon-reload || true
     # Remove the PAM file only if it is exactly one we ship (not edited).
     if cmp -s "$pam" "$repo/packaging/pam/peekexec.debian" \
         || cmp -s "$pam" "$repo/packaging/pam/peekexec.redhat"; then
@@ -84,6 +92,42 @@ if [ "$action" = uninstall ]; then
         echo "peekexec removed"
     fi
     exit 0
+fi
+
+# Everything that can be refused is refused here, before anything changes.
+if ! command -v systemctl >/dev/null; then
+    echo "install.sh: this needs systemd" >&2
+    exit 1
+fi
+if [ -z "$admin_group" ] && [ -e "$dropin/admin-group.conf" ]; then
+    admin_group=$(sed -n 's/^SocketGroup=//p' "$dropin/admin-group.conf")
+fi
+if [ -z "$admin_group" ]; then
+    echo "install.sh: name the group whose members may ask for root:" >&2
+    for g in sudo wheel admin; do
+        if line=$(getent group "$g"); then
+            echo "  --admin-group=$g   members: ${line##*:}" >&2
+        fi
+    done
+    echo "Each member gets full root with their own password, whatever sudoers says." >&2
+    exit 1
+fi
+if ! members=$(getent group "$admin_group"); then
+    echo "install.sh: no group named $admin_group" >&2
+    exit 1
+fi
+if [ "$admin_group" = root ]; then
+    echo "install.sh: the group must not be root: the daemon would admit no one" >&2
+    exit 1
+fi
+echo "install.sh: administrators are the members of $admin_group: ${members##*:}"
+if [ ! -e /sys/fs/cgroup/cgroup.controllers ]; then
+    echo "install.sh: no cgroup v2: commands' background processes are not ended, and this" >&2
+    echo "  script cannot wait for running commands before it restarts the daemon" >&2
+fi
+systemd_version=$(systemctl --version | sed -n '1s/^systemd \([0-9]*\).*/\1/p')
+if [ "${systemd_version:-0}" -lt 240 ]; then
+    echo "install.sh: systemd older than 240 applies its log rate limit to audit lines" >&2
 fi
 
 rel="$repo/target/release"
@@ -111,7 +155,8 @@ if [ -n "$(find "$stage" ! -type f ! -type d)" ]; then
     exit 1
 fi
 for f in peekexec peekexecd peekexec-ui; do
-    if [ ! -x "$stage/$f" ]; then
+    # By its mode: on a noexec /tmp, -x is false whatever the file is.
+    if [ -z "$(find "$stage/$f" -perm -u+x)" ]; then
         echo "install.sh: $rel/$f is not executable" >&2
         exit 1
     fi
@@ -136,17 +181,6 @@ install -o root -g root -m 0755 "$stage/peekexec" "$bin"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
 # Only the administrators may connect to the socket.
-admin_group=""
-for g in sudo wheel admin; do
-    if getent group "$g" >/dev/null; then
-        admin_group=$g
-        break
-    fi
-done
-if [ -z "$admin_group" ]; then
-    echo "install.sh: no administrator group (sudo, wheel, admin) found; refusing" >&2
-    exit 1
-fi
 install -d -o root -g root -m 0755 "$dropin"
 printf '[Socket]\nSocketGroup=%s\n' "$admin_group" > "$dropin/admin-group.conf"
 chmod 0644 "$dropin/admin-group.conf"
@@ -159,6 +193,8 @@ if [ ! -e "$pam" ]; then
     else
         install -o root -g root -m 0644 "$stage/pam/peekexec.redhat" "$pam"
     fi
+elif ! cmp -s "$pam" "$stage/pam/peekexec.debian" && ! cmp -s "$pam" "$stage/pam/peekexec.redhat"; then
+    echo "install.sh: kept $pam, which differs from the ones shipped" >&2
 fi
 
 systemctl daemon-reload

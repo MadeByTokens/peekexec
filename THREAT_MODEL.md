@@ -94,9 +94,9 @@ has a seat and is its active one"), never the absence of a warning sign
 
 | Actor | Trust |
 |---|---|
-| Human approver | Trusted. An administrator (member of the first of `sudo`, `wheel`, `admin` that exists) typing **their own** password; usually the same account as the requester, as with sudo. |
+| Human approver | Trusted. An administrator (member of the group named at install) typing **their own** password; usually the same account as the requester, as with sudo. |
 | Requester (agent, script) | **Untrusted.** Controls argv, file contents, env (within an allowlist), working directory, `--why`, and its own process names. May be buggy, overeager or prompt-injected; on X11, one that runs programs of its own (any agent with a shell can) is out of reach: it can read the password as it is typed (see tiers). |
-| Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group (the first of `sudo`, `wheel`, `admin` that exists). The daemon checks membership again. |
+| Other local users | Untrusted. Cannot connect: the socket is mode 0660, group-owned by the administrator group. The daemon checks membership again, against the socket's own group, so the two cannot differ. |
 | `peekexecd` (root) | Trusted computing base. |
 | `peekexec-ui` (the dialog) | Started by the daemon from a root-owned path with a clean environment, as the approving user with no supplementary groups; non-dumpable. Trusted to render honestly, but it runs as the user, so on X11 other programs of that user can drive it. |
 | Kernel, PAM, display server | Trusted, with the display caveats below. |

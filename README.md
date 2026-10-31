@@ -96,7 +96,7 @@ target/debug/peekexec run --why "say hi" -- sh -c 'echo hi && id -un'
 
 ```bash
 cargo build --release --locked
-pkexec "$PWD/packaging/install.sh"            # or: sudo
+pkexec "$PWD/packaging/install.sh" --admin-group=sudo   # or: sudo
 pkexec "$PWD/packaging/install.sh" --uninstall
 ```
 

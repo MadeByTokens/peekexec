@@ -54,6 +54,9 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - run: cargo test --locked --workspace --features peekexecd/test-approver
+      # What ships: the test approver must not be in it, as install.sh checks.
+      - run: cargo build --locked --release -p peekexecd
+      - run: "! grep -a -q PEEKEXEC_TEST_APPROVER target/release/peekexecd"
 
   macos:
     runs-on: macos-latest
