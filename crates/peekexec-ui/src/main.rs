@@ -342,6 +342,13 @@ impl Dialog {
             ViewKind::Root => self.view.summary(self.findings),
             ViewKind::Register => Vec::new(),
         };
+        for note in &self.view.notes {
+            ui.label(
+                RichText::new(format!("{} {note}", self.glyphs.warn))
+                    .color(WARN)
+                    .small(),
+            );
+        }
         ui.horizontal_wrapped(|ui| {
             for (warn, text) in summary {
                 let (icon, color) = if warn {
@@ -357,13 +364,6 @@ impl Dialog {
                 ui.add_space(10.0);
             }
         });
-        for note in &self.view.notes {
-            ui.label(
-                RichText::new(format!("{} {note}", self.glyphs.warn))
-                    .color(WARN)
-                    .small(),
-            );
-        }
         // What the requester chose, in bulk, after everything the daemon
         // checked: variables, then its own words.
         if !self.view.env.is_empty() {
@@ -415,10 +415,7 @@ impl Dialog {
                     "From inside {agent}'s session (registered {since}): any program it runs \
                      can ask from here too"
                 )));
-                let chain = std::iter::once(agent.as_str())
-                    .chain(path.iter().map(Shown::as_str))
-                    .collect::<Vec<_>>()
-                    .join(forward);
+                let chain = format!("{agent}{forward}{}", PromptView::shortened(path, forward));
                 let shown = ui.label(RichText::new(chain).monospace().small());
                 if let Some(cmd) = command {
                     shown.on_hover_text(format!("{agent}'s shell ran:\n{cmd}"));
@@ -454,7 +451,7 @@ impl Dialog {
                     .strong(),
                 );
                 ui.label(
-                    RichText::new(view::join(others, ", "))
+                    RichText::new(PromptView::shortened(others, ", "))
                         .color(Color32::WHITE)
                         .monospace()
                         .strong(),
@@ -463,7 +460,20 @@ impl Dialog {
     }
 
     fn code(&mut self, ui: &mut egui::Ui, dark: bool, page: f32) {
+        // On a row of its own, and the tabs wrap: a long title must not push
+        // the ground truth or the changes off the window.
         ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.selectable_value(&mut self.raw, true, "Raw")
+                    .on_hover_text(
+                        "What executes, line by line, unformatted. Runs of spaces and of blank \
+                     lines are shown as markers",
+                    );
+                ui.selectable_value(&mut self.raw, false, "Formatted")
+                    .on_hover_text("Line breaks and indentation added for reading only");
+            });
+        });
+        ui.horizontal_wrapped(|ui| {
             for (i, s) in self.view.sections.iter().enumerate() {
                 let n = s.formatted.len();
                 let label = format!("{} ({n} line{})", s.title, if n == 1 { "" } else { "s" });
@@ -471,12 +481,6 @@ impl Dialog {
                     self.tab = i;
                 }
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.selectable_value(&mut self.raw, true, "Raw")
-                    .on_hover_text("Exactly what executes, byte for byte");
-                ui.selectable_value(&mut self.raw, false, "Formatted")
-                    .on_hover_text("Line breaks and indentation added for reading only");
-            });
         });
         let Some(section) = self.view.sections.get(self.tab) else {
             return;
@@ -508,14 +512,8 @@ impl Dialog {
                     // How it runs, in full, above what it runs: each
                     // argument is a line of its own that wraps, never cut.
                     for fact in &section.invocation {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(fact.as_str())
-                                    .monospace()
-                                    .color(code::invocation_color(dark)),
-                            )
-                            .wrap(),
-                        );
+                        let job = code::fact(fact.as_str(), code::invocation_color(dark));
+                        ui.add(egui::Label::new(job).wrap());
                     }
                     if !section.invocation.is_empty() {
                         ui.separator();

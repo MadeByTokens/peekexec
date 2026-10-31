@@ -312,7 +312,7 @@ then a bypass pass. In order of priority:
       backslash-newline; path note on relative and joined options.
 - [x] F9 Comparison: remember only what a dialog showed; unambiguous text.
 - [x] F10 Request table bounded; `lookup` honours expiry; results swept.
-- [ ] F11 Dialog header: bounded lists, daemon facts first, tabs wrap.
+- [x] F11 Dialog header: bounded lists, warnings first, tabs wrap.
 - [ ] F12 Audit: bound on refused-request lines; log every message.
 - [ ] F13 Low findings in the review notes, pinned tests for surviving
       mutations (M1, M3, M4, M5, M6, M9, M14), doc corrections.

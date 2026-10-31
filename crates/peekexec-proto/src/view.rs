@@ -256,17 +256,6 @@ impl PromptView {
             Level::NotRequested => "",
             Level::Builtin => "",
         };
-        match &e.write {
-            Some(paths) => {
-                // Checked by the daemon already; escaped here all the same.
-                let paths: Vec<Shown> = paths.iter().map(|p| Shown::line(p, 300)).collect();
-                out.push((
-                    e.write_level != Level::Kernel && e.write_level != Level::Builtin,
-                    format!("writes {}{}", join(&paths, ", "), how(e.write_level)),
-                ))
-            }
-            None => out.push((true, "writes ANYWHERE".into())),
-        }
         if e.network {
             out.push((false, "network allowed".into()));
         } else {
@@ -284,7 +273,34 @@ impl PromptView {
         if findings > 0 {
             out.push((true, format!("{findings} suspicious character(s)")));
         }
+        // Last: the list is the requester's, and may be long.
+        match &e.write {
+            Some(paths) => {
+                // Checked by the daemon already; escaped here all the same.
+                let paths: Vec<Shown> = paths.iter().map(|p| Shown::line(p, 300)).collect();
+                out.push((
+                    e.write_level != Level::Kernel && e.write_level != Level::Builtin,
+                    format!("writes {}{}", join(&paths, ", "), how(e.write_level)),
+                ))
+            }
+            None => out.push((true, "writes ANYWHERE".into())),
+        }
         out
+    }
+
+    /// A process chain as the dialog draws it: its length is the requester's
+    /// to choose, so what is drawn is not, and the count says what was left
+    /// out.
+    pub fn shortened(items: &[Shown], sep: &str) -> String {
+        if items.len() <= 4 {
+            return join(items, sep);
+        }
+        format!(
+            "{}{sep}… {} in all …{sep}{}",
+            join(&items[..2], sep),
+            items.len(),
+            join(&items[items.len() - 2..], sep)
+        )
     }
 
     /// Plain-text rendering used by `peekexec preview`.
@@ -364,5 +380,20 @@ impl PromptView {
         line(String::new());
         line(format!("sha256 {}", self.sha256));
         t
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_chain_is_drawn_short_and_says_so() {
+        let chain: Vec<Shown> = (0..60).map(|i| Shown::line(&format!("p{i}"), 9)).collect();
+        assert_eq!(
+            PromptView::shortened(&chain, " > "),
+            "p0 > p1 > … 60 in all … > p58 > p59"
+        );
+        assert_eq!(PromptView::shortened(&chain[..3], " > "), "p0 > p1 > p2");
     }
 }

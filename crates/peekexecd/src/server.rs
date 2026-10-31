@@ -941,6 +941,10 @@ impl Daemon {
             // Only what reached a dialog is "the request you saw".
             if !withdrawn && !matches!(d, Err(_) | Ok(Decision::Failed(_))) {
                 self.remember_shown(peer.uid, request);
+            }
+            // A dialog that failed may still have been on screen: when in
+            // doubt the next one gets the longer guard.
+            if !withdrawn {
                 *self.last_prompt.lock().unwrap() = Some(Instant::now());
             }
             d

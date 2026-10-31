@@ -200,7 +200,35 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
     let marker = if line.continued { cont } else { ' ' };
     job.append(&format!("{number:>digits$} {marker} "), 0.0, plain(dim));
     job.append(&"  ".repeat(line.indent), 0.0, plain(dim));
-    for (color, text) in &line.spans {
+    append_spans(&mut job, &line.spans, &font);
+    job
+}
+
+/// A line that is not numbered (how a section runs), drawn like code: long
+/// runs of spaces cannot push the lines after it out of view.
+pub fn fact(text: &str, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    append_spans(
+        &mut job,
+        &[(color, text.to_string())],
+        &FontId::monospace(13.0),
+    );
+    job
+}
+
+fn append_spans(job: &mut LayoutJob, spans: &[(Color32, String)], font: &FontId) {
+    let plain = |color: Color32| TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let alert = |font: &FontId| TextFormat {
+        font_id: font.clone(),
+        color: Color32::WHITE,
+        background: WARN,
+        ..Default::default()
+    };
+    for (color, text) in spans {
         let mut run = String::new();
         let mut blank = String::new();
         let chars: Vec<char> = text.chars().collect();
@@ -217,7 +245,7 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
                         if !run.is_empty() {
                             job.append(&std::mem::take(&mut run), 0.0, plain(*color));
                         }
-                        job.append(&marker, 0.0, alert(&font));
+                        job.append(&marker, 0.0, alert(font));
                     }
                     None => run.push_str(&blank),
                 }
@@ -230,7 +258,7 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
                     if !run.is_empty() {
                         job.append(&std::mem::take(&mut run), 0.0, plain(*color));
                     }
-                    append_marked(&mut job, c, kind, &font);
+                    append_marked(job, c, kind, font);
                 }
             }
         }
@@ -238,7 +266,6 @@ pub fn layout(line: &DisplayLine, digits: usize, dark: bool, cont: char) -> Layo
             job.append(&run, 0.0, plain(*color));
         }
     }
-    job
 }
 
 /// The marker for a run of spaces and tabs, if it is wide enough to need
@@ -345,6 +372,15 @@ mod tests {
         assert!(lines.len() < 6, "{} rows", lines.len());
         assert!(lines.iter().any(|l| l.collapsed.is_some()));
         assert!(drawn(lines.last().unwrap()).contains("rm -rf /srv/data"));
+    }
+
+    #[test]
+    fn spaces_in_an_argument_cannot_push_the_next_one_out_of_view() {
+        let job = fact(
+            &format!("argv[3] z{}tail", " ".repeat(6000)),
+            Color32::WHITE,
+        );
+        assert!(job.text.contains("⟨6000 spaces⟩tail"), "{}", job.text);
     }
 
     #[test]
