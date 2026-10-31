@@ -221,7 +221,18 @@ has a seat and is its active one"), never the absence of a warning sign
    `gnome-shell` of the user's from a binary root controls. A requester can
    start a shell or an agent of its own, but not take the session from the
    compositor, which cannot be replaced without ending the session. X11
-   sessions have no controller, so they never take this path. The prompt
+   sessions are refused too, as their controller is not `gnome-shell`.
+   That evidence is about the binary, and GNOME Shell's code and settings
+   also come from the user's own files: it is a user unit, so a drop-in or
+   `environment.d` can add to its environment at the next login, and it
+   loads extensions from `$HOME`. A shell with native code from a file
+   root does not control is refused (each executable mapping in `/proc`,
+   judged by the mapped file itself, just before asking). That is a
+   tripwire, not proof: one look, at native code from files. Anonymous
+   memory passes, and JavaScript leaves no such mark, so an extension is
+   not detected: **a requester that writes `$HOME` and survives a re-login can
+   run inside the process that draws the prompt.** Only a prompt outside
+   the user's session removes that (tier 3). The prompt
    shows a summary written by the daemon.
    The daemon's facts come first: the limits, where the request came from,
    the working directory and every warning. Then the command in full: every
@@ -300,7 +311,7 @@ has a seat and is its active one"), never the absence of a warning sign
 |---|---|---|
 | 1 | X11, verified X server | Requesters that only *ask* for the wrong thing: buggy, overeager, or talked into a bad request. **Not** a requester that runs programs of its own, and a prompt-injected agent with a shell can do exactly that: X11 lets any client draw fake windows, read keys, and synthesize input, so it can read the password as it is typed and later type it and click Approve itself (or forge a Deny reason). sudo and pkexec share this limit. |
 | 1- | Unverified display and no prompt that can be trusted (no polkit action, or not GNOME) | Refused, unless root starts the daemon with `--allow-unverified-display`; then as tier 1, and the dialog may be relayed through a display server the requester runs. Flagged on every request. |
-| 2 | GNOME on Wayland: password in GNOME Shell's polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
+| 2 | GNOME on Wayland: password in GNOME Shell's polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Holds against a requester acting in the current login; **not** one that planted a shell extension in `$HOME` before it (boundary 4). Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
 | 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. |
 
 ## Things a hurried human might assume

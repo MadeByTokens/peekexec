@@ -303,8 +303,8 @@ then a bypass pass. In order of priority:
       text (critical: the dialog's default view can differ from what runs).
 - [x] F2 Desktop prompt: truncation visible on screen (end marker). Measuring
       scale or height was left out: the requester controls them.
-- [ ] F3 Tier 2: state the limit; refuse on code in the shell from outside
-      root-controlled paths; weighs on E12.
+- [x] F3 Tier 2: limit stated; native code in the shell from outside
+      root-controlled paths refused. Extensions stay undetectable: E12.
 - [ ] F4 Working directory: shown path taken from the descriptor.
 - [ ] F5 Replies: one budget by encoded size; "outcome unknown" in the client.
 - [ ] F6 Allowlist of `#!` interpreter families.

@@ -414,11 +414,61 @@ fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
         exe.rsplit('/').next() == Some("gnome-shell")
             && crate::trust::check(Path::new(&exe), &crate::trust::trusted_owners()).is_ok()
     });
-    if owned && shell {
-        Ok(())
-    } else {
-        refused("the session's compositor is not GNOME Shell")
+    if !(owned && shell) {
+        return refused("the session's compositor is not GNOME Shell");
     }
+    // The binary says what was started, not what runs: the shell is a user
+    // unit, so a program of the user's can add to its environment before
+    // the next login. The maps are the kernel's own account of what is
+    // loaded; a file root does not control means its prompt proves nothing.
+    let owners = crate::trust::trusted_owners();
+    let trusted = |range: &str, path: &str| mapped_file_trusted(pid, range, path, &owners);
+    match std::fs::read_to_string(format!("/proc/{pid}/maps")) {
+        Ok(maps) if foreign_code(&maps, trusted).is_none() => Ok(()),
+        _ => refused("GNOME Shell runs code from a file root does not control"),
+    }
+}
+
+/// Whether the file mapped at `range` is one root controls. By the object
+/// (`map_files`, the kernel's link to the very file), not by the name in
+/// the maps: in another mount namespace a trusted name can be another file.
+fn mapped_file_trusted(pid: u32, range: &str, path: &str, owners: &[u32]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(held) = std::fs::metadata(format!("/proc/{pid}/map_files/{range}")) else {
+        return false;
+    };
+    match path.strip_suffix(" (deleted)") {
+        // A library replaced by an update stays mapped: the file is gone
+        // from its directory, so what can be judged is the file itself.
+        Some(old) => {
+            owners.contains(&held.uid())
+                && held.mode() & 0o022 == 0
+                && Path::new(old)
+                    .parent()
+                    .is_some_and(|dir| crate::trust::check(dir, owners).is_ok())
+        }
+        None => {
+            crate::trust::check(Path::new(path), owners).is_ok()
+                && std::fs::metadata(path)
+                    .is_ok_and(|f| (f.dev(), f.ino()) == (held.dev(), held.ino()))
+        }
+    }
+}
+
+/// The first executable mapping backed by a file `trusted` refuses, given
+/// its address range and name. A tripwire, not proof of integrity: it is one
+/// look at native code from files. Anonymous mappings pass (a JavaScript
+/// engine's compiled code), and an extension is JavaScript, read and
+/// compiled by the shell itself, so it leaves no mark (see THREAT_MODEL.md).
+fn foreign_code(maps: &str, trusted: impl Fn(&str, &str) -> bool) -> Option<&str> {
+    maps.lines().find_map(|line| {
+        let mut fields = line.split_ascii_whitespace();
+        let range = fields.next()?;
+        let executable = fields.next()?.contains('x');
+        // address perms offset dev inode path
+        let path = line.splitn(6, char::is_whitespace).nth(5)?.trim_start();
+        (executable && path.starts_with('/') && !trusted(range, path)).then_some(path)
+    })
 }
 
 /// The real, effective, saved and filesystem uids of a `/proc/<pid>/status`.
@@ -454,6 +504,51 @@ fn outcome(reply: Reply) -> Result<PromptOutcome, PlatformError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_mapped_under_a_trusted_name_is_judged_by_the_object() {
+        // Not this process's mapping of its own binary under another name.
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        let line = maps
+            .lines()
+            .find(|l| l.contains("r-xp") && l.contains("/libc"))
+            .unwrap();
+        let range = line.split_ascii_whitespace().next().unwrap();
+        let path = line.split_ascii_whitespace().last().unwrap();
+        let me = std::process::id();
+        // Unprivileged readers may not open map_files: nothing proves it.
+        if std::fs::metadata(format!("/proc/{me}/map_files/{range}")).is_err() {
+            assert!(!mapped_file_trusted(me, range, path, &[0]));
+            return;
+        }
+        assert!(mapped_file_trusted(me, range, path, &[0]));
+        assert!(!mapped_file_trusted(me, range, "/usr/bin/env", &[0]));
+    }
+
+    #[test]
+    fn code_loaded_from_outside_root_control_is_found() {
+        let maps = "\
+7f00-7f01 r-xp 00000000 08:01 11   /usr/lib/x86_64-linux-gnu/libc.so.6
+7f01-7f02 rw-p 00000000 08:01 11   /usr/lib/x86_64-linux-gnu/libc.so.6
+7f02-7f03 rwxp 00000000 00:00 0
+7f03-7f04 r--p 00000000 08:01 12   /home/u/data file.bin
+7f04-7f05 r-xp 00000000 00:00 0    [vdso]
+7f05-7f06 r-xp 00000000 08:01 13   /home/u/my lib.so
+";
+        let root = |_: &str, p: &str| p.starts_with("/usr/");
+        assert_eq!(foreign_code(maps, root), Some("/home/u/my lib.so"));
+        let clean = maps.replace("/home/u/my lib.so", "/usr/lib/a.so (deleted)");
+        assert_eq!(foreign_code(&clean, root), None);
+        let memfd = "7f05-7f06 r-xs 00000000 00:01 13   /memfd:x (deleted)\n";
+        assert_eq!(foreign_code(memfd, root), Some("/memfd:x (deleted)"));
+        // Each mapping is judged by its own range.
+        let seen = std::cell::RefCell::new(vec![]);
+        foreign_code(maps, |r, _| {
+            seen.borrow_mut().push(r.to_string());
+            true
+        });
+        assert_eq!(*seen.borrow(), ["7f00-7f01", "7f05-7f06"]);
+    }
 
     #[test]
     fn finds_the_session_scope() {
