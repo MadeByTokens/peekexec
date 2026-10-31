@@ -1,4 +1,4 @@
-# peekexec
+![peekexec: see it before you approve it](docs/header.png)
 
 **Peek, then exec.** When a program asks for root, peekexec shows you exactly
 what it wants to run before you type your password.
