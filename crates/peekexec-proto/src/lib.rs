@@ -152,6 +152,10 @@ pub struct Response {
     /// output, so it proves nothing; this field does.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_truncated: bool,
+    /// Something about what ran that is worth reading: it may have left
+    /// something running as root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     /// The human's message to you, delivered by the root daemon (unless
     /// `dev_mode` is true). As trustworthy as the dialog it was typed into:
     /// see `display_verified`.
@@ -195,6 +199,7 @@ impl Response {
             stdout: None,
             stderr: None,
             output_truncated: false,
+            warning: None,
             deny_reason: None,
             enforced: None,
             display_tier: None,

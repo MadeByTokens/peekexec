@@ -299,7 +299,11 @@ has a seat and is its active one"), never the absence of a warning sign
    own and is not ended. This bounds what a command leaves running by habit
    or by accident; being root, a command written to escape can move itself
    out of its group. Without a writable cgroup v2 hierarchy only the
-   process group is killed, and the journal says so. Its output goes to the
+   process group is killed, and the dialog says so before approval; where
+   there should be a group and it cannot be made, the command does not run.
+   If something survives the kill, the response's `warning` and the audit
+   line say so. Just before running, root checks again that the program
+   or install directory is root-controlled. Its output goes to the
    daemon, so stopping the daemon ends running commands too: `install.sh`
    waits for them before it restarts peekexecd, and a daemon that crashes
    takes them with it. The umask is 022, and the audit login uid is set to

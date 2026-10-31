@@ -302,6 +302,16 @@ pub fn prepare(
             "ptrace_scope is 0: other programs of yours may be able to read this dialog.".into(),
         );
     }
+    #[cfg(target_os = "linux")]
+    if matches!(exec, Execution::Command(_))
+        && nix::unistd::geteuid().is_root()
+        && !crate::platform::linux::cgroup::available()
+    {
+        notes.push(
+            "No cgroup v2 here: what this command leaves running is not ended when it exits."
+                .into(),
+        );
+    }
     // Some notes quote requester-chosen paths.
     let notes: Vec<Shown> = notes.iter().map(|n| display_line(n, 1000)).collect();
 

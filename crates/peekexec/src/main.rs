@@ -480,6 +480,9 @@ fn print_human(resp: &Response) {
             };
             let _ = std::io::stdout().write_all(out.as_bytes());
             let _ = std::io::stderr().write_all(err.as_bytes());
+            if let Some(w) = &resp.warning {
+                eprintln!("peekexec: {}", Shown::line(w, 2000));
+            }
         }
         Status::Pending => {
             eprintln!("peekexec: waiting for the human; check with `peekexec wait {id}`")

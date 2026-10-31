@@ -18,6 +18,9 @@ pub struct Outcome {
     pub stdout: String,
     pub stderr: String,
     pub truncated: bool,
+    /// What the human should know about what ran: it may have left
+    /// something running.
+    pub warning: Option<String>,
 }
 
 /// How long output is still read after the command exits. A background
@@ -66,9 +69,13 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, Failure> {
             "cannot read the command's output ({e}); it was killed"
         ))
     })?;
-    if let Some(Err(e)) = ended {
-        eprintln!("peekexecd: {e}");
-    }
+    let warning = match ended {
+        Some(Err(e)) => {
+            eprintln!("peekexecd: {e}");
+            Some(e)
+        }
+        _ => None,
+    };
     let exit_code = status
         .code()
         .or_else(|| status.signal().map(|s| 128 + s))
@@ -80,6 +87,7 @@ pub fn run(sandbox: &dyn Sandbox, plan: &ExecPlan) -> Result<Outcome, Failure> {
         stdout,
         stderr,
         truncated: out_cut || err_cut,
+        warning,
     })
 }
 
@@ -184,7 +192,19 @@ fn capture(
 /// file next to it, fsync, rename. An existing file keeps its mode.
 pub fn install(dest: &Path, content: &[u8], id: &str) -> Result<Outcome, String> {
     let dir = dest.parent().ok_or("destination has no parent")?;
-    let existing = std::fs::metadata(dest).ok();
+    // Only "not there" means a new file: any other failure to look says
+    // nothing, and guessing would lose the file's owner, mode and label.
+    let existing = match std::fs::symlink_metadata(dest) {
+        Ok(m) if !m.is_file() || m.nlink() > 1 => {
+            return Err(format!(
+                "{} is no longer a regular file with one name",
+                dest.display()
+            ));
+        }
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot examine {}: {e}", dest.display())),
+    };
     // Setuid, setgid and sticky bits are never carried over to new content.
     let mode = existing
         .as_ref()
@@ -231,6 +251,7 @@ pub fn install(dest: &Path, content: &[u8], id: &str) -> Result<Outcome, String>
         stdout: format!("installed {} ({} bytes)\n", dest.display(), content.len()),
         stderr: String::new(),
         truncated: false,
+        warning: None,
     })
 }
 
@@ -398,5 +419,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!running(), "setsid child {pid} outlived the command");
+    }
+
+    /// "Could not look" is not "not there": a new file's owner and mode
+    /// would replace those of the one it overwrites.
+    #[test]
+    fn install_refuses_what_it_cannot_examine() {
+        let dir = std::env::temp_dir().join(format!("pe-unexaminable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("loop");
+        std::os::unix::fs::symlink(&link, &link).unwrap();
+        let linked = dir.join("linked");
+        let other = dir.join("other");
+        std::fs::write(&linked, "x").unwrap();
+        std::fs::hard_link(&linked, &other).unwrap();
+        for dest in [&link, &linked] {
+            assert!(install(dest, b"new\n", "r-t").is_err(), "{dest:?}");
+        }
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&other).unwrap(), b"x");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

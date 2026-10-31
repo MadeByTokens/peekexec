@@ -5,7 +5,7 @@ use std::process::Stdio;
 
 use peekexec_proto::{Enforced, Level};
 
-use super::cgroup::CommandGroup;
+use super::cgroup::{CommandGroup, NoGroup};
 use crate::platform::{declared_only, ExecPlan, Group, PlatformError, Sandbox, Started};
 use crate::spawn::{self, Spec};
 
@@ -67,7 +67,8 @@ impl Sandbox for Namespaces {
         // command starts can be ended with it.
         let group = match CommandGroup::create() {
             Ok(g) => Some(g),
-            Err(e) => {
+            // Said in the dialog, before approval.
+            Err(NoGroup::Unavailable(e)) => {
                 if is_root() {
                     eprintln!(
                         "peekexecd: no cgroup of its own for the approved command ({e}); only \
@@ -76,6 +77,13 @@ impl Sandbox for Namespaces {
                 }
                 None
             }
+            Err(NoGroup::Failed(e)) if is_root() => {
+                return Err(PlatformError::Other(format!(
+                    "no cgroup for the command ({e}): anything it left running would not be \
+                     ended"
+                )))
+            }
+            Err(NoGroup::Failed(_)) => None,
         };
         let procs = group.as_ref().map(CommandGroup::procs);
         // SAFETY: only async-signal-safe libc calls; no allocation or locks.

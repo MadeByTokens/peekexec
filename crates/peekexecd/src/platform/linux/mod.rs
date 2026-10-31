@@ -3,7 +3,7 @@
 //! activation. Real containment (approved commands as transient systemd
 //! units, see PLAN.md): M2.
 
-mod cgroup;
+pub mod cgroup;
 mod display;
 mod pam;
 mod peer;

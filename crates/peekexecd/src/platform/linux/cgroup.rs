@@ -29,19 +29,44 @@ pub struct CommandGroup {
     dir: PathBuf,
 }
 
+/// Why there is no group for a command.
+#[derive(Debug)]
+pub enum NoGroup {
+    /// This system has none to give: no cgroup v2 hierarchy, or one this
+    /// process may not write (not root and not delegated, or a service
+    /// without `Delegate=yes`). Known before approval, and said there.
+    Unavailable(String),
+    /// There should have been one: something went wrong just now, and a
+    /// command run anyway would leave its children alive with no one told.
+    Failed(String),
+}
+
+impl std::fmt::Display for NoGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoGroup::Unavailable(e) | NoGroup::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+/// Whether this system holds commands in a group of their own at all.
+pub fn available() -> bool {
+    Path::new(ROOT).join("cgroup.controllers").exists()
+}
+
 impl CommandGroup {
-    /// A new, empty cgroup under this process's own. `Err` where there is
-    /// no cgroup v2 hierarchy or it cannot be written (not root and not
-    /// delegated, or a service without `Delegate=yes`); the caller then
-    /// ends only the process group.
-    pub fn create() -> Result<CommandGroup, String> {
+    /// A new, empty cgroup under this process's own.
+    pub fn create() -> Result<CommandGroup, NoGroup> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        if !Path::new(ROOT).join("cgroup.controllers").exists() {
-            return Err("no cgroup v2 hierarchy at /sys/fs/cgroup".into());
+        if !available() {
+            return Err(NoGroup::Unavailable(
+                "no cgroup v2 hierarchy at /sys/fs/cgroup".into(),
+            ));
         }
         let own = std::fs::read_to_string("/proc/self/cgroup")
-            .map_err(|e| format!("/proc/self/cgroup: {e}"))?;
-        let own = own_path(&own).ok_or("not in a cgroup v2 hierarchy")?;
+            .map_err(|e| NoGroup::Failed(format!("/proc/self/cgroup: {e}")))?;
+        let own = own_path(&own)
+            .ok_or_else(|| NoGroup::Unavailable("not in a cgroup v2 hierarchy".into()))?;
         let parent = Path::new(ROOT).join(own.trim_start_matches('/'));
         // A group of the same name may be left from an earlier run whose
         // pid this one reuses (its processes still in it): take the next.
@@ -52,13 +77,21 @@ impl CommandGroup {
             match std::fs::create_dir(&dir) {
                 Ok(()) => return Ok(CommandGroup { dir }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
-                Err(e) => return Err(format!("create {}: {e}", dir.display())),
+                Err(e) => {
+                    let text = format!("create {}: {e}", dir.display());
+                    return Err(match e.raw_os_error() {
+                        Some(libc::EACCES | libc::EPERM | libc::EROFS) => {
+                            NoGroup::Unavailable(text)
+                        }
+                        _ => NoGroup::Failed(text),
+                    });
+                }
             }
         }
-        Err(format!(
+        Err(NoGroup::Failed(format!(
             "no free group name under {}: {last:?}",
             parent.display()
-        ))
+        )))
     }
 
     /// The file a process writes `0` to, to move itself into the group.
@@ -108,14 +141,33 @@ impl Group for CommandGroup {
         while self.events("populated") != Some(false) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
-        std::fs::remove_dir(&self.dir).map_err(|e| {
+        if self.events("populated") != Some(false) {
+            return Err(format!(
+                "processes the command left behind may still run in {}",
+                self.dir.display()
+            ));
+        }
+        // Empty, by the kernel's account. A group the command made inside
+        // this one stops it being removed, and is nothing to warn about.
+        remove_tree(&self.dir).map_err(|e| {
             format!(
-                "processes the command left behind may still run in {}: {e}",
+                "the command's group {} was left behind: {e}",
                 self.dir.display()
             )
         })?;
         killed
     }
+}
+
+/// Remove a cgroup and any made below it, deepest first.
+fn remove_tree(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_tree(&entry.path())?;
+        }
+    }
+    std::fs::remove_dir(dir)
 }
 
 /// Groups left by an earlier run of the daemon that ended abruptly:

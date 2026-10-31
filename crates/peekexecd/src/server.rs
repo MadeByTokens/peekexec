@@ -1007,8 +1007,14 @@ impl Daemon {
             }
             self.compare_with_last(peer.uid, request, &mut prepared.view);
             let withdrawn = cancel.load(Ordering::SeqCst);
+            // Verified before the queue, which may have taken many minutes.
+            let moved = display.verified && self.display_for(peer).as_ref() != Some(&display);
             let d = if withdrawn {
                 Ok(Decision::Cancelled)
+            } else if moved {
+                Ok(Decision::Failed(
+                    "refused: the display changed while this request waited".into(),
+                ))
             } else {
                 self.decide(&prepared, &display, &user, peer, cancel)
             };
@@ -1145,15 +1151,21 @@ impl Daemon {
 
     fn execute(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
         let outcome = match &prepared.exec {
-            Execution::Command(plan) => exec::run(self.platform.sandbox.as_ref(), plan),
-            Execution::Install { dest, content } => {
-                exec::install(dest, content, id).map_err(exec::Failure::NotStarted)
-            }
+            Execution::Command(plan) => still_root_controlled(Path::new(&plan.program))
+                .map_err(exec::Failure::NotStarted)
+                .and_then(|()| exec::run(self.platform.sandbox.as_ref(), plan)),
+            Execution::Install { dest, content } => dest
+                .parent()
+                .ok_or_else(|| "destination has no parent".to_string())
+                .and_then(still_root_controlled)
+                .and_then(|()| exec::install(dest, content, id))
+                .map_err(exec::Failure::NotStarted),
             Execution::Nothing => Ok(exec::Outcome {
                 exit_code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
                 truncated: false,
+                warning: None,
             }),
         };
         match outcome {
@@ -1162,6 +1174,7 @@ impl Daemon {
                 stdout: Some(o.stdout),
                 stderr: Some(o.stderr),
                 output_truncated: o.truncated,
+                warning: o.warning,
                 ..base
             },
             Err(exec::Failure::NotStarted(e)) => Response {
@@ -1579,9 +1592,22 @@ fn runs(exec: &Execution) -> String {
     }
 }
 
+/// Checked when the request was prepared, which may have been minutes ago,
+/// behind other requests that ran as root. As root now, it may look anywhere.
+fn still_root_controlled(path: &Path) -> Result<(), String> {
+    trust::check(path, &trust::trusted_owners())
+        .map(|_| ())
+        .map_err(|why| {
+            format!(
+                "not run: {} changed since it was shown ({why})",
+                path.display()
+            )
+        })
+}
+
 fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
     let outcome = format!(
-        "status={}{}{}{}",
+        "status={}{}{}{}{}",
         response.status.as_str(),
         response
             .exit_code
@@ -1596,6 +1622,11 @@ fn audit(peer: &Peer, request: &Request, id: &str, response: &Response) {
             .error
             .as_deref()
             .map(|e| format!(" error={}", quoted(e)))
+            .unwrap_or_default(),
+        response
+            .warning
+            .as_deref()
+            .map(|w| format!(" warning={}", quoted(w)))
             .unwrap_or_default(),
     );
     audit_line(peer, request, id, &outcome);
@@ -1987,5 +2018,12 @@ mod tests {
         assert_eq!(log.admit(t), (false, 0));
         assert_eq!(log.admit(t), (false, 0));
         assert_eq!(log.admit(t + Duration::from_secs(61)), (true, 2));
+    }
+
+    #[test]
+    fn what_stopped_being_root_controlled_does_not_run() {
+        assert!(still_root_controlled(Path::new("/etc")).is_ok());
+        let e = still_root_controlled(Path::new("/tmp")).unwrap_err();
+        assert!(e.starts_with("not run:"), "{e}");
     }
 }
