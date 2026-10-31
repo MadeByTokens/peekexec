@@ -357,6 +357,14 @@ pub fn prepare(
         enter_approves: false,
         approve_delay_ms: 0,
     };
+    // What the dialog is sent must fit one message, and is several times
+    // the request: each line is also a formatted line. Refused, not lost.
+    if !peekexec_proto::wire::fits(&view) {
+        if let Some(dir) = &snapshot_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err("this request is too large for the dialog to show; split it".into());
+    }
     let mut view = view;
     view.enter_approves = plain_run(req, &exec) && view.notes.is_empty() && view.findings() == 0;
     Ok(Prepared {
@@ -367,18 +375,19 @@ pub fn prepare(
     })
 }
 
-/// Programs that only read and report, whatever their arguments. Enter is
+/// Programs that only read and report, whatever their arguments (`blkid -c`
+/// writes a file, and `lspci -O` names one, so neither is here). Enter is
 /// a decision, so it is an allowlist: the alternative, a list of programs
 /// that run code, can never be complete (`tar --to-command=`, `git -c`,
 /// `prlimit`, `ip netns exec`, ...) and a requester can preview against it.
 const READ_ONLY_PROGRAMS: &[&str] = &[
     "true", "ls", "cat", "head", "tail", "stat", "wc", "df", "du", "free", "uptime", "id",
-    "whoami", "uname", "lsblk", "lsusb", "lspci", "lscpu", "lsmod", "blkid", "findmnt",
+    "whoami", "uname", "lsblk", "lsusb", "lscpu", "lsmod", "findmnt",
 ];
 
 /// Everyday commands of a program that does more: its first argument.
 const PLAIN_SUBCOMMANDS: &[(&str, &[&str])] = &[
-    ("udevadm", &["control", "trigger", "settle", "info"]),
+    ("udevadm", &["control", "trigger", "settle"]),
     (
         "systemctl",
         &[
@@ -392,6 +401,11 @@ const PLAIN_SUBCOMMANDS: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// Options a subcommand above may take; any other refuses it, as options are
+/// where these programs write, connect or change state
+/// (`udevadm control --property=`, `systemctl -H`).
+const PLAIN_OPTIONS: &[&str] = &["--reload-rules", "--reload"];
 
 /// A request read at a glance: more than this is not one.
 const PLAIN_MAX_ARGS: usize = 16;
@@ -408,7 +422,11 @@ fn plain_run(req: &Request, exec: &Execution) -> bool {
     let listed = |name: &str| {
         READ_ONLY_PROGRAMS.contains(&name)
             || PLAIN_SUBCOMMANDS.iter().any(|(program, commands)| {
-                *program == name && argv.get(1).is_some_and(|a| commands.contains(&a.as_str()))
+                *program == name
+                    && argv.get(1).is_some_and(|a| commands.contains(&a.as_str()))
+                    && argv[2..]
+                        .iter()
+                        .all(|a| !a.starts_with('-') || PLAIN_OPTIONS.contains(&a.as_str()))
             })
     };
     let plain_word = |a: &String| {
@@ -671,16 +689,26 @@ fn too_long_for_system_prompt(over: usize, max_lines: usize) -> String {
     )
 }
 
-/// One content line for the prompt, or `None` for a line with nothing but
-/// spaces and tabs. Indentation as [`Line::shown`] gives it, the text's own
+/// One content line for the prompt. Indentation as [`Line::shown`] gives it, the text's own
 /// as a count (the prompt draws no indentation of its own).
 ///
 /// [`Line::shown`]: peekexec_core::format::Line::shown
 fn prompt_line(l: &peekexec_core::format::Line) -> Option<String> {
+    // Always a line: see the blank case below.
     let (_, text) = l.shown();
+    // A blank line is not nothing: after a line ending in `\` it ends the
+    // command, so dropping it would draw two commands as one.
     if text.chars().all(|c| c == ' ' || c == '\t') {
-        return None;
+        return Some("⟨blank⟩".into());
     }
+    // Nor are spaces after that `\`: the same difference, invisible.
+    let body_end = text.trim_end_matches([' ', '\t']).len();
+    let (text, tail) = text.split_at(body_end);
+    let tail = if tail.is_empty() {
+        String::new()
+    } else {
+        format!("⟨{} trailing⟩", tail.chars().count())
+    };
     // GNOME centres the prompt's text, so even one leading space would not
     // show: leading spaces are always a count.
     let body = text.trim_start_matches(' ');
@@ -690,7 +718,10 @@ fn prompt_line(l: &peekexec_core::format::Line) -> Option<String> {
     } else {
         String::new()
     };
-    Some(format!("{lead}{}", ascii(&display_line(body, usize::MAX))))
+    Some(format!(
+        "{lead}{}{tail}",
+        ascii(&display_line(body, usize::MAX))
+    ))
 }
 
 /// At most `max` characters of already-escaped text.
@@ -1847,6 +1878,10 @@ mod tests {
     }
 
     fn prepare_for_tests(r: &Request) -> Prepared {
+        try_prepare_for_tests(r).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn try_prepare_for_tests(r: &Request) -> Result<Prepared, String> {
         let uid = nix::unistd::getuid().as_raw();
         let gid = nix::unistd::getgid().as_raw();
         #[cfg(target_os = "linux")]
@@ -1885,7 +1920,7 @@ mod tests {
             tier: peekexec_proto::DisplayTier::X11,
             verified: true,
         };
-        prepare(&ctx, &peer, &user, r, "r-test", &display, false).unwrap()
+        prepare(&ctx, &peer, &user, r, "r-test", &display, false)
     }
 
     /// However the desktop draws the prompt (a larger text size, a font not
@@ -2075,6 +2110,55 @@ mod tests {
         let long = format!("/{}", "a".repeat(MAX_WRITE_PATH_LEN));
         assert!(validate(&with(vec![long])).unwrap_err().contains("at most"));
         assert!(validate(&with(vec!["/etc/x".into()])).is_ok());
+    }
+
+    fn prompt_of(script: &str) -> String {
+        let mut v = prepare_for_tests(&req(Action::Run {
+            argv: vec!["sh".into(), "-c".into(), script.into()],
+        }))
+        .view;
+        v.approval = Approval::SystemPrompt;
+        system_prompt_message(&v, PROMPT_SCREEN_LINES).unwrap()
+    }
+
+    /// `sh` ends a command at an empty line after `\\`, and at a `\\` that a
+    /// space follows: the same text with either difference unseen reads as
+    /// one command.
+    #[test]
+    fn the_prompt_shows_what_ends_a_continued_line() {
+        let m = prompt_of("echo safe \\\n\nrm -rf /srv/data\n");
+        assert!(m.contains("| echo safe \\\n| ⟨blank⟩\n| rm -rf"), "{m}");
+        let m = prompt_of("echo safe \\ \nrm -rf /srv/data\n");
+        assert!(m.contains("| echo safe \\⟨1 trailing⟩\n"), "{m}");
+    }
+
+    #[test]
+    fn enter_takes_no_option_that_writes_or_changes_state() {
+        let plain = |argv: &[&str]| {
+            let r = req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            });
+            plain_run(&r, &prepare_for_tests(&r).exec)
+        };
+        for argv in [
+            &["blkid", "-c", "/etc/hostname", "/dev/sda1"][..],
+            &["udevadm", "control", "--property=A=b"],
+            &["udevadm", "control", "--exit"],
+            &["udevadm", "info", "--cleanup-db"],
+            &["systemctl", "status", "-H", "host"],
+        ] {
+            assert!(!plain(argv), "{argv:?}");
+        }
+        assert!(plain(&["udevadm", "control", "--reload-rules"]));
+    }
+
+    #[test]
+    fn a_view_too_large_for_a_message_is_refused() {
+        let r = req(Action::Run {
+            argv: vec!["sh".into(), "-c".into(), "x\n".repeat(2_000_000)],
+        });
+        let e = try_prepare_for_tests(&r).err().expect("refused");
+        assert!(e.contains("too large"), "{e}");
     }
 
     #[test]

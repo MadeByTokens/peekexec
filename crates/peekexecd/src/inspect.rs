@@ -259,7 +259,11 @@ pub fn verify(
     let is_dir = held.st_mode & libc::S_IFMT == libc::S_IFDIR;
     let name = std::fs::read_link(format!("/proc/self/fd/{}", cwd_fd.as_raw_fd()))
         .map_err(|e| format!("cwd: {e}"))?;
-    if !is_dir || name != Path::new(&inspection.cwd) {
+    // And the name must lead to it: a removed directory's name reads
+    // `/x/a (deleted)`, which can be the path of another directory.
+    let same = std::fs::metadata(&inspection.cwd)
+        .is_ok_and(|m| (m.dev(), m.ino()) == (held.st_dev as u64, held.st_ino as u64));
+    if !is_dir || name != Path::new(&inspection.cwd) || !same {
         return Err(format!(
             "the directory descriptor is not {:?}",
             inspection.cwd

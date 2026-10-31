@@ -337,7 +337,10 @@ impl Daemon {
                     Ok(view) => PreviewReply::Ok {
                         view: Box::new(view),
                     },
-                    Err(error) => PreviewReply::Error { error },
+                    // A reply must fit a message, and errors may echo input.
+                    Err(error) => PreviewReply::Error {
+                        error: error.chars().take(MAX_KEPT_ERROR).collect(),
+                    },
                 };
                 let _ = write_msg(&mut conn, &reply);
                 return;
@@ -602,9 +605,8 @@ impl Daemon {
         // findings: admins only, like any request.
         if !self.opts.dev && !self.is_admin(&user) {
             return Err(format!(
-                "user {} is not in the administrator group (the first of {} that exists)",
-                user.name,
-                ADMIN_GROUPS.join(", ")
+                "user {} is not in the administrator group",
+                user.name
             ));
         }
         let display = self.display_for(peer).unwrap_or(Display {
@@ -1127,7 +1129,8 @@ impl Daemon {
                     prompt,
                     subject: &peer.process,
                     uid: peer.uid,
-                    // Checked to fit when the approval path was chosen.
+                    // Checked when the approval path was chosen, but notes added
+                    // since take lines, so this can still refuse.
                     message: prepare::system_prompt_message(
                         &prepared.view,
                         self.opts.prompt_lines,
@@ -1295,12 +1298,14 @@ impl Daemon {
     /// note: approving one after another as they come is how a queue of
     /// requests gets approved unread.
     fn waiting_note(&self, uid: u32, id: &str) -> Option<Shown> {
+        let running = self.running.lock().unwrap();
         let waiting = self
             .requests
             .lock()
             .unwrap()
             .iter()
             .filter(|(k, e)| *k != id && e.owner == uid && e.result.lock().unwrap().is_none())
+            .filter(|(k, _)| !running.contains(*k))
             .count();
         (waiting > 0).then(|| {
             display_line(

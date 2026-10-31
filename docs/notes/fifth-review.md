@@ -190,3 +190,25 @@ Other distros, SELinux, kernels without `SO_PEERPIDFD`, the freeze-and-kill path
 non-GNOME Wayland, and running as root on the host. `cargo-fuzz` needs nightly,
 which is not installed, so a stable random-input harness stood in for it: no
 coverage guidance, no sanitizers.
+
+## Fixes (2026-10-31)
+
+Fixed in the commits after this review, then checked by a separate bypass pass,
+which found three more (prompt blank lines, the Enter list, oversized views);
+those are fixed too. Verified on HEAD: local CI, the macOS check, and the VM
+approval test.
+
+Left open, on purpose or for lack of means:
+
+- Tier 2 against a shell extension in `$HOME`: not detectable; needs E12.
+- GNOME clipping a word on the right with a wider font: not tested, and
+  `■ END` proves only the bottom edge.
+- The prompt can open when the requester chooses, with no input guard (E12).
+- Suspend during the polkit prompt uses `Instant` (the dialog does not).
+- A request near the 22-line limit can pass preview, then be refused when
+  later notes take lines. It fails safe.
+- zbus 6, `pam_fprintd` messages, deny replay as structured fields, a write
+  path holding `, `, `wait_idle` without a timeout, temp files after a crash,
+  snapshots still written before approval, Smack labels and chattr flags.
+- No tests for M4, M5, M9: they need a harness around the client or queue.
+- Earlier open items: C10c, C10d, D11a/c/d/e, E12, E14.

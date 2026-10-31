@@ -228,7 +228,8 @@ fn append_spans(job: &mut LayoutJob, spans: &[(Color32, String)], font: &FontId)
         background: WARN,
         ..Default::default()
     };
-    for (color, text) in spans {
+    for (n, (color, text)) in spans.iter().enumerate() {
+        let last_span = n + 1 == spans.len();
         let mut run = String::new();
         let mut blank = String::new();
         let chars: Vec<char> = text.chars().collect();
@@ -240,7 +241,8 @@ fn append_spans(job: &mut LayoutJob, spans: &[(Color32, String)], font: &FontId)
                 if matches!(chars.get(idx + 1), Some(' ' | '\t')) {
                     continue;
                 }
-                match blank_marker(&blank) {
+                let at_end = last_span && idx + 1 == chars.len() && blank.len() < chars.len();
+                match blank_marker(&blank, at_end) {
                     Some(marker) => {
                         if !run.is_empty() {
                             job.append(&std::mem::take(&mut run), 0.0, plain(*color));
@@ -270,10 +272,12 @@ fn append_spans(job: &mut LayoutJob, spans: &[(Color32, String)], font: &FontId)
 
 /// The marker for a run of spaces and tabs, if it is wide enough to need
 /// one: `⟨20 spaces⟩`, `⟨4000 tabs⟩`, `⟨3 spaces, 9 tabs⟩`.
-fn blank_marker(blank: &str) -> Option<String> {
+fn blank_marker(blank: &str, at_end: bool) -> Option<String> {
     let tabs = blank.chars().filter(|&c| c == '\t').count();
     let spaces = blank.chars().count() - tabs;
-    if spaces + tabs * TAB_WIDTH < SPACE_RUN {
+    // At the end of a line even one matters: `\` then a space does not
+    // continue a line, and neither can be told from the other by eye.
+    if !at_end && spaces + tabs * TAB_WIDTH < SPACE_RUN {
         return None;
     }
     Some(match (spaces, tabs) {
@@ -321,11 +325,17 @@ mod tests {
 
     #[test]
     fn wide_blank_runs_become_markers() {
-        assert_eq!(blank_marker("  \t"), None);
-        assert_eq!(blank_marker(&" ".repeat(20)).unwrap(), "⟨20 spaces⟩");
-        assert_eq!(blank_marker(&"\t".repeat(4000)).unwrap(), "⟨4000 tabs⟩");
-        assert_eq!(blank_marker("\t\t\t").unwrap(), "⟨3 tabs⟩");
-        assert_eq!(blank_marker(" \t\t\t").unwrap(), "⟨1 spaces, 3 tabs⟩");
+        assert_eq!(blank_marker("  \t", false), None);
+        assert_eq!(blank_marker(&" ".repeat(20), false).unwrap(), "⟨20 spaces⟩");
+        assert_eq!(
+            blank_marker(&"\t".repeat(4000), false).unwrap(),
+            "⟨4000 tabs⟩"
+        );
+        assert_eq!(blank_marker("\t\t\t", false).unwrap(), "⟨3 tabs⟩");
+        assert_eq!(
+            blank_marker(" \t\t\t", false).unwrap(),
+            "⟨1 spaces, 3 tabs⟩"
+        );
     }
 
     fn shell_section(script: &str) -> Section {
@@ -381,6 +391,21 @@ mod tests {
             Color32::WHITE,
         );
         assert!(job.text.contains("⟨6000 spaces⟩tail"), "{}", job.text);
+    }
+
+    #[test]
+    fn a_blank_at_the_end_of_a_line_is_marked_however_short() {
+        let line = |text: &str| DisplayLine {
+            number: 1,
+            indent: 0,
+            continued: false,
+            spans: vec![(Color32::WHITE, text.to_string())],
+            collapsed: None,
+        };
+        let job = layout(&line("echo safe \\ "), 1, true, '>');
+        assert!(job.text.contains("\\⟨1 spaces⟩"), "{}", job.text);
+        let job = layout(&line("echo a b"), 1, true, '>');
+        assert!(!job.text.contains('⟨'), "{}", job.text);
     }
 
     #[test]

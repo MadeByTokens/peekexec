@@ -319,5 +319,5 @@ then a bypass pass. In order of priority:
       harness around the client or the queue.
 - [x] F14 Installer shows and confirms the admin group (`--admin-group`).
 - [x] F15 Yama: positive evidence required on the desktop-prompt path.
-- [ ] F16 Triage the notes' "Also found, not verified" list: verify each,
-      then fix or drop it.
+- [x] F16 "Also found, not verified": fixed, except what the review notes
+      list as left open.

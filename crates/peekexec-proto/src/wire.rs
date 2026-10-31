@@ -50,6 +50,11 @@ pub fn wipe(bytes: &mut [u8]) {
     std::hint::black_box(bytes);
 }
 
+/// Whether `msg` fits one message, with room for what it travels in.
+pub fn fits<T: Serialize>(msg: &T) -> bool {
+    serde_json::to_vec(msg).is_ok_and(|v| (v.len() as u64) < MAX_MSG - 64 * 1024)
+}
+
 /// Message buffers are wiped once used: a message may carry a password.
 pub fn write_msg<W: Write, T: Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
     let mut buf = serde_json::to_vec(msg).map_err(io::Error::other)?;

@@ -240,7 +240,9 @@ has a seat and is its active one"), never the absence of a warning sign
    The daemon's facts come first: the limits, where the request came from,
    the working directory and every warning. Then the command in full: every
    argument and every line of content, indentation kept (as a count: GNOME
-   centres the text), then the environment. Nothing is cut. The prompt does
+   centres the text), each content line marked `| `, with blank lines and
+   trailing spaces shown (either can end a command that looks continued),
+   then the environment. Nothing is cut. The prompt does
    not scroll, so the daemon lays the message out as GNOME draws it
    (measured in the VM: about 45 `x` widths per line, wrapped at spaces,
    `-` and `/`, each character counted at its widest in the Ubuntu and

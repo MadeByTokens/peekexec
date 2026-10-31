@@ -292,8 +292,8 @@ fn call<A: serde::de::DeserializeOwned>(msg: &ClientMsg) -> Result<(A, bool), Fa
         }
         let text = if e.kind() == std::io::ErrorKind::PermissionDenied {
             format!(
-                "cannot connect to {shown}: only members of the administrator group (sudo, \
-                 wheel or admin) may use peekexec. If you were just added to it, log out and \
+                "cannot connect to {shown}: only members of the administrator group may \
+                 use peekexec. If you were just added to it, log out and \
                  back in."
             )
         } else {
@@ -358,9 +358,13 @@ fn preview(req: Request, json: bool) -> ExitCode {
             },
             json,
         ),
-        Err(Failed {
-            text: unreachable, ..
-        }) => {
+        Err(failed) => {
+            // A preview runs nothing, whatever became of it.
+            let unreachable = if failed.sent {
+                "peekexecd gave no valid answer to this preview (it may be too large)".to_string()
+            } else {
+                failed.text
+            };
             if json {
                 let out = serde_json::json!({
                     "request": req,
