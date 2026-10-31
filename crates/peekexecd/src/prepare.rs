@@ -168,7 +168,10 @@ pub fn prepare(
             // so none of it may come from the requester.
             let copy = dir.join(snapshot_name(&name));
             if materialize {
-                write_snapshot(&dir, &copy, content)?;
+                if let Err(e) = write_snapshot(&dir, &copy, content) {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
                 snapshot_dir = Some(dir);
             }
             let copy = path_str(&copy)?;

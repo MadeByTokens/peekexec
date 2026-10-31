@@ -19,7 +19,8 @@ pub mod wire;
 pub enum Status {
     /// The human approved and the command ran. `exit_code` is its own exit code.
     Approved,
-    /// The request is waiting for the human (from `submit`, or `wait --timeout` expired).
+    /// The request is waiting for the human (from `submit`, or `wait --timeout`
+    /// expired), or, with `running`, approved and running.
     Pending,
     /// The human pressed Cancel / Esc / closed the dialog, or the caller withdrew it.
     Cancelled,
@@ -152,6 +153,10 @@ pub struct Response {
     /// output, so it proves nothing; this field does.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub output_truncated: bool,
+    /// With status `pending`: the human has approved and the command is
+    /// running, so it can no longer be cancelled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
     /// Something about what ran that is worth reading: it may have left
     /// something running as root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +204,7 @@ impl Response {
             stdout: None,
             stderr: None,
             output_truncated: false,
+            running: false,
             warning: None,
             deny_reason: None,
             enforced: None,

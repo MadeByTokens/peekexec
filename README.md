@@ -118,10 +118,11 @@ yourself: an agent asking to run it through `peekexec script` would show
 you the script, not the root daemon it installs. Packages are planned.
 
 Only administrators can connect to the daemon at all: the members of the
-first of `sudo`, `wheel`, `admin` that exists, whatever sudoers or polkit
-grant them (on a system where one of these groups means something else,
-peekexec gives its members root). They approve with their own password, the
-same model as sudo.
+group you name with `--admin-group`, whatever sudoers or polkit grant them.
+They approve with their own password, the same model as sudo.
+
+On X11, the display is verified under GDM only: other display managers
+start the X server outside the session, and such requests are refused.
 
 ## Develop
 

@@ -103,6 +103,8 @@ pub struct Daemon {
     /// The request each user saw last, to compare the next one with.
     last_shown: Mutex<HashMap<u32, LastShown>>,
     refusals: Mutex<HashMap<u32, RefusalLog>>,
+    /// Requests approved and not finished.
+    running: Mutex<std::collections::HashSet<String>>,
     /// One dialog on screen at a time.
     prompt_lock: Mutex<()>,
     /// When the last dialog closed.
@@ -207,6 +209,7 @@ impl Daemon {
             denials: Mutex::default(),
             last_shown: Mutex::default(),
             refusals: Mutex::default(),
+            running: Mutex::default(),
             prompt_lock: Mutex::new(()),
             last_prompt: Mutex::new(None),
             connections: Mutex::default(),
@@ -293,9 +296,8 @@ impl Daemon {
                 let _ = write_msg(
                     &mut conn,
                     &Response::error(format!(
-                        "uid {} is not in the administrator group (the first of {} that exists)",
-                        peer.uid,
-                        ADMIN_GROUPS.join(", ")
+                        "uid {} is not in the administrator group",
+                        peer.uid
                     )),
                 );
                 return;
@@ -369,9 +371,11 @@ impl Daemon {
                 }
             }
             ClientMsg::Wait { id, timeout_secs } => match self.lookup(&id, peer.uid) {
-                Some(entry) => entry
-                    .wait(timeout_secs.map(|s| Duration::from_secs(s.into())))
-                    .unwrap_or_else(|| pending(&id)),
+                Some(entry) => {
+                    let limit = timeout_secs.map(|s| Duration::from_secs(s.into()));
+                    wait_while_connected(&entry, limit, &read_half)
+                        .unwrap_or_else(|| self.not_finished(&id))
+                }
                 None => forgotten(&id),
             },
             ClientMsg::Register {
@@ -408,7 +412,7 @@ impl Daemon {
                     entry.cancel.store(true, Ordering::SeqCst);
                     entry
                         .wait(Some(Duration::from_secs(10)))
-                        .unwrap_or_else(|| pending(&id))
+                        .unwrap_or_else(|| self.not_finished(&id))
                 }
                 None => forgotten(&id),
             },
@@ -444,6 +448,15 @@ impl Daemon {
     #[cfg(not(target_os = "linux"))]
     fn is_admin(&self, _user: &User) -> bool {
         false // M4: the macOS `admin` group via the platform layer
+    }
+
+    /// A request with no result yet: waiting for the human, or running.
+    fn not_finished(&self, id: &str) -> Response {
+        Response {
+            request_id: Some(id.to_string()),
+            running: self.running.lock().unwrap().contains(id),
+            ..Response::new(Status::Pending)
+        }
     }
 
     /// See [`REFUSALS_LOGGED_PER_MINUTE`].
@@ -950,9 +963,8 @@ impl Daemon {
         };
         if !self.opts.dev && !self.is_admin(&user) {
             return fail(format!(
-                "user {} is not in the administrator group (the first of {} that exists); peekexec only asks administrators",
-                user.name,
-                ADMIN_GROUPS.join(", ")
+                "user {} is not in the administrator group; peekexec only asks administrators",
+                user.name
             ));
         }
         let found = if self.opts.test_approver.is_some() {
@@ -1024,8 +1036,12 @@ impl Daemon {
             let withdrawn = cancel.load(Ordering::SeqCst);
             // Verified before the queue, which may have taken many minutes.
             let moved = display.verified && self.display_for(peer).as_ref() != Some(&display);
+            // A copy of a request denied while this one waited.
+            let denied = self.denied_before(peer.uid, &digest, &requester);
             let d = if withdrawn {
                 Ok(Decision::Cancelled)
+            } else if let Some(msg) = denied {
+                Ok(Decision::Failed(msg))
             } else if moved {
                 Ok(Decision::Failed(
                     "refused: the display changed while this request waited".into(),
@@ -1165,6 +1181,13 @@ impl Daemon {
     }
 
     fn execute(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
+        self.running.lock().unwrap().insert(id.to_string());
+        let response = self.run_prepared(prepared, id, base);
+        self.running.lock().unwrap().remove(id);
+        response
+    }
+
+    fn run_prepared(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
         let outcome = match &prepared.exec {
             Execution::Command(plan) => still_root_controlled(Path::new(&plan.program))
                 .map_err(exec::Failure::NotStarted)
@@ -1308,11 +1331,12 @@ impl Daemon {
         });
         match session {
             Some(s) => format!("agent {} {}", s.pinned.pid, s.pinned.start_time),
-            None => format!(
-                "process {} {}",
-                peer.process.pid,
-                peer.process.start_time.unwrap_or(0)
-            ),
+            // Each `peekexec` is a process of its own: what stays the same
+            // from one try to the next is whoever runs it.
+            None => {
+                let asker = peer.ancestry.first().unwrap_or(&peer.process);
+                format!("process {} {}", asker.pid, asker.start_time.unwrap_or(0))
+            }
         }
     }
 
@@ -1416,10 +1440,28 @@ fn forgotten(id: &str) -> Response {
     }
 }
 
-fn pending(id: &str) -> Response {
-    Response {
-        request_id: Some(id.to_string()),
-        ..Response::new(Status::Pending)
+/// Wait for `entry`, up to `limit`, while the client is still there: a
+/// client that went away must not keep a connection slot, or sixteen killed
+/// `peekexec wait` commands would lock its owner out.
+fn wait_while_connected(
+    entry: &Entry,
+    limit: Option<Duration>,
+    client: &impl std::os::fd::AsRawFd,
+) -> Option<Response> {
+    use nix::sys::socket::{recv, MsgFlags};
+    let end = limit.map(|l| Instant::now() + l);
+    loop {
+        if let Some(r) = entry.wait(Some(Duration::from_secs(1))) {
+            return Some(r);
+        }
+        if end.is_some_and(|e| Instant::now() >= e) {
+            return None;
+        }
+        // End of file, without taking anything from the stream.
+        let flags = MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT;
+        if matches!(recv(client.as_raw_fd(), &mut [0u8; 1], flags), Ok(0)) {
+            return None;
+        }
     }
 }
 

@@ -108,6 +108,8 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
 8. If your tool call has a timeout shorter than the human needs:
      peekexec submit --json run ...     -> {"status":"pending","request_id":ID}
      peekexec wait --json ID --timeout 60   (repeat while status is "pending")
+   "running":true with "pending" means the human approved and it is running:
+   cancelling no longer stops it.
    Not where the desktop's password dialog is used (Wayland): it asks about
    the requesting process itself, which must wait; there use `peekexec run`.
 

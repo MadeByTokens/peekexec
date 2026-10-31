@@ -243,15 +243,18 @@ pub fn install(dest: &Path, content: &[u8], id: &str) -> Result<Outcome, String>
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("rename into {}: {e}", dest.display()));
     }
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
+    let synced = std::fs::File::open(dir).and_then(|d| d.sync_all());
     Ok(Outcome {
         exit_code: 0,
         stdout: format!("installed {} ({} bytes)\n", dest.display(), content.len()),
         stderr: String::new(),
         truncated: false,
-        warning: None,
+        warning: synced.err().map(|e| {
+            format!(
+                "installed, but {} was not synced to disk: {e}",
+                dir.display()
+            )
+        }),
     })
 }
 
@@ -286,7 +289,16 @@ fn copy_xattrs(from: &Path, to: &std::fs::File) -> io::Result<()> {
         if n < 0 {
             let e = io::Error::last_os_error();
             match e.raw_os_error() {
-                Some(libc::ENODATA | libc::ENOTSUP) => continue,
+                Some(libc::ENODATA | libc::ENOTSUP) => {
+                    // Not on the old file, so not on the new one: a default
+                    // ACL of the directory must not widen who has access.
+                    if name == c"system.posix_acl_access" {
+                        // SAFETY: a valid descriptor and C string. Failure
+                        // means there was nothing to remove.
+                        unsafe { libc::fremovexattr(to.as_raw_fd(), name.as_ptr()) };
+                    }
+                    continue;
+                }
                 _ => return Err(e),
             }
         }

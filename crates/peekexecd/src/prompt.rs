@@ -130,6 +130,11 @@ pub fn ask(
     let show = ToUi::Show {
         view: Box::new(view.clone()),
     };
+    // A view can be larger than the socket's buffer, and a stopped dialog
+    // would hold every later request behind this write.
+    let limit = Duration::from_secs(view.timeout_secs.into());
+    conn.set_write_timeout(Some(limit))
+        .map_err(|e| stop(format!("cannot start the dialog: {e}")))?;
     let answer = write_msg(&mut conn, &show)
         .map(|()| wait_for_answer(&rx, &mut conn, view, approver, cancel))
         .map_err(|e| format!("dialog did not accept the request: {e}"));
@@ -149,6 +154,18 @@ pub fn ask(
     }
 }
 
+/// Time since boot, suspended time included.
+#[cfg(target_os = "linux")]
+fn boot_time() -> Duration {
+    use nix::time::{clock_gettime, ClockId};
+    clock_gettime(ClockId::CLOCK_BOOTTIME).map_or(Duration::ZERO, Duration::from)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_time() -> Duration {
+    Duration::ZERO
+}
+
 /// `None` if the dialog disconnected without answering.
 fn wait_for_answer(
     rx: &mpsc::Receiver<FromUi>,
@@ -157,7 +174,11 @@ fn wait_for_answer(
     approver: &Approver,
     cancel: &AtomicBool,
 ) -> Option<Decision> {
-    let deadline = Instant::now() + Duration::from_secs(view.timeout_secs.into());
+    let limit = Duration::from_secs(view.timeout_secs.into());
+    let deadline = Instant::now() + limit;
+    // `Instant` stops during suspend: a dialog must not be waiting, ready to
+    // approve, for a human back from days away.
+    let opened = boot_time();
     // The dialog itself holds Approve back this long; an earlier one did
     // not come from a human using it.
     let earliest = Instant::now()
@@ -168,7 +189,7 @@ fn wait_for_answer(
             return Some(Decision::Cancelled);
         }
         let now = Instant::now();
-        if now >= deadline {
+        if now >= deadline || boot_time().saturating_sub(opened) >= limit {
             return Some(Decision::TimedOut);
         }
         let tick = (deadline - now).min(Duration::from_millis(200));
@@ -208,6 +229,10 @@ fn wait_for_answer(
             // `password` is a Secret: wiped when this arm ends.
             Ok(FromUi::Approve { password }) => {
                 match approver.verify(password.as_ref().map(Secret::expose)) {
+                    // PAM can take seconds: what it was asked may have
+                    // been withdrawn meanwhile, or run out of time.
+                    Ok(true) if cancel.load(Ordering::SeqCst) => return Some(Decision::Cancelled),
+                    Ok(true) if Instant::now() >= deadline => return Some(Decision::TimedOut),
                     Ok(true) => return Some(Decision::Approved),
                     Ok(false) => {
                         attempts -= 1;

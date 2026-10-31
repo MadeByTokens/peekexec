@@ -123,6 +123,12 @@ fn run(args: Args) -> Result<(), String> {
         platform::linux::remove_stale_groups();
     }
 
+    // Snapshots a daemon that ended abruptly left. Root-only, but they hold
+    // requester text and nothing else would remove them.
+    if root {
+        let _ = std::fs::remove_dir_all(&snapshot_root);
+    }
+
     let test_approver = test_approver()?;
     let opts = Options {
         socket,
