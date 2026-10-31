@@ -16,6 +16,9 @@ const PAM_ERROR_MSG: c_int = 3;
 const PAM_TEXT_INFO: c_int = 4;
 const PAM_DISALLOW_NULL_AUTHTOK: c_int = 0x1;
 
+/// `pam_get_item`: the user being authenticated.
+const PAM_USER: c_int = 2;
+
 #[repr(C)]
 struct PamMessage {
     msg_style: c_int,
@@ -56,6 +59,7 @@ extern "C" {
     fn pam_authenticate(pamh: *mut PamHandle, flags: c_int) -> c_int;
     fn pam_acct_mgmt(pamh: *mut PamHandle, flags: c_int) -> c_int;
     fn pam_end(pamh: *mut PamHandle, status: c_int) -> c_int;
+    fn pam_get_item(pamh: *const PamHandle, item_type: c_int, item: *mut *const c_void) -> c_int;
     fn pam_strerror(pamh: *mut PamHandle, errnum: c_int) -> *const c_char;
 }
 
@@ -136,8 +140,11 @@ fn free_replies(replies: *mut PamResponse, n: usize) {
         unsafe {
             let r = (*replies.add(i)).resp;
             if !r.is_null() {
-                // Scrub the password copy before freeing it.
-                libc::memset(r.cast(), 0, libc::strlen(r));
+                // Scrub the password copy before freeing it. `wipe`, not
+                // memset: a write just before free is a dead store, and
+                // the optimizer removed it.
+                let len = libc::strlen(r);
+                peekexec_proto::wire::wipe(std::slice::from_raw_parts_mut(r.cast::<u8>(), len));
                 libc::free(r.cast());
             }
         }
@@ -169,6 +176,19 @@ fn pam_error(pamh: *mut PamHandle, rc: c_int) -> String {
     }
 }
 
+/// Whether PAM's user is still `expected` after authentication.
+fn authenticated_user(pamh: *mut PamHandle, expected: &CStr) -> bool {
+    let mut item: *const c_void = std::ptr::null();
+    // SAFETY: pamh is a live handle; the item stays owned by PAM and is only
+    // read here, before pam_end.
+    let rc = unsafe { pam_get_item(pamh, PAM_USER, &mut item) };
+    if rc != PAM_SUCCESS || item.is_null() {
+        return false;
+    }
+    // SAFETY: PAM_USER is a NUL-terminated string.
+    unsafe { CStr::from_ptr(item.cast()) == expected }
+}
+
 impl Authenticator for Pam {
     fn wants_password(&self) -> bool {
         true
@@ -178,6 +198,10 @@ impl Authenticator for Pam {
         let to_c = |s: &str| {
             CString::new(s).map_err(|_| PlatformError::Other("NUL byte in credentials".into()))
         };
+        // Refused before a copy exists: the error would hold the password.
+        if password.is_some_and(|p| p.contains('\0')) {
+            return Err(PlatformError::Other("NUL byte in credentials".into()));
+        }
         let mut answers = Answers {
             user: to_c(user)?,
             password: password.map(to_c).transpose()?,
@@ -210,9 +234,12 @@ impl Authenticator for Pam {
             // SAFETY: as above.
             rc = unsafe { pam_acct_mgmt(pamh, PAM_DISALLOW_NULL_AUTHTOK) };
         }
+        // A module may rewrite the user (mapping, directory modules): the
+        // approval is for this user, not whoever the stack ended up with.
+        let same_user = rc == PAM_SUCCESS && authenticated_user(pamh, &answers.user);
         // SAFETY: as above; the handle is not used afterwards.
         unsafe { pam_end(pamh, rc) };
-        Ok(rc == PAM_SUCCESS)
+        Ok(rc == PAM_SUCCESS && same_user)
     }
 }
 

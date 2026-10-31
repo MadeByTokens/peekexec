@@ -38,6 +38,7 @@ impl AgentSession {
             name: name.into(),
             uid: 1000,
             pinned: Pinned {
+                exe: None,
                 pid,
                 start_time: pid as u64,
                 handle: None,
@@ -188,6 +189,7 @@ mod tests {
             name: "Claude Code".into(),
             uid: 1000,
             pinned: Pinned {
+                exe: None,
                 pid,
                 start_time: pid as u64 * 10,
                 handle: None,

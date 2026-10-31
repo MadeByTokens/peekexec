@@ -124,7 +124,8 @@ has a seat and is its active one"), never the absence of a warning sign
    **Registered agent sessions** make "is this from my agent?" checkable. The
    human approves a registration once (password, like any request); it pins
    one process (pidfd plus kernel start time, so a reused pid does not inherit
-   it) and ends when that process exits. Each later request is matched
+   it) and the program it runs, and ends when that process exits or execs
+   another program. Each later request is matched
    against the kernel's ancestry of the connecting process, and the dialog
    says either "from <agent>'s session" with the chain in between, or "not
    from a registered agent session".
@@ -280,9 +281,11 @@ has a seat and is its active one"), never the absence of a warning sign
    agent in its session gets an error. Residual risk: another agent that
    registered before GNOME Shell did at login (one started from the
    session's autostart) would go unnoticed (GNOME Shell then reports that
-   it could not register its own), and with `ptrace_scope` 0
-   (noted in the dialog) a program of the user's could take over the
-   shell itself.
+   it could not register its own). A program of the user's that could
+   attach to the shell would own the prompt, so the path also needs positive
+   evidence that it cannot: `ptrace_scope` of 1 or more, or a shell that is
+   not dumpable. Some distributions default to 0: there the path is refused,
+   and the error says what to set.
    Where there is no prompt that can be trusted (the polkit action is not
    installed, or the desktop is not GNOME), the request is refused before
    anything is shown: typing the password into the unverified window would

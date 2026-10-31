@@ -69,12 +69,14 @@ impl PeerInfo for ProcPeerInfo {
         (start_time_of(pid) == Some(start_time) && pidfd_alive(&fd, pid)).then_some(Pinned {
             pid,
             start_time,
+            exe: exe_id(pid),
             handle: Some(fd),
         })
     }
 
     fn alive(&self, p: &Pinned) -> bool {
-        p.handle.as_ref().is_some_and(|fd| pidfd_alive(fd, p.pid))
+        // Exec keeps the pid and start time: the file is what tells.
+        p.handle.as_ref().is_some_and(|fd| pidfd_alive(fd, p.pid)) && exe_id(p.pid) == p.exe
     }
 
     fn processes_of(&self, uid: u32) -> Vec<u32> {
@@ -205,6 +207,13 @@ fn start_time_of(pid: u32) -> Option<u64> {
 fn parse_start_time(stat: &str) -> Option<u64> {
     let rest = &stat[stat.rfind(')')? + 1..];
     rest.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// The file a process is running, by device and inode.
+fn exe_id(pid: u32) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let exe = std::fs::metadata(format!("/proc/{pid}/exe")).ok()?;
+    Some((exe.dev(), exe.ino()))
 }
 
 /// The ancestors of `start` (a pid and the start time it was described
@@ -408,5 +417,17 @@ mod tests {
             // No unprivileged user namespaces here (e.g. AppArmor-restricted).
             other => eprintln!("skipped: no namespace sandbox ({other:?})"),
         }
+    }
+
+    /// `exec` keeps pid and start time; a registration names a program.
+    #[test]
+    fn a_process_that_execs_another_program_is_not_the_one_pinned() {
+        let me = std::process::id();
+        let info = ProcPeerInfo;
+        let started = start_time_of(me).unwrap();
+        let mut pinned = info.pin(me, started).expect("pidfd_open needs Linux 5.3");
+        assert!(info.alive(&pinned));
+        pinned.exe = Some((0, 0));
+        assert!(!info.alive(&pinned));
     }
 }

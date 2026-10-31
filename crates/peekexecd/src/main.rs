@@ -90,6 +90,13 @@ fn run(args: Args) -> Result<(), String> {
         None => PathBuf::from("/usr/libexec/peekexec/peekexec-ui"),
     };
     if root {
+        // A crash must not write passwords and requests to a core file (a
+        // release build aborts on panic). Reset by exec: commands keep theirs.
+        #[cfg(target_os = "linux")]
+        // SAFETY: plain prctl on this process.
+        unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0)
+        };
         // The dialog collects the password: it must not be replaceable.
         trust::check(&dialog, &[0]).map_err(|e| format!("refusing dialog program: {e}"))?;
         // It and this binary (the inspection helper) must not be dumpable

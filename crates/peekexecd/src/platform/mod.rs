@@ -52,6 +52,10 @@ pub struct ProcessInfo {
 pub struct Pinned {
     pub pid: u32,
     pub start_time: u64,
+    /// The file it was running (device, inode). A registration names a
+    /// program: a process that execs another is no longer it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) exe: Option<(u64, u64)>,
     /// Kept open to hold the process; read by the Linux backend.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) handle: Option<std::os::fd::OwnedFd>,

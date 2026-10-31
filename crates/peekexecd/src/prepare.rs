@@ -296,10 +296,12 @@ pub fn prepare(
     if !peer.pinned {
         notes.push("Requester identity could not be pinned (needs Linux 6.5+): the process details below are best effort.".into());
     }
-    if std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").is_ok_and(|s| s.trim() == "0")
-    {
+    // Positive evidence: a kernel without Yama has no such protection.
+    let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope");
+    if !scope.is_ok_and(|s| s.trim().parse::<u32>().is_ok_and(|v| v >= 1)) {
         notes.push(
-            "ptrace_scope is 0: other programs of yours may be able to read this dialog.".into(),
+            "Programs of yours may be able to read this dialog (ptrace_scope is not 1 or more)."
+                .into(),
         );
     }
     #[cfg(target_os = "linux")]

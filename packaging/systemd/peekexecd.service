@@ -13,6 +13,8 @@ StandardError=journal
 # Stopping the daemon ends running commands too (their output goes to it);
 # install.sh waits for them before it restarts the daemon.
 Delegate=yes
+# Passwords and requests pass through its memory: no core files.
+LimitCORE=0
 # The audit lines must not be dropped: only administrators can connect.
 LogRateLimitIntervalSec=0
 

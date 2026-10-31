@@ -421,6 +421,19 @@ fn desktop_shell(record: &str, uid: u32) -> Result<(), String> {
     // unit, so a program of the user's can add to its environment before
     // the next login. The maps are the kernel's own account of what is
     // loaded; a file root does not control means its prompt proves nothing.
+    // A same-user program that can attach to the shell owns its prompt.
+    // Needs positive evidence: the shell is not dumpable (the kernel then
+    // gives root its /proc entry), or Yama forbids attaching.
+    let shell_dumpable = std::fs::metadata(format!("/proc/{pid}/status"))
+        .map_or(true, |m| std::os::unix::fs::MetadataExt::uid(&m) != 0);
+    let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope");
+    let yama = scope.is_ok_and(|s| s.trim().parse::<u32>().is_ok_and(|v| v >= 1));
+    if shell_dumpable && !yama {
+        return refused(
+            "programs of yours could attach to GNOME Shell: set the sysctl \
+             kernel.yama.ptrace_scope to 1",
+        );
+    }
     let owners = crate::trust::trusted_owners();
     let trusted = |range: &str, path: &str| mapped_file_trusted(pid, range, path, &owners);
     match std::fs::read_to_string(format!("/proc/{pid}/maps")) {
