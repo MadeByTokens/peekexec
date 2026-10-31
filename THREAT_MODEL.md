@@ -162,8 +162,9 @@ has a seat and is its active one"), never the absence of a warning sign
      UTF-8 or ASCII in its first two lines (`# coding: utf-7` turns a
      comment into code for Python, and a shell script can hand itself to
      Python), read from the raw bytes as Python does; no script, and no
-     installed file that looks like Python, may contain a zip archive
-     (which Python runs instead of the text).
+     installed file that looks like Python, may contain a zip archive or
+     binary data (Python and Lua run an archive or compiled code instead of
+     the text).
    - What the view shows, it shows to the requester (preview) and to a dialog
      running as the user. So the current content of a file being replaced is
      shown (as a diff) only if the user could read it without root; otherwise

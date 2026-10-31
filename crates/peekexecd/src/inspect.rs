@@ -537,6 +537,27 @@ pub fn family(interp: &str) -> &str {
     interp.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.')
 }
 
+/// The first lines as CPython sees them: `\n`, `\r` and `\r\n` all end one.
+fn python_lines(content: &[u8]) -> Vec<&[u8]> {
+    let mut lines = Vec::with_capacity(2);
+    let mut start = 0;
+    let mut i = 0;
+    while i < content.len() && lines.len() < 2 {
+        if matches!(content[i], b'\n' | b'\r') {
+            lines.push(&content[start..i]);
+            if content[i] == b'\r' && content.get(i + 1) == Some(&b'\n') {
+                i += 1;
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    if lines.len() < 2 && start < content.len() {
+        lines.push(&content[start..]);
+    }
+    lines
+}
+
 /// An interpreter may not run the text that is shown. Python decodes a
 /// file by a PEP 263 coding cookie (`utf-7`, `unicode_escape` turn a
 /// comment into code), and runs a zip archive inside it instead of the
@@ -544,7 +565,7 @@ pub fn family(interp: &str) -> &str {
 /// `python3 "$0"`), so a cookie must name UTF-8 or ASCII wherever it
 /// appears, and `zip` refuses an archive.
 pub fn read_as_shown(content: &[u8], zip: bool) -> Result<(), String> {
-    for line in content.split(|&b| b == b'\n').take(2) {
+    for line in python_lines(content).into_iter().take(2) {
         if let Some(name) = coding_cookie(line) {
             let name = name.to_ascii_lowercase().replace('_', "-");
             if !matches!(name.as_str(), "utf-8" | "utf8" | "ascii" | "us-ascii") {
@@ -564,6 +585,21 @@ pub fn read_as_shown(content: &[u8], zip: bool) -> Result<(), String> {
         return Err(
             "the file contains a zip archive, which Python would run instead of the text \
              shown"
+                .into(),
+        );
+    }
+    // Compiled code runs instead of the text around it, whatever a file is
+    // called: `.pyc` (Python goes by its first bytes), Lua's bytecode
+    // (ESC, after a `#` line it skips). Both hold NUL, as text never does.
+    let compiled = content.contains(&0)
+        || python_lines(content)
+            .into_iter()
+            .take(2)
+            .any(|l| l.first() == Some(&0x1b));
+    if zip && compiled {
+        return Err(
+            "the file holds binary data: an interpreter could run compiled code instead of \
+             the text shown"
                 .into(),
         );
     }
@@ -1309,5 +1345,30 @@ mod tests {
         assert!(path_candidates("-xzf/home/u/x.tar").contains(&"/home/u/x.tar"));
         assert!(path_candidates("--config=home/u/x").contains(&"home/u/x"));
         assert!(path_candidates("--config=../home/u/x").contains(&"../home/u/x"));
+    }
+
+    #[test]
+    fn a_cookie_after_a_bare_cr_is_seen() {
+        assert!(read_as_shown(b"\r# coding: utf-7\nprint(1)\n", true).is_err());
+        assert!(read_as_shown(b"\r\n# coding: utf-7\r\n", true).is_err());
+        assert!(read_as_shown(b"#!/bin/sh\r# coding: utf-7\r", false).is_err());
+        // The third line is not read by CPython.
+        assert!(read_as_shown(b"# a\n# b\n\r# coding: utf-7\n", true).is_ok());
+    }
+
+    #[test]
+    fn compiled_code_is_refused_where_an_interpreter_would_run_it() {
+        for content in [
+            &b"\xa7\r\r\n\0\0\0\0"[..],    // a .pyc header
+            b"#!/usr/bin/lua\n\x1bLuaS\n", // Lua bytecode after its `#` line
+            b"\x1bLuaS\n",
+            b"#!/bin/sh\necho a\0b\n",
+        ] {
+            assert!(read_as_shown(content, true).is_err(), "{content:?}");
+            assert!(interpreter(content, &[0]).is_err(), "{content:?}");
+        }
+        // Not for an installed file that is not code for one of them.
+        assert!(read_as_shown(b"\x7fELF\0\0", false).is_ok());
+        assert!(read_as_shown(b"#!/bin/sh\necho ok\n", true).is_ok());
     }
 }
