@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::prepare::Compared;
 use peekexec_core::{Action, Request};
 use peekexec_proto::wire::{read_msg, write_msg};
 use peekexec_proto::{ClientMsg, DisplayTier, PreviewReply, Response, Status};
@@ -861,15 +862,17 @@ impl Daemon {
                 prepared.view.notes.insert(0, note);
             }
             self.compare_with_last(peer.uid, request, &mut prepared.view);
-            let d = if cancel.load(Ordering::SeqCst) {
+            let withdrawn = cancel.load(Ordering::SeqCst);
+            let d = if withdrawn {
                 Ok(Decision::Cancelled)
             } else {
                 self.decide(&prepared, &display, &user, peer, cancel)
             };
-            if d.is_ok() {
+            // Only what reached a dialog is "the request you saw".
+            if !withdrawn && !matches!(d, Err(_) | Ok(Decision::Failed(_))) {
                 self.remember_shown(peer.uid, request);
+                *self.last_prompt.lock().unwrap() = Some(Instant::now());
             }
-            *self.last_prompt.lock().unwrap() = Some(Instant::now());
             d
         };
 
@@ -1033,24 +1036,39 @@ impl Daemon {
             return;
         };
         let now = prepare::comparable_text(request);
-        if let Some((section, changed)) =
-            prepare::comparison_section(&before.text, &now, &before.hhmm)
-        {
-            view.sections.push(section);
-            view.enter_approves = false;
-            view.notes.insert(
-                0,
-                display_line(
-                    &format!(
-                        "Differs in {changed} line{} from the request you saw at {}: the \
-                         changes are on the \"changes since {}\" tab of peekexec's window.",
-                        if changed == 1 { "" } else { "s" },
-                        before.hhmm,
-                        before.hhmm
+        match prepare::compare(&before.text, &now, &before.hhmm) {
+            Compared::Same => {}
+            Compared::Alike(section, changed) => {
+                view.sections.push(section);
+                view.enter_approves = false;
+                view.notes.insert(
+                    0,
+                    display_line(
+                        &format!(
+                            "Differs in {changed} line{} from the request you saw at {}: the \
+                             changes are on the \"changes since {}\" tab of peekexec's window.",
+                            if changed == 1 { "" } else { "s" },
+                            before.hhmm,
+                            before.hhmm
+                        ),
+                        300,
                     ),
-                    300,
-                ),
-            );
+                );
+            }
+            // Rewriting enough of a request must not be a way to lose the note.
+            Compared::Unlike => {
+                view.enter_approves = false;
+                view.notes.insert(
+                    0,
+                    display_line(
+                        &format!(
+                            "Much of this differs from the request you saw at {}: read all of it.",
+                            before.hhmm
+                        ),
+                        300,
+                    ),
+                );
+            }
         }
     }
 
@@ -1555,7 +1573,7 @@ mod tests {
         d.compare_with_last(1000, &next, &mut v);
         let diff = v.sections.last().unwrap();
         assert!(
-            diff.comparison && diff.raw.contains("+netcat-openbsd"),
+            diff.comparison && diff.raw.contains("+\"netcat-openbsd\""),
             "{}",
             diff.raw
         );
@@ -1695,5 +1713,49 @@ mod tests {
             .choose_approval(&display(false), &peer(), &mut v)
             .unwrap();
         assert_eq!(v.approval, Approval::Password);
+    }
+
+    #[cfg(feature = "test-approver")]
+    #[test]
+    fn a_request_withdrawn_before_any_dialog_is_not_what_the_user_saw() {
+        let platform = crate::platform::linux::platform("peekexec");
+        let d = Daemon::new(
+            Options {
+                socket: PathBuf::from("/nonexistent"),
+                dev: true,
+                dialog: PathBuf::from("/nonexistent"),
+                snapshot_root: std::env::temp_dir().join("pe-baseline"),
+                allow_unverified_display: false,
+                prompt_lines: prepare::PROMPT_SCREEN_LINES,
+                test_approver: Some("approve".into()),
+            },
+            platform,
+        );
+        let run = |argv: &[&str]| Request {
+            action: Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            },
+            why: None,
+            write: None,
+            no_net: false,
+            env: Default::default(),
+            cwd: "/".into(),
+            timeout_secs: 60,
+        };
+        let mut p = peer();
+        p.uid = nix::unistd::getuid().as_raw();
+        p.gid = nix::unistd::getgid().as_raw();
+        let shown = run(&["apt-get", "install", "-y", "jq"]);
+        let next = run(&["apt-get", "install", "-y", "jq", "netcat-openbsd"]);
+        d.remember_shown(p.uid, &shown);
+        let r = d.process(&p, &next, "r-2", &AtomicBool::new(true));
+        assert_eq!(r.status, Status::Cancelled, "{r:?}");
+        let mut v = view(3);
+        d.compare_with_last(p.uid, &next, &mut v);
+        assert!(
+            v.sections.last().unwrap().comparison,
+            "no comparison with the request actually shown; notes {:?}",
+            v.notes
+        );
     }
 }

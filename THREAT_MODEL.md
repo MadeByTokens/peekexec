@@ -351,11 +351,13 @@ has a seat and is its active one"), never the absence of a warning sign
   arriving right after another gets a longer input guard, and the daemon
   refuses an Approve that comes sooner than the dialog allows one.
 - **"The same again, with a fix"** is where a second change slips in. A
-  request within 10 minutes of one the user saw, and alike (at most half
-  its lines changed), comes with the changes since that one: a tab in the
-  dialog marked as not what runs, and a note (in the desktop prompt too)
-  that says how many lines differ. When others wait behind a request, the
-  dialog says how many. Either turns Enter off.
+  request within 10 minutes of one that reached a dialog, and alike (at
+  most half its lines changed), comes with the changes since that one: a
+  tab in the dialog marked as not what runs, and a note (in the desktop
+  prompt too) that says how many lines differ. One that differs more gets a
+  note saying so. A request withdrawn before its dialog is not "seen".
+  When others wait behind a request, the dialog says how many. Any of these
+  turns Enter off.
 - **The one-hour refusal of a denied request** is a courtesy for well-behaved
   agents (any change makes a new request), not a control. It replays the
   reason only to the requester it was given to (the registered agent

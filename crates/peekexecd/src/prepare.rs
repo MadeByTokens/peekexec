@@ -1323,19 +1323,28 @@ fn install_diff(old: &[u8], content: &[u8]) -> Option<Section> {
 /// argv, script or file.
 pub fn comparable_text(req: &Request) -> String {
     let mut t = String::new();
+    // One quoted line per word, and a hash of the bytes: decoded text alone
+    // would read `a b` as `a`, `b`, and any invalid byte as any other.
+    let words = |w: &[String]| w.iter().map(|a| format!("{a:?}\n")).collect::<String>();
+    let digest = peekexec_core::request::sha256_hex;
     let (kind, body) = match &req.action {
-        Action::Run { argv } => ("run", argv.join("\n")),
+        Action::Run { argv } => ("run", words(argv)),
         Action::Script { content, args, .. } => (
             "script",
             format!(
-                "args: {}\n{}",
-                args.join(" "),
+                "args:\n{}sha256 {}\n{}",
+                words(args),
+                digest(content),
                 String::from_utf8_lossy(content)
             ),
         ),
-        Action::Install { dest, content, .. } => (
+        Action::Install { src, dest, content } => (
             "install",
-            format!("to: {dest}\n{}", String::from_utf8_lossy(content)),
+            format!(
+                "to: {dest:?}\nfrom: {src:?}\nsha256 {}\n{}",
+                digest(content),
+                String::from_utf8_lossy(content)
+            ),
         ),
     };
     t.push_str(&format!("{kind} in {}\n", req.cwd));
@@ -1359,23 +1368,27 @@ pub fn comparable_text(req: &Request) -> String {
     t
 }
 
-/// The changes from `before` (a request shown at `at`) to `now`, as a
-/// section for comparison, when the two are alike: at most half the lines
-/// (and at least a few) changed. Very different requests are not
-/// compared, and identical ones need no diff. Returns the section and how
-/// many lines changed.
-pub fn comparison_section(before: &str, now: &str, at: &str) -> Option<(Section, usize)> {
+/// How a request compares with the one shown before it.
+pub enum Compared {
+    Same,
+    /// The changes, as a section, and how many lines of it changed.
+    Alike(Section, usize),
+    /// More than half its lines changed.
+    Unlike,
+}
+
+/// `before` (a request shown at `at`) against `now`. A line edited counts
+/// once, as what it is: one line changed.
+pub fn compare(before: &str, now: &str, at: &str) -> Compared {
     if before == now {
-        return None;
+        return Compared::Same;
     }
     let diff = similar::TextDiff::from_lines(before, now);
-    let changed = diff
-        .iter_all_changes()
-        .filter(|c| c.tag() != similar::ChangeTag::Equal)
-        .count();
+    let count = |tag| diff.iter_all_changes().filter(|c| c.tag() == tag).count();
+    let changed = count(similar::ChangeTag::Delete).max(count(similar::ChangeTag::Insert));
     let total = before.lines().count().max(now.lines().count());
     if changed > (total / 2).max(4) {
-        return None;
+        return Compared::Unlike;
     }
     let raw = diff
         .unified_diff()
@@ -1392,7 +1405,7 @@ pub fn comparison_section(before: &str, now: &str, at: &str) -> Option<(Section,
         formatted: verbatim(&raw),
         raw,
     };
-    Some((section, changed))
+    Compared::Alike(section, changed)
 }
 
 fn write_snapshot(dir: &Path, file: &Path, content: &[u8]) -> Result<(), String> {
@@ -1933,6 +1946,74 @@ mod tests {
     }
 
     #[test]
+    fn half_means_half() {
+        let before: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let edited = |n: usize| -> String {
+            (0..40)
+                .map(|i| {
+                    if i < n {
+                        format!("other {i}\n")
+                    } else {
+                        format!("line {i}\n")
+                    }
+                })
+                .collect()
+        };
+        assert!(matches!(
+            compare(&before, &edited(20), "10:00"),
+            Compared::Alike(_, 20)
+        ));
+        assert!(matches!(
+            compare(&before, &edited(21), "10:00"),
+            Compared::Unlike
+        ));
+        assert!(matches!(compare(&before, &before, "10:00"), Compared::Same));
+    }
+
+    #[test]
+    fn different_requests_never_compare_equal() {
+        let run = |argv: &[&str]| {
+            req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            })
+        };
+        let script = |content: &[u8], args: &[&str]| {
+            req(Action::Script {
+                path: "/home/u/x.sh".into(),
+                content: content.to_vec(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+            })
+        };
+        let install = |src: &str, dest: &str| {
+            req(Action::Install {
+                src: src.into(),
+                content: b"x\n".to_vec(),
+                dest: dest.into(),
+            })
+        };
+        for (name, a, b) in [
+            ("argv", run(&["x", "a\nb"]), run(&["x", "a", "b"])),
+            (
+                "args",
+                script(b"#!/bin/sh\n", &["a b"]),
+                script(b"#!/bin/sh\n", &["a", "b"]),
+            ),
+            (
+                "bytes",
+                script(b"#!/bin/sh\n# \xff\n", &[]),
+                script(b"#!/bin/sh\n# \xfe\n", &[]),
+            ),
+            (
+                "file name",
+                install("a.conf", "/etc/x/"),
+                install("b.conf", "/etc/x/"),
+            ),
+        ] {
+            assert_ne!(comparable_text(&a), comparable_text(&b), "{name}");
+        }
+    }
+
+    #[test]
     fn a_cut_prompt_shows_it_was_cut() {
         let mut v = prepare_for_tests(&req(Action::Run {
             argv: vec![
@@ -2111,11 +2192,14 @@ mod tests {
             }))
         };
         let a = run(&["apt-get", "install", "-y", "jq"]);
-        let (s, changed) =
-            comparison_section(&a, &run(&["apt-get", "install", "-y", "jq2"]), "10:00").unwrap();
-        assert_eq!(changed, 2, "{}", s.raw);
+        let Compared::Alike(s, changed) =
+            compare(&a, &run(&["apt-get", "install", "-y", "jq2"]), "10:00")
+        else {
+            panic!("alike")
+        };
+        assert_eq!(changed, 1, "{}", s.raw);
         assert!(s.comparison && s.title.as_str() == "changes since 10:00");
-        assert!(comparison_section(&a, &a, "10:00").is_none(), "identical");
+        assert!(matches!(compare(&a, &a, "10:00"), Compared::Same));
         let other = run(&[
             "systemctl",
             "restart",
@@ -2127,7 +2211,7 @@ mod tests {
             "z",
         ]);
         assert!(
-            comparison_section(&a, &other, "10:00").is_none(),
+            matches!(compare(&a, &other, "10:00"), Compared::Unlike),
             "unrelated"
         );
         // The limits and variables are part of what is compared.
@@ -2136,7 +2220,9 @@ mod tests {
         });
         let before = comparable_text(&r);
         r.write = Some(vec!["/etc".into()]);
-        let (s, _) = comparison_section(&before, &comparable_text(&r), "10:00").unwrap();
+        let Compared::Alike(s, _) = compare(&before, &comparable_text(&r), "10:00") else {
+            panic!("alike")
+        };
         assert!(s.raw.contains("+writes: /etc"), "{}", s.raw);
     }
 
