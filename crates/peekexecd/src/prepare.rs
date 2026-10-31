@@ -282,7 +282,7 @@ pub fn prepare(
         _ => return Err(mismatch()),
     };
 
-    notes.extend(sensitive_targets(&sections, &enforced));
+    notes.extend(sensitive_targets(&sections, &enforced, &workdir.path));
     notes.extend(lasting_root(&executed_text(req)));
     if ctx.dev {
         notes.push(format!(
@@ -1000,8 +1000,13 @@ const ROOT_GROUPS: &[&str] = &[
 /// warns, it does not decide. One note for all of them.
 fn lasting_root(texts: &[String]) -> Option<String> {
     const SKIP: &[&str] = &[
+        "then", "do", "else", "elif", "if", "while", "until", "!", "{", "eval",
+    ];
+    /// Run the program they are given: what follows may be their own
+    /// options and values, so any word after them may be the program.
+    const WRAPPERS: &[&str] = &[
         "sudo", "doas", "env", "nohup", "nice", "ionice", "time", "timeout", "exec", "command",
-        "builtin", "then", "do", "else", "!", "{",
+        "builtin", "busybox", "sh", "bash", "dash", "zsh",
     ];
     let mut hits: Vec<String> = Vec::new();
     let mut hit = |h: String| {
@@ -1010,48 +1015,64 @@ fn lasting_root(texts: &[String]) -> Option<String> {
         }
     };
     for text in texts {
+        // A continued line is one command.
+        let text = text.replace("\\\n", " ");
         for command in text.split(['\n', ';', '&', '|', '(', ')', '`']) {
             let words: Vec<String> = command
                 .split_whitespace()
                 .map(|w| w.replace(['\'', '"', '\\'], ""))
                 .collect();
-            let start = words.iter().position(|w| {
+            let is_word = |w: &String| {
                 !SKIP.contains(&w.as_str())
+                    && !WRAPPERS.contains(&basename(w))
                     && !w.contains('=')
                     && !w.starts_with('-')
                     && !w.chars().all(|c| c.is_ascii_digit())
-            });
-            let Some(start) = start else {
+            };
+            let Some(first) = words.iter().position(is_word) else {
                 continue;
             };
-            let program = basename(&words[start]);
-            let args = &words[start + 1..];
-            match program {
-                "usermod" | "gpasswd" | "adduser" | "useradd" | "addgroup" => {
-                    for g in args.iter().flat_map(|a| a.split(',')) {
-                        if ROOT_GROUPS.contains(&g) {
-                            hit(format!("membership of group {g} ({program})"));
+            let wrapped = words[..first]
+                .iter()
+                .any(|w| WRAPPERS.contains(&basename(w)));
+            let last = if wrapped { words.len() } else { first + 1 };
+            for start in first..last {
+                let program = basename(&words[start]);
+                let args = &words[start + 1..];
+                match program {
+                    "usermod" | "gpasswd" | "adduser" | "useradd" | "addgroup" => {
+                        for g in args.iter().flat_map(|a| group_names(a)) {
+                            if ROOT_GROUPS.contains(&g) {
+                                hit(format!("membership of group {g} ({program})"));
+                            }
                         }
                     }
+                    "chmod"
+                        if args
+                            .iter()
+                            .any(|a| setuid_mode(a) || a.starts_with("--reference")) =>
+                    {
+                        hit("a setuid or setgid bit (chmod)".into());
+                    }
+                    "install" if args.iter().any(|a| setuid_mode(a)) => {
+                        hit("a setuid or setgid bit (install -m)".into());
+                    }
+                    "setcap" => hit("file capabilities (setcap)".into()),
+                    "systemd-run" => hit("systemd-run (keeps running after this request)".into()),
+                    "at" | "batch" => hit(format!("{program} (runs later)")),
+                    "crontab" => hit("crontab (runs later, repeatedly)".into()),
+                    "systemctl"
+                        if args.iter().any(|a| {
+                            matches!(
+                                a.as_str(),
+                                "enable" | "reenable" | "preset" | "link" | "add-wants"
+                            )
+                        }) =>
+                    {
+                        hit("systemctl enable (runs at every boot)".into());
+                    }
+                    _ => {}
                 }
-                "chmod" if args.iter().any(|a| setuid_mode(a)) => {
-                    hit("a setuid or setgid bit (chmod)".into());
-                }
-                "install" if args.iter().any(|a| setuid_mode(a)) => {
-                    hit("a setuid or setgid bit (install -m)".into());
-                }
-                "setcap" => hit("file capabilities (setcap)".into()),
-                "systemd-run" => hit("systemd-run (keeps running after this request)".into()),
-                "at" | "batch" => hit(format!("{program} (runs later)")),
-                "crontab" => hit("crontab (runs later, repeatedly)".into()),
-                "systemctl"
-                    if args
-                        .iter()
-                        .any(|a| matches!(a.as_str(), "enable" | "link" | "add-wants")) =>
-                {
-                    hit("systemctl enable (runs at every boot)".into());
-                }
-                _ => {}
             }
         }
     }
@@ -1086,38 +1107,75 @@ fn executed_text(req: &Request) -> Vec<String> {
     }
 }
 
-/// A `chmod`/`install -m` mode that sets setuid or setgid: octal with a
-/// leading 2, 4, 6 or 7 among four digits (`4755`), or symbolic with `s`
-/// (`u+s`, `g=rwxs`, `+s`).
+/// The group names in an argument of `usermod` and the like: `docker`,
+/// `a,b`, `--groups=a,b`, `-aGa,b`.
+fn group_names(a: &str) -> impl Iterator<Item = &str> {
+    let value = if let Some(v) = a.strip_prefix("--groups=") {
+        v
+    } else if let Some(i) = a
+        .strip_prefix('-')
+        .filter(|o| !o.starts_with('-'))
+        .and_then(|o| o.find('G'))
+    {
+        &a[i + 2..]
+    } else {
+        a
+    };
+    value.split(',')
+}
+
+/// A `chmod`/`install -m` mode that sets setuid or setgid: octal with
+/// either bit (`4755`, `3755`), or symbolic with `s` (`u+s`, `g=rwxs`, `+s`,
+/// `u-x+s`), bare or as an option's value (`-m4755`, `-Dm4755`, `--mode=4755`).
 fn setuid_mode(a: &str) -> bool {
-    let a = a.strip_prefix("-m").unwrap_or(a);
+    let a = if let Some(v) = a.strip_prefix("--mode=") {
+        v
+    } else if let Some(i) = a
+        .strip_prefix('-')
+        .filter(|o| !o.starts_with('-'))
+        .and_then(|o| o.find('m'))
+    {
+        &a[i + 2..]
+    } else {
+        a
+    };
     if a.len() >= 4 && a.chars().all(|c| c.is_digit(8)) {
-        return a
-            .chars()
-            .nth(a.len() - 4)
-            .is_some_and(|c| matches!(c, '2' | '4' | '6' | '7'));
+        return u32::from_str_radix(a, 8).is_ok_and(|mode| mode & 0o6000 != 0);
     }
     a.split(',').any(|clause| {
         clause.find(['+', '=']).is_some_and(|i| {
-            clause[..i].chars().all(|c| "ugoa".contains(c)) && clause[i..].contains('s')
+            clause[..i].chars().all(|c| "ugoa-rwxXst".contains(c)) && clause[i..].contains('s')
         })
     })
 }
 
 /// One note for all hits, so naming many paths cannot push other warnings
 /// out of the desktop prompt's summary.
-fn sensitive_targets(sections: &[Section], enforced: &Enforced) -> Option<String> {
+fn sensitive_targets(sections: &[Section], enforced: &Enforced, cwd: &str) -> Option<String> {
     let mut hits: Vec<&str> = Vec::new();
+    // The arguments are in the invocation lines, not in the content.
     let texts = sections
         .iter()
-        .map(|s| s.raw.as_str())
+        .flat_map(|s| {
+            s.invocation
+                .iter()
+                .map(|l| l.as_str())
+                .chain([s.raw.as_str()])
+        })
         .chain(enforced.write.iter().flatten().map(String::as_str));
     for text in texts {
+        // Relative words mean what they do in the working directory.
+        let joined: String = text
+            .split(|c: char| c.is_whitespace() || "=\"'".contains(c))
+            .filter(|w| !w.starts_with('/') && w.contains('/'))
+            .map(|w| format!("{}/{w} ", cwd.trim_end_matches('/')))
+            .collect();
         // `/etc//cron.d`, `/etc/./cron.d` and `/etc/x/../cron.d` name
         // /etc/cron.d too.
         // As written, and with `..` applied both ways it can mean.
         let forms = [
             text.to_string(),
+            joined.clone(),
             normalize_paths(text, false),
             normalize_paths(text, true),
         ];
@@ -1795,6 +1853,86 @@ mod tests {
     }
 
     #[test]
+    fn lasting_root_sees_common_forms() {
+        for t in [
+            "chmod 5755 /x",
+            "chmod 3755 /x",
+            "chmod u-x+s /x",
+            "chmod --reference=/usr/bin/sudo /x",
+            "install --mode=4755 a /x",
+            "install --mode=u+s a /x",
+            "install -Dm4755 a /x",
+            "install -m4755 a /x",
+            "usermod -aGdocker u",
+            "usermod --groups=docker u",
+            "usermod -G docker,adm u",
+            "usermod -aG \\\n  docker u",
+            "chmod \\\n 4755 /x",
+            "if crontab c; then :; fi",
+            "while crontab c; do :; done",
+            "until setcap a b; do :; done",
+            "eval crontab c",
+            "sudo -u root crontab c",
+            "timeout 5s crontab c",
+            "env -u X crontab c",
+            "bash -c 'crontab c'",
+            "busybox adduser u docker",
+            "systemctl reenable x",
+            "systemctl preset x",
+        ] {
+            assert!(lasting_root(&[t.to_string()]).is_some(), "{t:?}");
+        }
+        for t in [
+            "chmod 755 /x",
+            "chmod 0755 /x",
+            "chmod u+x /x",
+            "install -m644 a /x",
+            "echo crontab",
+            "echo usermod -aG docker u",
+            "usermod -aG video u",
+        ] {
+            assert!(lasting_root(&[t.to_string()]).is_none(), "{t:?}");
+        }
+    }
+
+    #[test]
+    fn sensitive_targets_look_at_arguments_and_relative_paths() {
+        let r = req(Action::Run {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "cp x \"$1\"".into(),
+                "_".into(),
+                "/etc/cron.d/y".into(),
+            ],
+        });
+        let note = peekexec_proto::view::join(&prepare_for_tests(&r).view.notes, " ");
+        assert!(note.contains("/etc/cron"), "{note}");
+        for (cwd, text) in [
+            ("/etc", "cp x cron.d/y"),
+            ("/etc", "dd of=sudoers.d/x"),
+            ("/", "dd of=etc/cron.d/x"),
+        ] {
+            let section = Section {
+                comparison: false,
+                title: Shown::fixed("t"),
+                invocation: vec![],
+                syntax: Syntax::Shell,
+                formatted: verbatim(text),
+                raw: text.into(),
+            };
+            let none = Enforced {
+                write: Some(vec![]),
+                write_level: Level::Builtin,
+                network: false,
+                network_level: Level::Builtin,
+            };
+            let hit = sensitive_targets(&[section], &none, cwd);
+            assert!(hit.is_some(), "{text:?} in {cwd}");
+        }
+    }
+
+    #[test]
     fn a_cut_prompt_shows_it_was_cut() {
         let mut v = prepare_for_tests(&req(Action::Run {
             argv: vec![
@@ -2077,14 +2215,14 @@ mod tests {
             network: false,
             network_level: Level::Builtin,
         };
-        let note = sensitive_targets(&[], &e).unwrap();
+        let note = sensitive_targets(&[], &e, "/").unwrap();
         assert!(note.contains("/etc/sudoers"));
         // Many hits are still one note.
         let e = Enforced {
             write: Some(vec!["/etc/sudoers.d/x".into(), "/etc/cron.d/y".into()]),
             ..e
         };
-        let note = sensitive_targets(&[], &e).unwrap();
+        let note = sensitive_targets(&[], &e, "/").unwrap();
         assert!(note.contains("/etc/sudoers*, /etc/cron*"), "{note}");
         // Redundant slashes and dots do not hide a path.
         for p in [
@@ -2100,7 +2238,7 @@ mod tests {
                 write: Some(vec![p.into()]),
                 ..e.clone()
             };
-            assert!(sensitive_targets(&[], &e).is_some(), "{p}");
+            assert!(sensitive_targets(&[], &e, "/").is_some(), "{p}");
         }
         // In the command text: `..` too; program directories only as targets.
         let section = |raw: &str| Section {
@@ -2115,9 +2253,11 @@ mod tests {
             write: Some(vec![]),
             ..e.clone()
         };
-        let hit = sensitive_targets(&[section("cp x '/etc/a/../cron.d/y'")], &none).unwrap();
+        let hit = sensitive_targets(&[section("cp x '/etc/a/../cron.d/y'")], &none, "/").unwrap();
         assert!(hit.contains("/etc/cron"), "{hit}");
-        assert!(sensitive_targets(&[section("#!/usr/bin/env sh\n/usr/bin/true")], &none).is_none());
+        assert!(
+            sensitive_targets(&[section("#!/usr/bin/env sh\n/usr/bin/true")], &none, "/").is_none()
+        );
         assert_eq!(
             normalize_paths("a=/x/./y//z/../w b/../c", false),
             "a=/x/y/w b/../c"
@@ -2132,7 +2272,7 @@ mod tests {
             "/bin/../local/bin/apt",
             "/usr/share/polkit-1/rules.d/../../../../bin/../share/polkit-1/rules.d/x",
         ] {
-            assert!(sensitive_targets(&[], &w(p)).is_some(), "{p}");
+            assert!(sensitive_targets(&[], &w(p), "/").is_some(), "{p}");
         }
     }
 

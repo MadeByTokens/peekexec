@@ -602,14 +602,20 @@ fn own_descriptor(path: &Path) -> bool {
     }
 }
 
-/// The parts of an argument that may name a path: the argument itself,
-/// the value of `-Xvalue`, and every absolute path after a separator
-/// (`--opt=/p`, `-v /a:/b`, `host:/p`, `file:///p`, `@/p`), up to the next
+/// The parts of an argument that may name a path: the argument itself, the
+/// value of `-Xvalue` and `--opt=value` (absolute or not), the text from the
+/// first `/` of a word (`-xzf/home/u/x.tar`, whose option letters no one but
+/// the program can tell from its value), and every absolute path after a
+/// separator (`-v /a:/b`, `host:/p`, `file:///p`, `@/p`), up to the next
 /// `:` or `,`.
 fn path_candidates(a: &str) -> Vec<&str> {
     let mut out = vec![a];
     if a.starts_with('-') && !a.starts_with("--") {
         out.extend(a.get(2..).filter(|v| !v.is_empty()));
+    }
+    if a.starts_with('-') {
+        out.extend(a.find('=').map(|i| &a[i + 1..]));
+        out.extend(a.find('/').map(|i| &a[i..]));
     }
     for (i, c) in a.char_indices() {
         if c == '/' && (i == 0 || a[..i].ends_with(['=', ':', '@', ','])) {
@@ -1296,5 +1302,12 @@ mod tests {
         assert!(interpreter(b"#!/bin/sh\nid\n", &[0]).is_ok());
         assert!(interpreter(b"#!/usr/bin/env sh\nid\n", &[0]).is_ok());
         assert!(interpreter(b"#!/usr/bin/awk -f\n{ print }\n", &[0]).is_ok());
+    }
+
+    #[test]
+    fn option_values_are_candidates_however_they_are_joined() {
+        assert!(path_candidates("-xzf/home/u/x.tar").contains(&"/home/u/x.tar"));
+        assert!(path_candidates("--config=home/u/x").contains(&"home/u/x"));
+        assert!(path_candidates("--config=../home/u/x").contains(&"../home/u/x"));
     }
 }

@@ -308,7 +308,7 @@ then a bypass pass. In order of priority:
 - [x] F5 Replies: one budget by encoded size; `unknown` status in the client.
 - [x] F6 Allowlist of `#!` interpreter families.
 - [x] F7 Enter-to-approve: an allowlist of programs that only read and report.
-- [ ] F8 Note gaps: `mode & 0o6000`, `--mode=`, `--groups=`, `if`/`while`,
+- [x] F8 Note gaps: `mode & 0o6000`, `--mode=`, `--groups=`, `if`/`while`,
       backslash-newline; path note on relative and joined options.
 - [ ] F9 Comparison: remember only what a dialog showed; compare by digest.
 - [ ] F10 Request table bounded; `lookup` honours expiry.
