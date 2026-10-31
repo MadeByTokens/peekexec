@@ -65,10 +65,9 @@ A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
 - **Flags:** a working directory root does not control, targets that make root
   run things later (sudoers, cron, systemd, udev, pam.d, profile, ld.so...),
   unverified display, executables in the install.
-- **Fast path:** focus starts in the password field; for a plain `run` (no
-  shell, interpreter or program runner in any word, no spaces or shell
-  syntax in an argument) with nothing to warn about,
-  type it and press Enter. Scripts, installs, `sh -c` and any flag need a
+- **Fast path:** focus starts in the password field; for a plain `run` of a
+  program that only reads and reports (an allowlist, see THREAT_MODEL.md),
+  with nothing to warn about, type it and press Enter. All else takes a
   click, and a dialog right after another one ignores keys for longer.
 - **Cancel:** button, Esc, closing the window, or timeout (default 120 s).
   Nothing runs; the snapshot is removed.
@@ -308,8 +307,7 @@ then a bypass pass. In order of priority:
 - [x] F4 Working directory: shown path taken from the descriptor.
 - [x] F5 Replies: one budget by encoded size; `unknown` status in the client.
 - [x] F6 Allowlist of `#!` interpreter families.
-- [ ] F7 Enter-to-approve: remove, or an allowlist of inert programs (owner
-      decides: the fast path was a requirement).
+- [x] F7 Enter-to-approve: an allowlist of programs that only read and report.
 - [ ] F8 Note gaps: `mode & 0o6000`, `--mode=`, `--groups=`, `if`/`while`,
       backslash-newline; path note on relative and joined options.
 - [ ] F9 Comparison: remember only what a dialog showed; compare by digest.

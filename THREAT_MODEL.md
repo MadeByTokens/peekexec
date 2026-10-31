@@ -336,16 +336,17 @@ has a seat and is its active one"), never the absence of a warning sign
   stderr each: approving `cat /etc/shadow` or `journalctl` hands that to the
   agent. The summary says so on every command (not on an install, which
   runs nothing).
-- **Enter-to-approve** works only for a plain `run` (no word of it names a
-  shell, an interpreter or a program that runs another, such as `timeout`
-  or `xargs`, and no argument holds spaces or shell syntax), only when there
-  is nothing to warn about, and only when no
-  key was pressed while the window was opening (the human was typing into
+- **Enter-to-approve** works only for a plain `run` of a program on a short
+  list of ones that only read and report (`ls`, `cat`, `stat`, `lsblk`...)
+  and a few everyday subcommands (`udevadm control`, `systemctl status`), with
+  at most 16 words and 1024 bytes, no argument holding spaces or shell
+  syntax, only when there is nothing to warn about, and only when no key
+  was pressed while the window was opening (the human was typing into
   something else, perhaps a password); otherwise approving needs a pointer
-  click, which the keyboard (Tab, then Space) cannot stand in for. Scripts,
-  installs and code for an interpreter (`sh -c`, `python3 -c`) always take a
-  click: the warnings are a list of known dangers, and a requester can
-  preview a request until nothing on the list is flagged. A dialog
+  click, which the keyboard (Tab, then Space) cannot stand in for. This is
+  an allowlist because it decides: no list of programs that run code can be
+  complete, and a requester can preview a request until nothing on such a
+  list is flagged. A dialog
   arriving right after another gets a longer input guard, and the daemon
   refuses an Approve that comes sooner than the dialog allows one.
 - **"The same again, with a fix"** is where a second change slips in. A

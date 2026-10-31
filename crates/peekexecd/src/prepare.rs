@@ -352,95 +352,62 @@ pub fn prepare(
     })
 }
 
-/// Programs that take code to run, not only arguments: what they do is
-/// written in text the human has to read.
-const INTERPRETERS: &[&str] = &[
-    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "fish", "csh", "tcsh", "busybox",
-    "python", "pypy", "perl", "ruby", "node", "nodejs", "bun", "deno", "php", "lua", "luajit",
-    "tclsh", "wish", "expect", "awk", "gawk", "mawk", "nawk", "sed", "R", "Rscript", "julia",
-    "guile", "racket", "sbcl", "ocaml", "runghc", "groovy", "jshell",
+/// Programs that only read and report, whatever their arguments. Enter is
+/// a decision, so it is an allowlist: the alternative, a list of programs
+/// that run code, can never be complete (`tar --to-command=`, `git -c`,
+/// `prlimit`, `ip netns exec`, ...) and a requester can preview against it.
+const READ_ONLY_PROGRAMS: &[&str] = &[
+    "true", "ls", "cat", "head", "tail", "stat", "wc", "df", "du", "free", "uptime", "id",
+    "whoami", "uname", "lsblk", "lsusb", "lspci", "lscpu", "lsmod", "blkid", "findmnt",
 ];
 
-/// Programs that run another program named in their arguments (so the
-/// interpreter may be any argument, not the first), or run code found in
-/// files they read.
-const RUNNERS: &[&str] = &[
-    "env",
-    "timeout",
-    "nice",
-    "ionice",
-    "chrt",
-    "taskset",
-    "nohup",
-    "setsid",
-    "stdbuf",
-    "time",
-    "xargs",
-    "find",
-    "parallel",
-    "watch",
-    "flock",
-    "chroot",
-    "unshare",
-    "nsenter",
-    "setpriv",
-    "capsh",
-    "systemd-run",
-    "run-parts",
-    "su",
-    "runuser",
-    "sudo",
-    "doas",
-    "pkexec",
-    "script",
-    "strace",
-    "ltrace",
-    "gdb",
-    "valgrind",
-    "make",
-    "cmake",
-    "ninja",
-    "at",
-    "batch",
-    "dbus-launch",
-    "dbus-run-session",
-    "xvfb-run",
+/// Everyday commands of a program that does more: its first argument.
+const PLAIN_SUBCOMMANDS: &[(&str, &[&str])] = &[
+    ("udevadm", &["control", "trigger", "settle", "info"]),
+    (
+        "systemctl",
+        &[
+            "status",
+            "is-active",
+            "is-enabled",
+            "is-failed",
+            "show",
+            "list-units",
+            "daemon-reload",
+        ],
+    ),
 ];
 
-/// Whether a word names one of `names`: the name itself, or with a version
-/// after it (`python3.12`, `perl5.34-x86_64-linux-gnu`), as a path or not.
-fn names_one_of(word: &str, names: &[&str]) -> bool {
-    let base = basename(word);
-    names.iter().any(|n| {
-        base.strip_prefix(n).is_some_and(|rest| {
-            rest.is_empty()
-                || rest.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-')
-        })
-    })
-}
+/// A request read at a glance: more than this is not one.
+const PLAIN_MAX_ARGS: usize = 16;
+const PLAIN_MAX_BYTES: usize = 1024;
 
-/// Whether Enter may approve this request at all: only a plain `run`, one
-/// program and its arguments, read at a glance. Scripts, installs, code
-/// for an interpreter (`sh -c`, `python3 -c`), a program run by another
-/// (`timeout 9 sh -c ...`), and any argument that is more than one word or
-/// holds shell syntax take a click, whatever the checks found: the checks
-/// are a list of known dangers, and the requester can preview against it
-/// until nothing is flagged.
+/// Whether Enter may approve this request at all: only a plain `run` of a
+/// program on the list, read at a glance. All else takes a click, however
+/// clean the checks are: they are lists of known dangers, and the requester
+/// can preview against them until nothing is flagged.
 fn plain_run(req: &Request, exec: &Execution) -> bool {
     let (Action::Run { argv }, Execution::Command(plan)) = (&req.action, exec) else {
         return false;
     };
-    // Every word, and the file argv[0] resolved to (`/usr/bin/python` may
-    // be a link to `python3`).
-    let runs_code = argv
-        .iter()
-        .chain([&plan.program])
-        .any(|w| names_one_of(w, INTERPRETERS) || names_one_of(w, RUNNERS));
+    let listed = |name: &str| {
+        READ_ONLY_PROGRAMS.contains(&name)
+            || PLAIN_SUBCOMMANDS.iter().any(|(program, commands)| {
+                *program == name && argv.get(1).is_some_and(|a| commands.contains(&a.as_str()))
+            })
+    };
     let plain_word = |a: &String| {
         !a.chars()
             .any(|c| c.is_whitespace() || c.is_control() || "$`;|&<>(){}".contains(c))
     };
-    !runs_code && argv.iter().all(plain_word)
+    // The name asked for and the file it resolved to: a link to busybox is
+    // not the program it is called after.
+    !argv.is_empty()
+        && listed(basename(&argv[0]))
+        && listed(basename(&plan.program))
+        && argv.len() <= PLAIN_MAX_ARGS
+        && argv.iter().map(String::len).sum::<usize>() <= PLAIN_MAX_BYTES
+        && argv.iter().all(plain_word)
 }
 
 /// Text for a single dialog line: characters that could fake extra lines or
@@ -1471,6 +1438,15 @@ mod tests {
         assert!(plain(&run(&["ls", "-l", "/etc"])));
         // A name that only starts like an interpreter's is not one.
         assert!(plain(&run(&["ls", "/usr/share/shells"])));
+        assert!(plain(&run(&["udevadm", "control", "--reload-rules"])));
+        assert!(plain(&run(&["systemctl", "status", "ssh"])));
+        // More than a glance.
+        let many: Vec<String> = (0..PLAIN_MAX_ARGS).map(|i| format!("a{i}")).collect();
+        let mut argv = vec!["ls"];
+        argv.extend(many.iter().map(String::as_str));
+        assert!(!plain(&run(&argv)), "too many arguments");
+        let long = "a".repeat(PLAIN_MAX_BYTES);
+        assert!(!plain(&run(&["ls", &long])), "too long");
         for code in [
             &["sh", "-c", "id"][..],
             &["/usr/bin/python3", "-c", "print(1)"],
@@ -1480,7 +1456,15 @@ mod tests {
             &["echo", "a\nb"],
             &["timeout", "9", "sh", "-c", "id"],
             &["nice", "/usr/bin/python3.12", "x"],
-            &["ls", "perl5.34-x86_64-linux-gnu"],
+            &["tar", "xf", "x.tar"],
+            &["git", "status"],
+            &["prlimit", "/usr/bin/id"],
+            &["setarch", "x86_64", "/usr/bin/id"],
+            &["ip", "netns", "exec", "n", "/usr/bin/id"],
+            &["dpkg", "-i", "x.deb"],
+            &["sg", "adm", "id"],
+            &["systemctl", "restart", "x"],
+            &["udevadm", "hwdb", "--update"],
             &["echo", "rm${IFS}-rf"],
             &["echo", "a;b"],
         ] {
