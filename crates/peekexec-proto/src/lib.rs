@@ -135,17 +135,21 @@ pub struct Enforced {
 /// The single JSON object printed by `--json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Response {
+    /// What happened. Branch on this, not on the exit code.
     pub status: Status,
+    /// This request's id, for `wait` and `cancel`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// SHA-256 of exactly what was (or would have been) executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The command's own exit code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// Command output, decoded as UTF-8 with invalid bytes replaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
+    /// The command's error output, decoded as `stdout` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr: Option<String>,
     /// True when part of `stdout` or `stderr` was dropped. The text in those
@@ -166,8 +170,11 @@ pub struct Response {
     /// see `display_verified`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_reason: Option<String>,
+    /// What was actually guaranteed for each limit (`write`, `network`) and
+    /// at what level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforced: Option<Enforced>,
+    /// How the human was reached, where a dialog was shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_tier: Option<DisplayTier>,
     /// False when the display could not be verified: a program of the
@@ -183,6 +190,7 @@ pub struct Response {
     /// The agent session id (register).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// Why, for `error` and `unknown`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

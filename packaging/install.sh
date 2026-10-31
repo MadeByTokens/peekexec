@@ -40,6 +40,7 @@ units=/etc/systemd/system
 pam=/etc/pam.d/peekexec
 policy=/usr/share/polkit-1/actions/org.peekexec.approve.policy
 dropin=/etc/systemd/system/peekexecd.socket.d
+manpage=/usr/local/share/man/man1/peekexec.1
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "install.sh: run as root (e.g. pkexec \"$repo/packaging/install.sh\")" >&2
@@ -77,7 +78,7 @@ if [ "$action" = uninstall ]; then
     fi
     sh -c "$wait_idle"
     systemctl disable --now peekexecd.socket peekexecd.service 2>/dev/null || true
-    rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy"
+    rm -f "$units/peekexecd.socket" "$units/peekexecd.service" "$bin" "$policy" "$manpage"
     rm -rf "$dropin"
     rm -rf "$libexec"
     systemctl daemon-reload || true
@@ -146,7 +147,8 @@ chmod 700 "$stage"
 for f in peekexec peekexecd peekexec-ui; do
     cp -P "$rel/$f" "$stage/$f"
 done
-cp -rP "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" "$stage/"
+cp -rP "$repo/packaging/systemd" "$repo/packaging/pam" "$repo/packaging/polkit" \
+    "$repo/packaging/man" "$stage/"
 # -P copies symlinks as links, and install(1) would follow them, reading
 # whatever they point to as root. Only plain files and directories are
 # installed, checked on the copy.
@@ -178,6 +180,8 @@ install -d -o root -g root -m 0755 "$libexec"
 install -o root -g root -m 0711 "$stage/peekexecd" "$libexec/peekexecd"
 install -o root -g root -m 0711 "$stage/peekexec-ui" "$libexec/peekexec-ui"
 install -o root -g root -m 0755 "$stage/peekexec" "$bin"
+install -d -o root -g root -m 0755 "$(dirname "$manpage")"
+install -o root -g root -m 0644 "$stage/man/peekexec.1" "$manpage"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.socket" "$units/"
 install -o root -g root -m 0644 "$stage/systemd/peekexecd.service" "$units/"
 # Only the administrators may connect to the socket.

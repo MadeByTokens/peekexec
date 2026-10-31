@@ -26,8 +26,8 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo clippy --locked --workspace --all-targets --features peekexecd/test-approver -- -D warnings
       - run: shellcheck packaging/install.sh scripts/*.sh dev/wayland-vm/*.sh
-      - name: docs/cli.md is up to date
-        run: ./scripts/gen-cli-doc.sh && git diff --exit-code docs/cli.md
+      - name: docs/cli.md and the man page are up to date
+        run: ./scripts/gen-cli-doc.sh && git diff --exit-code docs/cli.md packaging/man/peekexec.1
 
   audit:
     runs-on: ubuntu-24.04

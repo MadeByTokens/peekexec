@@ -35,6 +35,7 @@ directory, checks them there, and refuses a test build. It then installs:
   not readable by users, so the copies that run as you can't be attached to;
 - `peekexecd.socket` and `peekexecd.service` in `/etc/systemd/system`, with a
   drop-in that sets the socket's group to `--admin-group`;
+- `/usr/local/share/man/man1/peekexec.1`, the man page;
 - `/usr/share/polkit-1/actions/org.peekexec.approve.policy`, which the Wayland
   path needs (skipped if polkit is not installed);
 - `/etc/pam.d/peekexec`, unless it exists already.

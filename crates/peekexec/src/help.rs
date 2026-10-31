@@ -114,6 +114,13 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
    the requesting process itself, which must wait; there use `peekexec run`.
 
 9. You cannot approve, pre-approve, or skip the dialog. There is no flag for it.
+
+10. The human can approve with password and Enter only for a single `run` of a
+    read-only program (ls, cat, id, df, systemctl status...) with a few plain
+    arguments and nothing to warn about. Everything else takes a click: scripts,
+    installs, `sh -c`, and anything that changes the system. So don't wrap a
+    simple command in `sh -c`: it costs the human a click and a closer read.
+    "enter_approves" in preview's view says which applies.
 "#;
 
 pub fn exit_codes() -> String {

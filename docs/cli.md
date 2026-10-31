@@ -24,7 +24,7 @@ Commands:
   cancel      Withdraw a pending request (the dialog closes)
   register    Register your agent session (one dialog), so later requests are labelled as coming from your session
   unregister  End your agent session's registration
-  help        More help: `agents` (guide for automated callers) or `schema` (JSON Schema of --json output)
+  help        More help: `agents` (guide for automated callers), `schema` (JSON Schema of --json output) or `man` (the man page, as roff)
 
 Options:
       --json
@@ -155,6 +155,13 @@ GUIDE FOR AUTOMATED CALLERS
    the requesting process itself, which must wait; there use `peekexec run`.
 
 9. You cannot approve, pre-approve, or skip the dialog. There is no flag for it.
+
+10. The human can approve with password and Enter only for a single `run` of a
+    read-only program (ls, cat, id, df, systemctl status...) with a few plain
+    arguments and nothing to warn about. Everything else takes a click: scripts,
+    installs, `sh -c`, and anything that changes the system. So don't wrap a
+    simple command in `sh -c`: it costs the human a click and a closer read.
+    "enter_approves" in preview's view says which applies.
 ```
 
 ## `--json` output

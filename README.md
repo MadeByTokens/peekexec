@@ -49,8 +49,12 @@ Then you choose:
 - **Deny with a reason.** Your message goes back to the agent, so you can say
   "use the vendor's rules file instead".
 
-If the request has anything risky about it, you have to click Approve. For
-simple read-only commands you can just type your password and press Enter.
+**Enter or click?** A plain read-only command such as `ls`, `id` or `df` can be
+approved with your password and Enter. Everything else needs a click on Approve:
+scripts, installs, `sh -c`, anything that changes the system, anything with a
+warning, and any request that arrives right after another. The bottom of the
+window says which applies. This stops typing aimed at another window from
+approving anything, and makes you pause on what matters.
 
 ## Will it work on my desktop?
 
@@ -183,6 +187,9 @@ pre-approve or skip the window; there's no option for that.
 
 ## Learn more
 
+Once installed, `man peekexec` covers everything about using it, including
+troubleshooting.
+
 | Read this | For |
 |---|---|
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What holds against whom, in detail, and why |
@@ -199,7 +206,10 @@ cargo test --workspace --features peekexecd/test-approver   # includes end-to-en
 cargo test -p peekexecd -- --ignored pam                    # real PAM (may count toward lockout)
 ```
 
-`dev/wayland-vm/README.md` sets up the Ubuntu 24.04 test VM.
+`dev/wayland-vm/README.md` sets up the Ubuntu 24.04 test VM. To change the man
+page, edit `crates/peekexec/src/manual.md` and run `scripts/gen-cli-doc.sh`: its
+commands, options and exit codes come from the code, and a test fails if the
+page goes stale.
 
 ## License
 

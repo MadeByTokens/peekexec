@@ -1,6 +1,6 @@
 #!/bin/sh
 # shellcheck disable=SC2016  # backticks below are literal Markdown
-# Regenerate docs/cli.md from the binary's own help output.
+# Regenerate docs/cli.md and the man page from the binary's own help output.
 set -eu
 cd "$(dirname "$0")/.."
 cargo build -q -p peekexec
@@ -15,3 +15,4 @@ bin=target/debug/peekexec
   "$bin" help agents
   printf '```\n\n## `--json` output\n\nSee `peekexec help schema` for the full JSON Schema.\n'
 } > docs/cli.md
+"$bin" help man > packaging/man/peekexec.1

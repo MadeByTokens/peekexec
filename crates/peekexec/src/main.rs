@@ -12,6 +12,7 @@ use peekexec_proto::view::Shown;
 use peekexec_proto::{wire, ClientMsg, PreviewReply, Response, Status};
 
 mod help;
+mod man;
 
 #[derive(Parser)]
 #[command(
@@ -70,7 +71,7 @@ enum Cmd {
     },
     /// End your agent session's registration
     Unregister,
-    /// More help: `agents` (guide for automated callers) or `schema` (JSON Schema of --json output)
+    /// More help: `agents` (guide for automated callers), `schema` (JSON Schema of --json output) or `man` (the man page, as roff)
     Help { topic: Option<Topic> },
 }
 
@@ -88,6 +89,7 @@ enum ActionCmd {
 enum Topic {
     Agents,
     Schema,
+    Man,
 }
 
 #[derive(Args)]
@@ -558,6 +560,12 @@ fn main() -> ExitCode {
                 .after_help(help::after_help())
                 .print_long_help()
                 .ok();
+            ExitCode::SUCCESS
+        }
+        Cmd::Help {
+            topic: Some(Topic::Man),
+        } => {
+            print!("{}", man::render(&Cli::command()));
             ExitCode::SUCCESS
         }
         Cmd::Help {
