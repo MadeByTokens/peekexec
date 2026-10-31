@@ -53,6 +53,16 @@ const ADMIN_GROUPS: &[&str] = &["sudo", "wheel", "admin"];
 const SELF_EXE: &str = "/proc/self/exe";
 /// Requests a user may have waiting at once; more are refused.
 const MAX_PENDING_PER_USER: usize = 3;
+/// Finished requests kept per user, by number and by the text they hold.
+/// The oldest go first. An unbounded table is worse than the queue limits it
+/// sits next to: running out of memory ends the commands that are running.
+const MAX_KEPT_PER_USER: usize = 32;
+const MAX_KEPT_BYTES_PER_USER: usize = 64 * 1024 * 1024;
+/// How long an error kept for `wait` may be. Errors may echo what was sent.
+const MAX_KEPT_ERROR: usize = 4096;
+/// Results hold what root printed: they go when they expire, whether or not
+/// anyone connects.
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
 /// A request within this long of the one a user saw before is compared
 /// with it.
 const COMPARE_WINDOW: Duration = Duration::from_secs(600);
@@ -114,6 +124,18 @@ impl Entry {
         *self.result.lock().unwrap() = Some(r);
         *self.finished.lock().unwrap() = Some(Instant::now());
         self.done.notify_all();
+    }
+
+    /// The bytes of text the result holds; `None` while pending.
+    fn kept_bytes(&self) -> Option<usize> {
+        let result = self.result.lock().unwrap();
+        result.as_ref().map(|r| {
+            [&r.stdout, &r.stderr, &r.error, &r.deny_reason]
+                .into_iter()
+                .flatten()
+                .map(String::len)
+                .sum()
+        })
     }
 
     /// Finished more than [`RESULT_TTL`] ago; a pending one never expires.
@@ -181,6 +203,15 @@ impl Daemon {
                 ""
             }
         );
+        let sweeper = Arc::clone(&self);
+        let swept = std::thread::Builder::new().spawn(move || loop {
+            std::thread::sleep(SWEEP_EVERY);
+            let mut requests = sweeper.requests.lock().unwrap();
+            requests.retain(|_, e| !e.expired());
+        });
+        if let Err(e) = swept {
+            eprintln!("peekexecd: results expire only as requests arrive: {e}");
+        }
         for conn in listener.incoming() {
             match conn {
                 Ok(conn) => {
@@ -273,7 +304,7 @@ impl Daemon {
                 return;
             }
             ClientMsg::Run { request } => {
-                let (_, entry) = self.start(peer, request);
+                let (id, entry) = self.start(peer, request);
                 // The client hanging up (Ctrl-C) withdraws the request.
                 let watched = Arc::clone(&entry);
                 watcher = std::thread::Builder::new()
@@ -282,7 +313,13 @@ impl Daemon {
                         watched.cancel.store(true, Ordering::SeqCst);
                     })
                     .ok();
-                entry.wait(None).expect("waits until finished")
+                let response = entry.wait(None).expect("waits until finished");
+                // The answer goes on this connection: nothing keeps root's
+                // output in memory after it.
+                if let Some(id) = id {
+                    self.requests.lock().unwrap().remove(&id);
+                }
+                response
             }
             ClientMsg::Submit { request } => {
                 match self.start(peer, request) {
@@ -347,7 +384,33 @@ impl Daemon {
     fn lookup(&self, id: &str, uid: u32) -> Option<Arc<Entry>> {
         // Other users' requests are reported as nonexistent.
         let requests = self.requests.lock().unwrap();
-        requests.get(id).filter(|e| e.owner == uid).cloned()
+        requests
+            .get(id)
+            .filter(|e| e.owner == uid && !e.expired())
+            .cloned()
+    }
+
+    /// Drop this user's oldest finished requests past the limits.
+    fn trim_kept(requests: &mut HashMap<String, Arc<Entry>>, uid: u32) {
+        let mut kept: Vec<(Instant, usize, String)> = requests
+            .iter()
+            .filter(|(_, e)| e.owner == uid)
+            .filter_map(|(id, e)| {
+                let at = (*e.finished.lock().unwrap())?;
+                Some((at, e.kept_bytes().unwrap_or(0), id.clone()))
+            })
+            .collect();
+        kept.sort();
+        let mut bytes: usize = kept.iter().map(|k| k.1).sum();
+        let mut left = kept.len();
+        for (_, size, id) in kept {
+            if left <= MAX_KEPT_PER_USER && bytes <= MAX_KEPT_BYTES_PER_USER {
+                break;
+            }
+            requests.remove(&id);
+            left -= 1;
+            bytes -= size;
+        }
     }
 
     /// The id is `None` for a request refused at once, which is not kept.
@@ -363,6 +426,7 @@ impl Daemon {
         {
             let mut requests = self.requests.lock().unwrap();
             requests.retain(|_, e| !e.expired());
+            Self::trim_kept(&mut requests, peer.uid);
             let pending = requests
                 .values()
                 .filter(|e| e.owner == peer.uid && e.result.lock().unwrap().is_none())
@@ -386,8 +450,14 @@ impl Daemon {
         let worker_entry = Arc::clone(&entry);
         let worker_id = id.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
-            let response = d.process(&peer, &request, &worker_id, &worker_entry.cancel);
+            let mut response = d.process(&peer, &request, &worker_id, &worker_entry.cancel);
             audit(&peer, &request, &worker_id, &response);
+            if let Some(error) = &mut response.error {
+                if let Some((end, _)) = error.char_indices().nth(MAX_KEPT_ERROR) {
+                    error.truncate(end);
+                    error.push('…');
+                }
+            }
             worker_entry.finish(response);
         });
         if let Err(e) = spawned {
@@ -1757,5 +1827,34 @@ mod tests {
             "no comparison with the request actually shown; notes {:?}",
             v.notes
         );
+    }
+
+    #[test]
+    fn kept_results_are_bounded_oldest_first() {
+        let entry = |at_secs: u64, text: usize| {
+            let e = Arc::new(Entry {
+                owner: 1000,
+                finished: Mutex::new(None),
+                cancel: AtomicBool::new(false),
+                result: Mutex::new(None),
+                done: Condvar::new(),
+            });
+            e.finish(Response::error("x".repeat(text)));
+            *e.finished.lock().unwrap() = Instant::now().checked_sub(Duration::from_secs(at_secs));
+            e
+        };
+        let mut t: HashMap<String, Arc<Entry>> = HashMap::new();
+        for i in 0..(MAX_KEPT_PER_USER as u64 + 5) {
+            t.insert(format!("r-{i}"), entry(1000 - i, 1));
+        }
+        Daemon::trim_kept(&mut t, 1000);
+        assert_eq!(t.len(), MAX_KEPT_PER_USER);
+        assert!(!t.contains_key("r-0") && t.contains_key("r-36"));
+
+        let mut t: HashMap<String, Arc<Entry>> = HashMap::new();
+        t.insert("old".into(), entry(50, MAX_KEPT_BYTES_PER_USER));
+        t.insert("new".into(), entry(10, 1024));
+        Daemon::trim_kept(&mut t, 1000);
+        assert!(t.contains_key("new") && !t.contains_key("old"));
     }
 }

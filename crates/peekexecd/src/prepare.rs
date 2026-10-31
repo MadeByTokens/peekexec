@@ -777,7 +777,10 @@ fn validate(req: &Request) -> Result<(), String> {
     }
     for path in req.write.iter().flatten() {
         if !path.starts_with('/') {
-            return Err(format!("--write path must be absolute: {path}"));
+            return Err(format!(
+                "--write path must be absolute: {}",
+                display_line(path, 200)
+            ));
         }
         if !plain(path) {
             return Err(format!(

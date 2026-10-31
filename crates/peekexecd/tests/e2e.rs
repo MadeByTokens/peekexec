@@ -680,3 +680,42 @@ fn an_id_the_daemon_does_not_hold_is_unknown() {
     assert_eq!(r.status, Status::Unknown, "{r:?}");
     assert!(r.error.unwrap().contains("may have run"));
 }
+
+fn rss_kib(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .unwrap()
+        .trim()
+        .trim_end_matches(" kB")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+// Requests refused in validation, one at a time: what the daemon keeps must
+// not grow with their size. 200 x 1 MiB of echoed path.
+#[test]
+fn refused_requests_do_not_hold_their_text() {
+    let d = Daemon::start("approve");
+    let before = rss_kib(d.child.id());
+    let path = "x".repeat(1 << 20);
+    let mut one = None;
+    for _ in 0..200 {
+        let mut request = sh("true");
+        request.write = Some(vec![path.clone()]);
+        let p = d.send(&ClientMsg::Submit { request });
+        let id = p.request_id.expect("kept: it has an id");
+        let r = d.send(&ClientMsg::Wait {
+            id,
+            timeout_secs: Some(5),
+        });
+        assert_eq!(r.status, Status::Error, "{r:?}");
+        one = r.error.map(|e| e.len());
+    }
+    let after = rss_kib(d.child.id());
+    let grown = after.saturating_sub(before);
+    eprintln!("rss {before} -> {after} kB; one error is {one:?} bytes");
+    assert!(grown < 32 * 1024, "grew {grown} kB, error length {one:?}");
+}
