@@ -431,6 +431,22 @@ Sources for what each group gives are in the README, under
 
 - **The working directory's contents are not shown.** Running in a directory
   the user owns is flagged for this reason.
+- **A file named in a command is not shown.** Each path an argument or a
+  script names is checked, as the user, for whether programs of the user's
+  could change it after approval: any part of the path as written, any link
+  followed, or any directory of the target that the user owns or may write
+  (the kernel's `access`, groups and ACLs counted), a mount made for a user
+  (nosuid, not a kernel filesystem), or the directory udisks mounts the
+  user's media in (`/media/NAME`, `/run/media/NAME`, where the user can
+  mount an image after approval), gets a note (`trust::check_named`,
+  `trust::yours`). A process of the user's by number (`/proc/PID/fd/3`,
+  `environ`) is the user's; the reader's own `/proc/self/...` (and
+  `/proc/net`, `/proc/mounts`), written without `..` and not through
+  `root`, `cwd` or `fd`, is root's when root reads it, and is not flagged.
+  For an image a command only reads (`dd if=`), that is
+  expected; for a file root runs, `peekexec script` shows it. A device node
+  is judged by its directories. Bare names are covered only by the warning
+  about a working directory root does not control.
 - **`/dev/sdb` says nothing about which disk it is.** Every block device a
   request names (an argument, an option value such as `of=`, a word of a
   script) is described by the inspection helper, as the user, from sysfs
@@ -439,9 +455,20 @@ Sources for what each group gives are in the README, under
   One in use is a note, so it takes a click; one not in use is a counted line
   under the command (`crate::blockdev`). The line starts with the kernel's
   `/dev` name and facts; the name the request used comes last, plain and
-  cut. Bare words count too, relative to the working directory (`--cwd /dev`
-  with `sda`, `of=sda`). The model is the device's own claim, shown in quotes
-  and reduced to plain characters. A disk named by a computation (a script's
+  cut. In arguments, bare words count too, relative to the working directory
+  (`--cwd /dev` with `sda`, `of=sda`), and so do the words of an argument
+  that is code (`sh -c "dd of=sda1"`); in a script's text only absolute,
+  `./` and `../` paths do, and a glob (`/dev/sd?`) is not described. The model is the device's own claim, shown in quotes
+  and reduced to plain characters. Names under `/dev/disk/by-label`,
+  `by-uuid` and `by-part*` follow disk content, so the user can attach an
+  image with another disk's label and detach it after approval, and a link
+  of the user's can be re-pointed: each name that led to a disk is bound to
+  it (`major:minor`), and just before running, root checks every one again
+  and refuses to run if any now leads elsewhere (`blockdev::same_disks`,
+  rule 2). "In use" means mounted, swap, or held by LVM, RAID or crypt as
+  this system sees it; a disk open in a VM, a ZFS pool member, the second
+  disk of a btrfs volume or a mount in another namespace is not seen. A
+  disk named by a computation (a script's
   `/dev/sd$x`) is not described. Like the other notes, the description is the
   helper's answer and is not re-checked by root (rule 1: root re-checks what
   it acts on, and doing this as root would mean looking up requester paths).
@@ -468,7 +495,11 @@ Sources for what each group gives are in the README, under
   at most 16 words and 1024 bytes, no argument holding spaces or shell
   syntax, only when there is nothing to warn about (naming a path the user
   cannot read without root is a warning: `cat /etc/gshadow`, `head -c 512
-  /dev/sda`, `ls /root`; what lies below a readable directory is not looked
+  /dev/sda`, `ls /root`, and under `/proc` anything but a short list that
+  shows every reader the same (`cpuinfo`, `partitions`, `mtd`, `bus/`,
+  `sys/`...) and the reader's own `/proc/self`: `/proc/kallsyms`,
+  `/proc/net/unix` or another process's `maps` show root more than the
+  user; what lies below a readable directory is not looked
   at, so walks and lists of names read from a file take a click: `ls -R`,
   `--recursive` (or any prefix getopt accepts), `--files0-from`, and `du`
   unless its options are an exact list that only totals, `du -sh`), and only

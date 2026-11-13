@@ -55,7 +55,7 @@ SEE ALSO
 .RE
 .PP
 .SH "THE APPROVAL WINDOW"
-It opens large, about 85% of your screen and centred, and you can resize, move or leave it like any window. Warnings come first, in a box that says how many there are; on a small screen the box scrolls, and the bottom of the window repeats the count.
+It opens large, about 85% of your screen (at most 1500 points wide) and centred, and you can resize, move or leave it like any window. Warnings come right after who is asking, in a box that says how many there are; on a small screen that top part scrolls, and the bottom of the window repeats the count.
 .PP
 .SS "What it shows"
 .IP \(bu 2
@@ -69,7 +69,7 @@ The reason given, labelled "unverified" because it is only a claim.
 .IP \(bu 2
 Warnings, such as a file that could make root run something later, or a request that arrived right after another.
 .IP \(bu 2
-Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning, so it takes a click.
+Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click unless you could read it yourself (members of \fBdisk\fR). A disk named as \fB/dev/disk/by\-label/...\fR or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
 .PP
 .SS "Formatted and Raw"
 Formatted adds line breaks and indentation so that a long \fBsh \-c\fR command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.
@@ -89,7 +89,7 @@ Pressing Enter approves a request only if it is simple enough to judge at a glan
 .PP
 Enter works only if all of this is true:
 .IP \(bu 2
-It is a single \fBpeekexec run\fR of a program that only reads and reports, such as \fBls\fR, \fBcat\fR, \fBid\fR, \fBuname\fR or \fBdf\fR, or one of a few everyday commands, such as \fBsystemctl status\fR, \fBsystemctl daemon\-reload\fR, \fBudevadm trigger\fR or \fBudevadm control \-\-reload\-rules\fR (the last three change system settings, but only by reloading them).
+It is a single \fBpeekexec run\fR of a program that only reads and reports, such as \fBls\fR, \fBcat\fR, \fBid\fR, \fBuname\fR or \fBdf\fR, or one of a few everyday commands, such as \fBsystemctl status\fR, \fBsystemctl daemon\-reload\fR, \fBudevadm trigger\fR or \fBudevadm control \-\-reload\-rules\fR (the last three re\-apply system settings; \fBudevadm trigger\fR replays device events, so rules run again).
 .IP \(bu 2
 It has at most 16 words, and no argument holds spaces or shell syntax.
 .IP \(bu 2
@@ -109,11 +109,11 @@ peekexec only asks for your password somewhere it trusts, so it refuses setups i
 .IP \(bu 2
 \fBX11 started by GDM\fR (tested with GNOME; other desktops on GDM's X11 pass the same check, but are untested): everything happens in peekexec's window.
 .IP \(bu 2
-\fBGNOME on Wayland with ptrace_scope 0\fR: refused until you set the sysctl \fBkernel.yama.ptrace_scope\fR to 1, because your own programs could attach to GNOME Shell.
+\fBGNOME on Wayland with ptrace_scope 0\fR: refused until you set the sysctl \fBkernel.yama.ptrace_scope\fR to 1, because your own programs could attach to GNOME Shell (unless it makes itself non\-dumpable, which it normally does not).
 .IP \(bu 2
 \fBOther Wayland desktops, X11 with another login manager, startx\fR: refused.
 .IP \(bu 2
-\fBSSH, no desktop, containers, WSL\fR: refused. A person must be at a local desktop. One exception: if you are also logged in at an X11 desktop, a request sent over SSH opens its window there, and is approved there.
+\fBSSH, no desktop, containers, WSL\fR: refused. A person must be at a local desktop. One exception: if you are also logged in at an X11 desktop started by GDM, a request sent over SSH opens its window there, and is approved there.
 .PP
 An administrator can allow the refused desktops by starting the daemon with \fB\-\-allow\-unverified\-display\fR. Your password then goes into a window that another program may be able to read.
 .PP
@@ -395,8 +395,9 @@ GUIDE FOR AUTOMATED CALLERS
      TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.
    \- Files a command reads while running (e.g. `cp ./x /etc/`) are NOT shown to
      the human and could change after approval; use `peekexec install` instead.
-     For an image the command only reads (`dd if=`, `flashrom \-w`), that is
-     expected: the human sees a note, and may want its sha256 from you.
+     For an image the command only reads (`dd if=/home/me/fw.img`, `flashrom
+     \-w /home/me/fw.bin`), that is expected: the human sees a note, and may
+     want its sha256 from you.
      Commands run in / (relative paths resolve there) unless you pass \-\-cwd DIR;
      a DIR you own is flagged to the human, because programs load code from it.
    \- Where peekexec cannot verify its own window (Wayland), the human approves
@@ -426,10 +427,12 @@ GUIDE FOR AUTOMATED CALLERS
     Everything else takes a click: scripts, installs, `sh \-c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh \-c`: it costs the human a click and a closer read.
-    "enter_approves" in preview's view says which applies. A disk that is in
-    use (mounted, swap, LVM) also takes a click. Name disks by
-    /dev/disk/by\-id/...: unlike /dev/sdX, that name does not change between
-    boots or when a device is plugged in again.
+    "enter_approves" in preview's view says which applies. Naming a disk
+    takes a click unless the user can read it, and one in use (mounted, swap,
+    LVM) is a warning. Name disks by /dev/disk/by\-id/...: unlike /dev/sdX,
+    that name does not change between boots or when a device is plugged in
+    again. If a disk name leads elsewhere by the time the command runs, it
+    does not run ("no longer leads to the disk that was shown").
 .fi
 .RE
 .PP

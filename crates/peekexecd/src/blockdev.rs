@@ -40,9 +40,24 @@ pub struct System<'a> {
     pub swaps: &'a [String],
 }
 
+/// A name a request uses for a disk, and the device it led to when shown
+/// (`major:minor`). Names under `/dev/disk/by-label` and the like follow
+/// disk content, and a link of the user's can be re-pointed: root checks
+/// each name again just before running ([`same_disks`]).
+pub type Bound = (String, String);
+
 /// Every block device among `paths` (relative ones from `cwd`), each once.
 #[cfg(target_os = "linux")]
 pub fn describe(paths: impl Iterator<Item = String>, cwd: &str) -> Vec<Device> {
+    describe_and_bind(paths, cwd).0
+}
+
+/// [`describe`], and every name that led to a block device, bound to it.
+#[cfg(target_os = "linux")]
+pub fn describe_and_bind(
+    paths: impl Iterator<Item = String>,
+    cwd: &str,
+) -> (Vec<Device>, Vec<Bound>) {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let block = |p: &Path| {
         std::fs::metadata(p)
@@ -65,6 +80,7 @@ pub fn describe(paths: impl Iterator<Item = String>, cwd: &str) -> Vec<Device> {
     };
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    let mut bound = Vec::new();
     let mut more = 0;
     // Every word, not only those with a `/`: `--cwd /dev` makes `sda` a
     // disk. And the value of `key=value` (`dd of=sda`).
@@ -85,9 +101,11 @@ pub fn describe(paths: impl Iterator<Item = String>, cwd: &str) -> Vec<Device> {
             break;
         }
         checked.insert(p.clone());
-        let Some(mm) = block(&Path::new(cwd).join(&p)) else {
+        let at = Path::new(cwd).join(&p);
+        let Some(mm) = block(&at) else {
             continue;
         };
+        bound.push((at.to_string_lossy().into_owned(), mm.clone()));
         if !seen.insert(mm.clone()) {
             continue;
         }
@@ -112,7 +130,41 @@ pub fn describe(paths: impl Iterator<Item = String>, cwd: &str) -> Vec<Device> {
             in_use: true,
         });
     }
-    out
+    (out, bound)
+}
+
+/// Just before running, as root (after approval, so rule 1 allows it):
+/// each name still leads to the device the human was shown, or nothing
+/// runs. A disk attached with another's label, then detached, would
+/// otherwise move `/dev/disk/by-label/X` from the decoy shown to the disk
+/// written.
+#[cfg(target_os = "linux")]
+pub fn same_disks(bound: &[Bound]) -> Result<(), String> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    for (name, was) in bound {
+        let now = std::fs::metadata(name)
+            .ok()
+            .filter(|m| m.file_type().is_block_device())
+            .map(|m| majmin(m.rdev()));
+        if now.as_deref() != Some(was.as_str()) {
+            // What root sees now stays in the journal: the requester learns
+            // only that the name moved.
+            eprintln!(
+                "peekexecd: disk name {name:?} moved since it was shown: was {was}, now {}",
+                now.as_deref().unwrap_or("none")
+            );
+            return Err(format!(
+                "not run: {} no longer leads to the disk that was shown",
+                clean_path(name)
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn same_disks(_: &[Bound]) -> Result<(), String> {
+    Ok(())
 }
 
 /// Distinct words checked for a disk (one `stat` each, inside the
@@ -122,6 +174,11 @@ pub const MAX_WORDS_CHECKED: usize = 1000;
 #[cfg(not(target_os = "linux"))]
 pub fn describe(_: impl Iterator<Item = String>, _: &str) -> Vec<Device> {
     Vec::new()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn describe_and_bind(_: impl Iterator<Item = String>, _: &str) -> (Vec<Device>, Vec<Bound>) {
+    (Vec::new(), Vec::new())
 }
 
 /// `major:minor` of a Linux `dev_t` (glibc's encoding).
@@ -354,7 +411,7 @@ fn clean(s: &str) -> String {
 }
 
 /// A path the request gave, made plain like [`clean`] but uncut here.
-fn clean_path(s: &str) -> String {
+pub fn clean_path(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || "._-/:+@".contains(c) {
@@ -619,6 +676,48 @@ mod tests {
                 .any(|d| d.in_use && d.text.contains("were not looked for")),
             "{out:?}"
         );
+    }
+
+    // A name re-pointed after it was shown (a udev name that follows disk
+    // content, or a link of the user's): nothing runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_name_that_moved_to_another_disk_stops_the_run() {
+        let disks: Vec<String> = std::fs::read_dir("/sys/block")
+            .map(|d| {
+                d.flatten()
+                    .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+                    .filter(|n| Path::new(n).exists())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(first) = disks.first() else {
+            eprintln!("skipped: no block device");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("pe-bound-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("disk");
+        std::os::unix::fs::symlink(first, &link).unwrap();
+        let (_, bound) = describe_and_bind(std::iter::once(link.display().to_string()), "/");
+        assert_eq!(bound.len(), 1, "{bound:?}");
+        assert!(same_disks(&bound).is_ok());
+        // Re-pointed at another disk, or at something that is no disk.
+        fs::remove_file(&link).unwrap();
+        let other = disks.get(1).map(String::as_str).unwrap_or("/dev/null");
+        std::os::unix::fs::symlink(other, &link).unwrap();
+        let e = same_disks(&bound).unwrap_err();
+        assert!(
+            e.contains("no longer leads to the disk that was shown"),
+            "{e}"
+        );
+        fs::remove_file(&link).unwrap();
+        assert!(same_disks(&bound).is_err(), "gone is not the same either");
+        fs::remove_dir_all(&dir).unwrap();
+        // Every name is bound, not only the first one per disk.
+        let twice = [first.clone(), format!("/dev/./{}", &first[5..])];
+        let (_, bound) = describe_and_bind(twice.into_iter(), "/");
+        assert_eq!(bound.len(), 2, "{bound:?}");
     }
 
     #[test]

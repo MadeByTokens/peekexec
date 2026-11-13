@@ -853,6 +853,7 @@ impl Daemon {
             exec: Execution::Nothing,
             enforced,
             snapshot_dir: None,
+            disks: Vec::new(),
         };
         let decision = {
             let _one_at_a_time = self.prompt_lock.lock().unwrap();
@@ -1191,14 +1192,12 @@ impl Daemon {
     }
 
     fn run_prepared(&self, prepared: &Prepared, id: &str, base: Response) -> Response {
+        let ready = ready_to_run(&prepared.exec, &prepared.disks);
         let outcome = match &prepared.exec {
-            Execution::Command(plan) => still_root_controlled(Path::new(&plan.program))
+            Execution::Command(plan) => ready
                 .map_err(exec::Failure::NotStarted)
                 .and_then(|()| exec::run(self.platform.sandbox.as_ref(), plan)),
-            Execution::Install { dest, content } => dest
-                .parent()
-                .ok_or_else(|| "destination has no parent".to_string())
-                .and_then(still_root_controlled)
+            Execution::Install { dest, content } => ready
                 .and_then(|()| exec::install(dest, content, id))
                 .map_err(exec::Failure::NotStarted),
             Execution::Nothing => Ok(exec::Outcome {
@@ -1648,6 +1647,21 @@ fn runs(exec: &Execution) -> String {
 
 /// Checked when the request was prepared, which may have been minutes ago,
 /// behind other requests that ran as root. As root now, it may look anywhere.
+/// What is checked again just before running, after approval: the program
+/// or install directory is still root-controlled, and every name for a
+/// disk still leads to the disk shown.
+fn ready_to_run(exec: &Execution, disks: &[crate::blockdev::Bound]) -> Result<(), String> {
+    match exec {
+        Execution::Command(plan) => still_root_controlled(Path::new(&plan.program))
+            .and_then(|()| crate::blockdev::same_disks(disks)),
+        Execution::Install { dest, .. } => dest
+            .parent()
+            .ok_or_else(|| "destination has no parent".to_string())
+            .and_then(still_root_controlled),
+        Execution::Nothing => Ok(()),
+    }
+}
+
 fn still_root_controlled(path: &Path) -> Result<(), String> {
     trust::check(path, &trust::trusted_owners())
         .map(|_| ())
@@ -1741,6 +1755,31 @@ mod tests {
             ancestry: vec![],
             pinned: true,
         }
+    }
+
+    // A disk name that moved between showing and running stops the run.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_disk_name_that_moved_stops_the_run() {
+        let plan = crate::platform::ExecPlan {
+            program: "/bin/true".into(),
+            argv: vec!["true".into()],
+            env: Default::default(),
+            cwd: "/".into(),
+            cwd_fd: None,
+            write: None,
+            no_net: false,
+            audit_uid: None,
+        };
+        let exec = Execution::Command(plan);
+        let program_ok = ready_to_run(&exec, &[]);
+        if program_ok.is_err() {
+            eprintln!("skipped: /bin/true is not root-controlled here: {program_ok:?}");
+            return;
+        }
+        let moved = [("/dev/null".to_string(), "999:999".to_string())];
+        let e = ready_to_run(&exec, &moved).unwrap_err();
+        assert!(e.contains("no longer leads to the disk"), "{e}");
     }
 
     fn view(lines: usize) -> PromptView {

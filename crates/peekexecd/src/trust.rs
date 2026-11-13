@@ -116,6 +116,23 @@ pub type MayChange<'a> = &'a dyn Fn(&Path, &std::fs::Metadata) -> bool;
 pub fn yours(p: &Path, m: &std::fs::Metadata) -> bool {
     m.uid() == nix::unistd::getuid().as_raw()
         || nix::unistd::access(p, nix::unistd::AccessFlags::W_OK).is_ok()
+        || mounts_for_you(p)
+}
+
+/// Where udisks mounts the user's media (`/media/NAME`, `/run/media/NAME`):
+/// root-owned, but the user can mount an image of their own there at any
+/// time (polkit allows it for the active session), so a name below it
+/// that does not exist yet can after approval.
+fn mounts_for_you(p: &Path) -> bool {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        nix::unistd::User::from_uid(nix::unistd::getuid())
+            .ok()
+            .flatten()
+            .map(|u| u.name)
+    });
+    name.as_deref()
+        .is_some_and(|n| p == Path::new("/media").join(n) || p == Path::new("/run/media").join(n))
 }
 
 /// Whether `may` could change what `path` names, as the program will look
@@ -125,7 +142,37 @@ pub fn yours(p: &Path, m: &std::fs::Metadata) -> bool {
 /// filesystem). A missing file counts by its directories, so one the user
 /// may create later counts too. `Err` says why.
 pub fn check_named(path: &Path, may: MayChange) -> Result<(), String> {
+    if readers_own(path) {
+        return Ok(());
+    }
     check_named_from(path, may, 0)
+}
+
+/// `/proc/self` and what leads there (`/proc/net`, `/proc/mounts`), as
+/// written without `..`: whoever opens it gets its own entry. The command
+/// running as root reads root's own, not the user's, whatever the helper
+/// resolving it as the user would see. A process of the user's, by number
+/// (`/proc/PID/fd/3`, `environ`), is the user's to change, and stays so.
+fn readers_own(path: &Path) -> bool {
+    use std::path::Component;
+    if path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    let p = path.to_string_lossy();
+    // Entries that lead on to other files (`/proc/self/root/tmp/x` is
+    // `/tmp/x`, `cwd/...` the command's directory) are judged where they
+    // lead, as the path note always did.
+    const LEADS_ON: &[&str] = &["root", "cwd", "fd", "map_files", "exe", "task"];
+    let own = |base: &str| {
+        p.strip_prefix(base)
+            .and_then(|r| r.strip_prefix('/'))
+            .is_some_and(|r| !LEADS_ON.contains(&r.split('/').next().unwrap_or("")))
+    };
+    own("/proc/self")
+        || own("/proc/thread-self")
+        || p == "/proc/net"
+        || p.starts_with("/proc/net/")
+        || p == "/proc/mounts"
 }
 
 /// As many links as the kernel follows in one lookup (`MAXSYMLINKS`).
@@ -163,6 +210,12 @@ fn check_named_from(path: &Path, may: MayChange, links: u32) -> Result<(), Strin
                     ));
                 }
                 named_chain(p, may)?;
+            }
+            // Missing: judged by the directories above it, except where
+            // udisks mounts the user's media, which it creates on the
+            // first mount.
+            Err(_) if mounts_for_you(p) => {
+                return Err(format!("{} is where your media is mounted", p.display()));
             }
             Err(_) => {}
         }
@@ -454,6 +507,35 @@ mod tests {
         std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(r.is_err(), "{r:?}");
         assert!(check_named(Path::new("/etc/hostname"), &yours).is_ok());
+        // The reader's own /proc entry is root's when root reads it; a
+        // process of the user's, by number, is the user's.
+        assert!(check_named(Path::new("/proc/self/status"), &yours).is_ok());
+        assert!(check_named(Path::new("/proc/net/unix"), &yours).is_ok());
+        let mine = format!("/proc/{}/fd/0", std::process::id());
+        assert!(check_named(Path::new(&mine), &yours).is_err(), "{mine}");
+        let back = format!("/proc/self/../{}/environ", std::process::id());
+        assert!(check_named(Path::new(&back), &yours).is_err(), "{back}");
+        let run = format!("/run/user/{}", nix::unistd::getuid());
+        if Path::new(&run).exists() {
+            assert!(check_named(Path::new(&run), &yours).is_err());
+        }
+        // udisks mounts the user's media here: a missing name below counts.
+        let me = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .unwrap()
+            .unwrap()
+            .name;
+        let root = std::fs::metadata("/").unwrap();
+        for base in ["/media", "/run/media"] {
+            assert!(yours(&Path::new(base).join(&me), &root), "{base}");
+            assert!(!yours(&Path::new(base).join("someone-else-zz"), &root));
+        }
+        // Even before udisks has made the directory.
+        for base in ["/media", "/run/media"] {
+            let dir = Path::new(base).join(&me);
+            if !dir.exists() {
+                assert!(check_named(&dir.join("STICK/run.sh"), &yours).is_err());
+            }
+        }
         for p in ["/etc/resolv.conf", "/run/utmp"] {
             let p = Path::new(p);
             let writable = nix::unistd::access(p, nix::unistd::AccessFlags::W_OK).is_ok();
@@ -543,5 +625,21 @@ mod tests {
         let by_fd = check_dir(&f, "d", &owners).unwrap_err();
         assert!(by_fd.contains("a directory above d is writable"), "{by_fd}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // BYPASS (throwaway): a missing name under the user's udisks mount base is
+    // not flagged, yet `udisksctl loop-setup` + `mount` (allow_active=yes)
+    // makes it a file of the user's after approval.
+    #[test]
+    fn bypass_udisks_mount_base_not_flagged() {
+        let user = std::env::var("USER").unwrap();
+        let base = format!("/media/{user}");
+        if !Path::new(&base).exists() {
+            return;
+        }
+        let p = format!("{base}/PEBYPASS/setup.sh");
+        let r = check_named(Path::new(&p), &yours);
+        eprintln!("{p}: {r:?}");
+        assert!(r.is_err(), "not flagged: {p}");
     }
 }

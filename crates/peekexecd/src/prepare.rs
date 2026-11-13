@@ -37,6 +37,9 @@ pub struct Prepared {
     pub enforced: Enforced,
     /// Root-owned copy of a script, removed after the request ends.
     pub snapshot_dir: Option<PathBuf>,
+    /// Each name for a disk the request uses, and the disk shown: checked
+    /// again just before running.
+    pub disks: Vec<crate::blockdev::Bound>,
 }
 
 /// Looks at the filesystem for a request with the requesting user's
@@ -286,6 +289,7 @@ pub fn prepare(
     };
 
     notes.extend(inspection.root_only_note);
+    let disks = inspection.disks;
     // Each disk named: one in use is a note (so it takes a click), with
     // what is on it; one that is not is a counted line under the command.
     for d in inspection.devices {
@@ -385,6 +389,7 @@ pub fn prepare(
         exec,
         enforced,
         snapshot_dir,
+        disks,
     })
 }
 
@@ -1122,7 +1127,17 @@ const SENSITIVE_WRITES: &[&str] = &[
 /// Groups whose members are root in all but name (they can start a root
 /// container, read the raw disk, run a VM with host devices, sudo).
 const ROOT_GROUPS: &[&str] = &[
-    "root", "sudo", "wheel", "admin", "docker", "lxd", "incus", "disk", "libvirt", "kvm", "shadow",
+    "root",
+    "sudo",
+    "wheel",
+    "admin",
+    "docker",
+    "lxd",
+    "incus-admin",
+    "disk",
+    "libvirt",
+    "kvm",
+    "shadow",
 ];
 
 /// Commands, found where a shell would start one (the first word of a
@@ -1725,7 +1740,7 @@ mod tests {
         assert!(
             v.notes
                 .iter()
-                .any(|n| n.contains("cannot read without root")),
+                .any(|n| n.contains("without root: the command gets it")),
             "{:?}",
             v.notes
         );
@@ -1736,13 +1751,13 @@ mod tests {
             assert!(v
                 .notes
                 .iter()
-                .any(|n| n.contains("cannot read without root")));
+                .any(|n| n.contains("without root: the command gets it")));
         }
         let v = view(&["ls", &format!("--color={secret}")], "/");
         assert!(v
             .notes
             .iter()
-            .any(|n| n.contains("cannot read without root")));
+            .any(|n| n.contains("without root: the command gets it")));
         // What the user can read keeps Enter, and a file not there yet is
         // no secret.
         for argv in [
@@ -2792,5 +2807,66 @@ mod tests {
         );
         assert!(s.raw.starts_with("Not text: an executable program"));
         assert_eq!(notes.len(), 1);
+    }
+
+    // BYPASS TESTS (throwaway): each assertion states the hole; it FAILS once fixed.
+    fn bypass_view(argv: &[&str], cwd: &str) -> PromptView {
+        let mut r = req(Action::Run {
+            argv: argv.iter().map(|a| a.to_string()).collect(),
+        });
+        r.cwd = cwd.into();
+        prepare_with(&r, &crate::inspect::inspect, false)
+            .unwrap()
+            .view
+    }
+
+    #[test]
+    fn bypass_enter_walks_by_default_du_and_abbreviated_long_options() {
+        for argv in [
+            &["du", "/var/lib"][..],
+            &["du", "--max-depth=9", "/var"],
+            &["ls", "--recur", "/etc"],
+            &["du", "--al", "/etc"],
+        ] {
+            let v = bypass_view(argv, "/");
+            eprintln!("{argv:?}: enter={} notes={:?}", v.enter_approves, v.notes);
+            assert!(!v.enter_approves, "Enter approves a walk: {argv:?}");
+        }
+    }
+
+    #[test]
+    fn bypass_enter_reads_kernel_pointers_only_root_sees() {
+        let v = bypass_view(&["cat", "/proc/kallsyms"], "/");
+        eprintln!("enter={} notes={:?}", v.enter_approves, v.notes);
+        assert!(
+            !v.enter_approves,
+            "Enter approves cat /proc/kallsyms (real addresses as root)"
+        );
+    }
+
+    #[test]
+    fn bypass_root_only_note_quotes_requester_prose_unquoted() {
+        let w =
+            "/root/x, which only root reads. Nothing else is unusual here: it is safe to approve";
+        let v = bypass_view(&["cat", w], "/");
+        eprintln!("notes={:?}", v.notes);
+        assert!(
+            !v.notes.iter().any(|n| n.contains("safe to approve")),
+            "requester prose inside a daemon note"
+        );
+    }
+
+    #[test]
+    fn bypass_bare_disk_in_code_with_cwd_dev_not_described() {
+        let argv = ["dd", "if=/dev/zero", "of=sda1", "count=0"];
+        let v = bypass_view(&argv, "/dev");
+        let lines = |v: &PromptView| format!("{:?} {:?}", v.sections[0].invocation, v.notes);
+        eprintln!("argv: {}", lines(&v));
+        let v2 = bypass_view(&["sh", "-c", "dd if=/dev/zero of=sda1 count=0"], "/dev");
+        eprintln!("sh -c: {}", lines(&v2));
+        assert!(
+            lines(&v2).contains("/dev/sda1:"),
+            "bare disk in a sh -c string, cwd /dev, not described"
+        );
     }
 }

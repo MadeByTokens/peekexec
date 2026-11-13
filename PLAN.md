@@ -67,7 +67,9 @@ A sketch; the layout is in `crates/peekexec-ui/src/main.rs`.
   passes is a line of its own (`argv[i] ...`), in full.
 - **Flags:** a working directory root does not control, targets that make root
   run things later (sudoers, cron, systemd, udev, pam.d, profile, ld.so...),
-  unverified display, executables in the install.
+  unverified display, executables in the install, named files programs of
+  the user's can change, named files the user cannot read without root, and
+  each disk named (what it is, and whether it is in use).
 - **Fast path:** focus starts in the password field; for a plain `run` of a
   program that only reads and reports (an allowlist, see THREAT_MODEL.md),
   with nothing to warn about, type it and press Enter. All else takes a

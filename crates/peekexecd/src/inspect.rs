@@ -52,6 +52,10 @@ pub struct Inspection {
     /// Paths named that the user cannot read without root.
     #[serde(default)]
     pub root_only_note: Option<String>,
+    /// Each name that led to a disk, and the disk (checked again by root
+    /// just before running).
+    #[serde(default)]
+    pub disks: Vec<crate::blockdev::Bound>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,7 +134,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
         Action::Install { content, .. } => (&[], content),
     };
     let text = String::from_utf8_lossy(text);
-    let devices = crate::blockdev::describe(named_paths(args, &text), &cwd);
+    let (devices, disks) = crate::blockdev::describe_and_bind(named_paths(args, &text), &cwd);
     let root_only_note = root_only(named_paths(args, &text), &cwd);
     Ok((
         Inspection {
@@ -139,6 +143,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             facts,
             devices,
             root_only_note,
+            disks,
         },
         fd,
     ))
@@ -267,6 +272,30 @@ pub fn verify(
             }
         }
         _ => return Err("facts do not match the request".into()),
+    }
+    // Root checks each disk name again before running, so it must be one
+    // this request uses, as the helper would have joined it: only compared,
+    // no file looked at.
+    let (args, text): (&[String], &[u8]) = match &req.action {
+        Action::Run { argv } => (&argv[1..], b""),
+        Action::Script { content, args, .. } => (args, content),
+        Action::Install { content, .. } => (&[], content),
+    };
+    let text = String::from_utf8_lossy(text);
+    let used: std::collections::HashSet<String> = named_paths(args, &text)
+        .flat_map(|p| {
+            let value = p.split_once('=').map(|(_, v)| v.to_string());
+            std::iter::once(p).chain(value)
+        })
+        .map(|w| {
+            Path::new(&inspection.cwd)
+                .join(w)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    if let Some((name, _)) = inspection.disks.iter().find(|(n, _)| !used.contains(n)) {
+        return Err(format!("disk name {name:?} is not one the request uses"));
     }
     // The path shown is the kernel's name for the object held. Looking the
     // shown path up instead would follow a link swapped in between, and
@@ -750,13 +779,105 @@ fn named_in_text(text: &str) -> impl Iterator<Item = String> + '_ {
 fn named_paths<'a>(args: &'a [String], text: &'a str) -> impl Iterator<Item = String> + 'a {
     args.iter()
         .flat_map(|a| {
-            let inner = is_code(a).then(|| named_in_text(a));
+            // An argument that is code (`sh -c "dd of=sda1"`) is short and
+            // runs as it reads: each of its words counts as an argument's,
+            // bare ones too. A script's text keeps to absolute and `./`
+            // paths, as prose in its comments would otherwise count.
+            let inner = is_code(a).then(|| {
+                words(a)
+                    .flat_map(|w| {
+                        path_candidates(&w)
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            });
             path_candidates(a)
                 .into_iter()
                 .map(str::to_string)
                 .chain(inner.into_iter().flatten())
         })
         .chain(named_in_text(text))
+}
+
+/// Files anyone may open whose content may depend on who reads: under
+/// `/proc`, kernel addresses root sees and the user gets as zeros
+/// (`kptr_restrict`: `kallsyms`, `modules`, `net/unix`, a process's
+/// `stat`), another process's memory map or stack. Mode bits cannot tell,
+/// and no list of such files is complete, so under `/proc` only a short
+/// list that shows everyone the same keeps Enter (allowlists decide), and
+/// the reader's own `/proc/self`, written without `..`. Decided on the
+/// canonical path, so a link of the user's or `..` cannot dress one up.
+fn shows_root_more(path: &Path) -> bool {
+    /// Under /proc, the same for every reader: what hardware work reads.
+    const SAME_FOR_ALL: &[&str] = &[
+        "",
+        "cpuinfo",
+        "meminfo",
+        "partitions",
+        "mtd",
+        "mounts",
+        "filesystems",
+        "version",
+        "uptime",
+        "loadavg",
+        "devices",
+        "interrupts",
+        "cmdline",
+        "diskstats",
+        "swaps",
+        "stat",
+        "softirqs",
+        "misc",
+        "crypto",
+        "vmstat",
+        "zoneinfo",
+        "buddyinfo",
+        "consoles",
+        "dma",
+        "fb",
+        "net/dev",
+        "net/wireless",
+    ];
+    /// Directories whose files are the same for every reader.
+    const SAME_FOR_ALL_BELOW: &[&str] = &["bus/", "scsi/", "tty/", "driver/", "asound/", "sys/"];
+    use std::path::Component;
+    let written_plain = !path.components().any(|c| c == Component::ParentDir);
+    let named = path.to_string_lossy();
+    if written_plain
+        && (named.starts_with("/proc/self/") || named.starts_with("/proc/thread-self/"))
+    {
+        return false;
+    }
+    // /proc/mounts is a link to /proc/self/mounts: judged as written when
+    // written plainly, else by where it leads.
+    let below = |p: &str| {
+        p.strip_prefix("/proc")
+            .and_then(|r| r.strip_prefix('/').or_else(|| r.is_empty().then_some("")))
+            .map(str::to_string)
+    };
+    let same = |rel: &str| {
+        SAME_FOR_ALL.contains(&rel.trim_end_matches('/'))
+            || SAME_FOR_ALL_BELOW.iter().any(|d| rel.starts_with(d))
+    };
+    if written_plain && below(&named).is_some_and(|r| same(&r)) {
+        return false;
+    }
+    let Ok(real) = path.canonicalize() else {
+        return false;
+    };
+    below(&real.to_string_lossy()).is_some_and(|r| !same(&r))
+}
+
+/// A requester word quoted in a note: plain characters only (no spaces,
+/// commas or quotes, so it cannot read as the note's own words, as in
+/// `/root/x, which only root reads. It is safe`), and cut. The whole
+/// argument is shown, exactly, in the command's lines.
+fn plain_word(w: &str) -> String {
+    let short: String = w.chars().take(100).collect();
+    let cut = if short.len() < w.len() { "…" } else { "" };
+    format!("{}{cut}", crate::blockdev::clean_path(&short))
 }
 
 /// Paths named that exist but that the user cannot read, or cannot even
@@ -775,43 +896,55 @@ fn root_only(paths: impl Iterator<Item = String>, cwd: &str) -> Option<String> {
     });
     let mut seen = std::collections::HashSet::new();
     let mut hits = Vec::new();
+    let mut unchecked = false;
     for w in words.filter(|w| !w.is_empty()) {
-        if seen.len() == MAX_PATHS_CHECKED {
-            break;
-        }
-        if !seen.insert(w.clone()) {
+        if seen.contains(&w) {
             continue;
         }
+        if seen.len() == MAX_PATHS_CHECKED {
+            unchecked = true;
+            break;
+        }
+        seen.insert(w.clone());
         let path = Path::new(cwd).join(&w);
         if own_descriptor(&path) {
             continue;
         }
         let unreadable = match std::fs::metadata(&path) {
-            Ok(_) => nix::unistd::access(&path, nix::unistd::AccessFlags::R_OK).is_err(),
+            Ok(_) => {
+                nix::unistd::access(&path, nix::unistd::AccessFlags::R_OK).is_err()
+                    || shows_root_more(&path)
+            }
             Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
         };
         if unreadable {
             hits.push(w);
         }
     }
-    (!hits.is_empty()).then(|| {
-        let shown: Vec<String> = hits
-            .iter()
-            .take(3)
-            .map(|h| h.chars().take(100).collect())
-            .collect();
-        let more = hits.len().saturating_sub(3);
+    // Past the bound, said rather than passed: Enter goes with the note.
+    let past = if unchecked {
         format!(
-            "Names {}{}, which you cannot read without root: the command gets it as root, and \
-             what it prints comes back to the requester.",
-            shown.join(", "),
-            if more > 0 {
-                format!(" and {more} more")
-            } else {
-                String::new()
-            }
+            " This request has more than {MAX_PATHS_CHECKED} different words: those after \
+             were not checked."
         )
-    })
+    } else {
+        String::new()
+    };
+    if hits.is_empty() {
+        return unchecked.then(|| past.trim_start().to_string());
+    }
+    let shown: Vec<String> = hits.iter().take(3).map(|h| plain_word(h)).collect();
+    let more = hits.len().saturating_sub(3);
+    Some(format!(
+        "Names {}{}, which you cannot read, or not in full, without root: the command gets it \
+         as root, and what it prints comes back to the requester.{past}",
+        shown.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 /// Paths the user could change (`sh ~/x.sh`, `cp -r /tmp/d /etc/`,
@@ -848,12 +981,8 @@ fn untrusted_file_args(
             hits.push(value);
         }
     }
-    // Cut only: the whole note is escaped where the view is built.
-    let first: Vec<String> = hits
-        .iter()
-        .take(3)
-        .map(|h| h.chars().take(100).collect())
-        .collect();
+    // Made plain and cut; the whole note is escaped where the view is built.
+    let first: Vec<String> = hits.iter().take(3).map(|h| plain_word(h)).collect();
     if too_many {
         return Some(format!(
             "Names more than {MAX_PATHS_CHECKED} paths, more than peekexec checks: some may \
@@ -1053,6 +1182,74 @@ mod tests {
         }
     }
 
+    // Mode bits say anyone may read these; what root reads differs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn files_that_show_root_more_are_noted() {
+        let note = |w: &str| root_only(std::iter::once(w.to_string()), "/");
+        for w in ["/proc/kallsyms", "/proc/modules", "/proc/1/maps"] {
+            if Path::new(w).exists() && !nix::unistd::geteuid().is_root() {
+                assert!(note(w).is_some(), "{w}");
+            }
+        }
+        // Nor through `..`, nor anywhere else under /proc that is not known
+        // to show everyone the same.
+        for w in [
+            "/proc/self/../1/maps",
+            "/proc/net/unix",
+            "/proc/1/stat",
+            "/proc/1/net/tcp",
+        ] {
+            if Path::new(w).exists() && !nix::unistd::geteuid().is_root() {
+                assert!(note(w).is_some(), "{w}");
+            }
+        }
+        // The reader's own, and everyday hardware reads, are not.
+        for w in [
+            "/proc/self/maps",
+            "/proc/cpuinfo",
+            "/proc/mtd",
+            "/proc/partitions",
+            "/proc/mounts",
+            "/proc/bus/input/devices",
+            "/proc/sys/kernel/hostname",
+            "/proc",
+            "/sys/class/net/lo/address",
+        ] {
+            if Path::new(w).exists() {
+                assert!(note(w).is_none(), "{w}: {:?}", note(w));
+            }
+        }
+    }
+
+    // Past the bound, a note says so: a long request cannot hide a secret
+    // after a thousand harmless words.
+    #[test]
+    fn root_only_past_the_bound_says_so() {
+        let many = (0..=MAX_PATHS_CHECKED).map(|i| format!("w{i}"));
+        let note = root_only(many, "/").unwrap();
+        assert!(note.contains("were not checked"), "{note}");
+        let repeated = std::iter::repeat("x".to_string()).take(5000);
+        assert!(root_only(repeated, "/").is_none());
+    }
+
+    // Requester prose cannot pass for the note's own words.
+    #[test]
+    fn a_word_quoted_in_a_note_is_plain() {
+        let prose = "/root/x, which only root reads. Nothing is unusual: safe to approve";
+        let note = root_only(std::iter::once(prose.to_string()), "/");
+        if nix::unistd::geteuid().is_root() || note.is_none() {
+            eprintln!("skipped: /root is readable here");
+            return;
+        }
+        let note = note.unwrap();
+        assert!(!note.contains("only root reads. Nothing"), "{note}");
+        assert!(!note.contains(", which only"), "{note}");
+        let note =
+            untrusted_file_args(&[format!("/tmp/x, {prose}")], b"", "/", &trust::yours).unwrap();
+        assert!(!note.contains("safe to approve"), "{note}");
+    }
+
     #[test]
     fn arguments_naming_user_files_are_flagged() {
         if nix::unistd::geteuid().is_root() {
@@ -1175,8 +1372,33 @@ mod tests {
             },
             devices: Vec::new(),
             root_only_note: None,
+            disks: Vec::new(),
         };
         assert!(verify(&run, &honest, &dir_fd("/"), &owners).is_ok());
+
+        // A disk name root will stat again must be one the request uses.
+        let mut with_disk = req(
+            Action::Run {
+                argv: vec!["true".into(), "of=sda".into(), "/dev/sdb".into()],
+            },
+            "/dev",
+        );
+        with_disk.cwd = "/".into();
+        let used = Inspection {
+            disks: vec![
+                ("/sda".into(), "8:0".into()),
+                ("/of=sda".into(), "8:0".into()),
+                ("/dev/sdb".into(), "8:16".into()),
+            ],
+            ..honest.clone()
+        };
+        assert!(verify(&with_disk, &used, &dir_fd("/"), &owners).is_ok());
+        let foreign = Inspection {
+            disks: vec![("/root/.ssh/id_ed25519".into(), "8:0".into())],
+            ..honest.clone()
+        };
+        let e = verify(&with_disk, &foreign, &dir_fd("/"), &owners).unwrap_err();
+        assert!(e.contains("not one the request uses"), "{e}");
 
         // A forged program: a file the user controls.
         let dir = std::env::temp_dir().join(format!("pe-verify-{}", std::process::id()));
@@ -1341,6 +1563,7 @@ mod tests {
             },
             devices: Vec::new(),
             root_only_note: None,
+            disks: Vec::new(),
         }
     }
 

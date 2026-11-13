@@ -43,9 +43,10 @@ A window opens on your desktop, showing:
 - **Which disk is which.** Every disk the command names (`/dev/sdb`,
   `/dev/disk/by-id/...`) gets a line saying what it is: its model, size, USB or
   internal, and what's mounted on it. A disk that's in use, such as the one
-  holding `/`, gets a warning and needs a click, so a `dd of=/dev/sda` meant
-  for a USB stick stands out. The model is the device's own claim; the size
-  and the mounts come from the kernel.
+  holding `/`, gets a warning, so a `dd of=/dev/sda` meant for a USB stick
+  stands out. Naming a disk at all needs a click unless you could read it
+  yourself (members of `disk` can). The model is the device's own claim; the
+  size and the mounts come from the kernel.
 
 Then you choose:
 
@@ -56,10 +57,12 @@ Then you choose:
   "use the vendor's rules file instead".
 
 **Enter or click?** A plain read-only command such as `ls`, `id` or `df` can be
-approved with your password and Enter, as long as it reads only what you
-could read yourself. So can a few everyday ones that reload
-system settings, such as `udevadm control --reload-rules`, `udevadm trigger`
-and `systemctl daemon-reload`. Everything else needs a click on Approve:
+approved with your password and Enter, as long as every file it names is
+one you could read yourself, and it doesn't walk into directories below
+them (`ls -R`, `du` other than `du -sh`). So can a few everyday ones that
+re-apply system settings, such as `udevadm control --reload-rules`,
+`udevadm trigger` (which replays device events, so rules run again) and
+`systemctl daemon-reload`. Everything else needs a click on Approve:
 scripts, installs, `sh -c`, other commands that change the system, anything
 with a warning, and any request that arrives right after another. The bottom of the
 window says which applies. This stops typing aimed at another window from
@@ -74,10 +77,10 @@ on setups it can't check.
 |---|---|
 | **GNOME on Wayland** | Works. You read the request in peekexec's window, then type your password into GNOME's own prompt, which repeats the request. Requests must be short (see below). |
 | **X11 started by GDM** (tested with GNOME; other desktops on GDM's X11 pass the same check, but are untested) | Works. Everything happens in peekexec's window, but any program running as you can see what you type there. |
-| **GNOME on Wayland with `ptrace_scope` set to 0** | Refused until you run `sysctl kernel.yama.ptrace_scope=1`, because your own programs could attach to GNOME Shell. Some distributions may default to 0. |
+| **GNOME on Wayland with `ptrace_scope` set to 0** | Refused until you run `sysctl kernel.yama.ptrace_scope=1`, because your own programs could attach to GNOME Shell (unless GNOME Shell makes itself non-dumpable, which it normally doesn't). Some distributions may default to 0. |
 | **KDE, Sway, other Wayland desktops** | Refused. |
 | **X11 with another login manager** (LightDM, SDDM), `startx` | Refused. |
-| **SSH, no desktop, containers, WSL** | Refused, with one exception: if you're also logged in at an X11 desktop, a request sent over SSH opens its window there, and you approve it at that desktop. |
+| **SSH, no desktop, containers, WSL** | Refused, with one exception: if you're also logged in at an X11 desktop started by GDM, a request sent over SSH opens its window there, and you approve it at that desktop. |
 | **macOS, Windows** | Not supported. |
 
 An administrator can allow the refused desktops by starting the daemon with
@@ -104,9 +107,9 @@ Please read this part before you rely on it.
   peekexec flags common dangers, but its lists can't be complete.
 - **Files the command reads.** You see `cp ./x /etc/`, not what's inside `./x`,
   and that file can change after you approve. Use `peekexec install`, which
-  shows you the content. For an image you flash (`dd if=fw.img`), that's
-  expected: the window notes that programs of yours can change the file, so
-  compare its checksum first if it matters.
+  shows you the content. For an image you flash (`dd if=/home/me/fw.img`),
+  that's expected: the window notes that programs of yours can change the
+  file, so compare its checksum first if it matters.
 - **What a command does while it runs.** `--write` only tells you what the
   command says it will touch; nothing enforces it. `--no-net` stops the command
   itself from using the network. It doesn't stop a system service from using
@@ -155,7 +158,7 @@ root. Run `id -nG` to see your groups.
 | `docker`, `lxd`, `incus-admin`, `libvirt`, `disk` | **Get root, with no password.** It can start a container or virtual machine with your disk mounted inside, or write to the raw disk. |
 | `input` | **Read every key you type,** your password included, on X11 and Wayland alike, and in GNOME's prompt too. |
 | Write access to `/dev/uinput` | **Type and click as you.** It can't read your password, but once you've typed it, it can press Enter for you. So read the request *before* you type your password. This access often comes from a udev rule rather than a group (Solaar's, for example), so `id` won't show it. Check with `getfacl /dev/uinput`. |
-| A sudoers rule with `NOPASSWD` | **Get root, with no password,** through `sudo`. Being in `sudo` or `wheel` is fine: sudo asks for your password, just as peekexec does. Check with `sudo -n true`, which fails if sudo needs a password. |
+| A sudoers rule with `NOPASSWD` | **Get root, with no password,** through `sudo`. Being in `sudo` or `wheel` is fine: sudo asks for your password, just as peekexec does. Check with `sudo -l`, which lists any `NOPASSWD` entries. |
 | `shadow`, `adm`, `systemd-journal`, `wireshark` | No root, but it can read things worth hiding: password hashes, logs that may hold tokens, all network traffic. |
 | `kvm` | No root. It runs virtual machines at full speed. peekexec warns when a command adds someone to it, which is more cautious than it needs to be. |
 | `dialout`, `uucp`, `dip`, `plugdev`, `cdrom`, `i2c`, `spi`, `gpio`, `bluetooth`, `lp` | Fine. These let you talk to devices: serial ports, dial-up, USB devices, removable disks, buses. A mistake can still damage a device (by overwriting its EEPROM, for example), but these groups don't give root or reveal your password. |

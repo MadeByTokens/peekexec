@@ -139,8 +139,9 @@ GUIDE FOR AUTOMATED CALLERS
      TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.
    - Files a command reads while running (e.g. `cp ./x /etc/`) are NOT shown to
      the human and could change after approval; use `peekexec install` instead.
-     For an image the command only reads (`dd if=`, `flashrom -w`), that is
-     expected: the human sees a note, and may want its sha256 from you.
+     For an image the command only reads (`dd if=/home/me/fw.img`, `flashrom
+     -w /home/me/fw.bin`), that is expected: the human sees a note, and may
+     want its sha256 from you.
      Commands run in / (relative paths resolve there) unless you pass --cwd DIR;
      a DIR you own is flagged to the human, because programs load code from it.
    - Where peekexec cannot verify its own window (Wayland), the human approves
@@ -170,10 +171,12 @@ GUIDE FOR AUTOMATED CALLERS
     Everything else takes a click: scripts, installs, `sh -c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh -c`: it costs the human a click and a closer read.
-    "enter_approves" in preview's view says which applies. A disk that is in
-    use (mounted, swap, LVM) also takes a click. Name disks by
-    /dev/disk/by-id/...: unlike /dev/sdX, that name does not change between
-    boots or when a device is plugged in again.
+    "enter_approves" in preview's view says which applies. Naming a disk
+    takes a click unless the user can read it, and one in use (mounted, swap,
+    LVM) is a warning. Name disks by /dev/disk/by-id/...: unlike /dev/sdX,
+    that name does not change between boots or when a device is plugged in
+    again. If a disk name leads elsewhere by the time the command runs, it
+    does not run ("no longer leads to the disk that was shown").
 ```
 
 ## `--json` output

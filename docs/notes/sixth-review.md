@@ -259,7 +259,7 @@ whether uinput input reaches a VT (matters for E12). Small code follow-up:
 ## Docs corrected (same day)
 
 The §6 overclaims and §1b/§2 wording are fixed in README, the man page,
-`help agents` and THREAT_MODEL. The checklist has ⚠ rows for §1, §1b, §4 and the
+`help agents` and THREAT_MODEL. The checklist got ⚠ rows (since turned ✓, except §4) for §1, §1b, §4 and the
 block-device findings. The group facts cite primary sources (Docker, LXD, Incus,
 libvirt, Debian's SystemGroups, kernel and systemd docs), quoted verbatim and
 checked on 2026-11-13; the list is in README "Your account's groups". Code
@@ -279,7 +279,7 @@ in this note refer to commit 99f2713.
   `/dev/nvme0n1: internal disk "KBG30ZMS512G NVMe TOSHIBA 512GB", 512.1 GB;
   in use: / (on vgubuntu-root), /boot/efi (on nvme0n1p1), swap (on
   vgubuntu-swap_1).`, and on Xvfb for the dialog. Seen there: every note is
-  drawn in small text, the disk warning included (not changed).
+  drawn in small text, the disk warning included (fixed later in `12fde9d`).
 - An automated review of the disk commit raised three points: (1) root does
   not re-check the helper's description: accepted, like the other notes, and
   stated in THREAT_MODEL; (2) `--cwd /dev` with a bare `sda` or `of=sda` was
@@ -288,8 +288,8 @@ in this note refer to commit 99f2713.
   pass found that checking every word let a long script use up the 1000-word
   bound before naming a disk: now only distinct words count, and past the
   bound a note says disks after it were not looked for.
-- Left: `/etc/resolv.conf` (owned by systemd-resolve) and `/run/utmp`
-  (group-writable) get "root does not control" notes, and `--cwd /dev` is
-  called a nosuid mount "for a user" (the cwd check does not exempt kernel
-  filesystems). That predates these
-  fixes and adds to the note fatigue.
+- Found then, fixed later in `b4a5d7a`: `/etc/resolv.conf` (owned by
+  systemd-resolve) and `/run/utmp` (group-writable) got "root does not
+  control" notes, and `--cwd /dev` was called a nosuid mount "for a user".
+- Later work (items 3, 4, the window, the walk rules, the final review) is
+  tracked in [sixth-review-followups.md](sixth-review-followups.md).

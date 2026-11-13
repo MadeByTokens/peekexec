@@ -27,7 +27,7 @@ In a man page viewer, press / and type a section's name to jump to it.
 @contents
 
 # THE APPROVAL WINDOW
-It opens large, about 85% of your screen and centred, and you can resize, move or leave it like any window. Warnings come first, in a box that says how many there are; on a small screen the box scrolls, and the bottom of the window repeats the count.
+It opens large, about 85% of your screen (at most 1500 points wide) and centred, and you can resize, move or leave it like any window. Warnings come right after who is asking, in a box that says how many there are; on a small screen that top part scrolls, and the bottom of the window repeats the count.
 
 ## What it shows
 - What will run: each argument on its own line, the full script with line numbers and colours, or the file being installed, with the changes if it replaces a file.
@@ -35,7 +35,7 @@ It opens large, about 85% of your screen and centred, and you can resize, move o
 - Who is asking. Your user id comes from the kernel. Process names are chosen by the processes themselves.
 - The reason given, labelled "unverified" because it is only a claim.
 - Warnings, such as a file that could make root run something later, or a request that arrived right after another.
-- Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning, so it takes a click.
+- Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click unless you could read it yourself (members of `disk`). A disk named as `/dev/disk/by-label/...` or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
 
 ## Formatted and Raw
 Formatted adds line breaks and indentation so that a long `sh -c` command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.
@@ -51,7 +51,7 @@ You have 3 attempts at the password. If nobody answers, the request times out af
 Pressing Enter approves a request only if it is simple enough to judge at a glance. Everything else needs a click on Approve. The bottom of the window says which applies.
 
 Enter works only if all of this is true:
-- It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status`, `systemctl daemon-reload`, `udevadm trigger` or `udevadm control --reload-rules` (the last three change system settings, but only by reloading them).
+- It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status`, `systemctl daemon-reload`, `udevadm trigger` or `udevadm control --reload-rules` (the last three re-apply system settings; `udevadm trigger` replays device events, so rules run again).
 - It has at most 16 words, and no argument holds spaces or shell syntax.
 - Nothing in it triggered a warning. Naming a file you cannot read without root (`cat /etc/gshadow`, `head -c 512 /dev/sda`) is a warning: its content would come back to the agent.
 - It did not arrive right after another dialog, with others waiting, or as a near-copy of a recent request.
@@ -64,9 +64,9 @@ peekexec only asks for your password somewhere it trusts, so it refuses setups i
 
 - **GNOME on Wayland**: you read the request in peekexec's window, click Continue, and type your password into GNOME's own prompt, which repeats the request.
 - **X11 started by GDM** (tested with GNOME; other desktops on GDM's X11 pass the same check, but are untested): everything happens in peekexec's window.
-- **GNOME on Wayland with ptrace_scope 0**: refused until you set the sysctl `kernel.yama.ptrace_scope` to 1, because your own programs could attach to GNOME Shell.
+- **GNOME on Wayland with ptrace_scope 0**: refused until you set the sysctl `kernel.yama.ptrace_scope` to 1, because your own programs could attach to GNOME Shell (unless it makes itself non-dumpable, which it normally does not).
 - **Other Wayland desktops, X11 with another login manager, startx**: refused.
-- **SSH, no desktop, containers, WSL**: refused. A person must be at a local desktop. One exception: if you are also logged in at an X11 desktop, a request sent over SSH opens its window there, and is approved there.
+- **SSH, no desktop, containers, WSL**: refused. A person must be at a local desktop. One exception: if you are also logged in at an X11 desktop started by GDM, a request sent over SSH opens its window there, and is approved there.
 
 An administrator can allow the refused desktops by starting the daemon with `--allow-unverified-display`. Your password then goes into a window that another program may be able to read.
 
