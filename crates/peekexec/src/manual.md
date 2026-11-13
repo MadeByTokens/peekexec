@@ -48,7 +48,7 @@ You have 3 attempts at the password. If nobody answers, the request times out af
 Pressing Enter approves a request only if it is simple enough to judge at a glance. Everything else needs a click on Approve. The bottom of the window says which applies.
 
 Enter works only if all of this is true:
-- It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status` or `udevadm control --reload-rules`.
+- It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status`, `systemctl daemon-reload`, `udevadm trigger` or `udevadm control --reload-rules` (the last three change system settings, but only by reloading them).
 - It has at most 16 words, and no argument holds spaces or shell syntax.
 - Nothing in it triggered a warning.
 - It did not arrive right after another dialog, with others waiting, or as a near-copy of a recent request.
@@ -60,10 +60,10 @@ So scripts, installs, `sh -c`, registrations and commands such as `rm` always ne
 peekexec only asks for your password somewhere it trusts, so it refuses setups it cannot check.
 
 - **GNOME on Wayland**: you read the request in peekexec's window, click Continue, and type your password into GNOME's own prompt, which repeats the request.
-- **GNOME on X11 with GDM**: everything happens in peekexec's window.
-- **Wayland with ptrace_scope 0**: refused until you set the sysctl `kernel.yama.ptrace_scope` to 1.
+- **X11 started by GDM** (tested with GNOME; other desktops on GDM's X11 pass the same check, but are untested): everything happens in peekexec's window.
+- **GNOME on Wayland with ptrace_scope 0**: refused until you set the sysctl `kernel.yama.ptrace_scope` to 1, because your own programs could attach to GNOME Shell.
 - **Other Wayland desktops, X11 with another login manager, startx**: refused.
-- **SSH, no desktop, containers, WSL**: refused. A person must be at a local desktop.
+- **SSH, no desktop, containers, WSL**: refused. A person must be at a local desktop. One exception: if you are also logged in at an X11 desktop, a request sent over SSH opens its window there, and is approved there.
 
 An administrator can allow the refused desktops by starting the daemon with `--allow-unverified-display`. Your password then goes into a window that another program may be able to read.
 
@@ -83,13 +83,14 @@ peekexec helps, but do not rely on it for more than this.
 - **An agent that wants to cheat, on Wayland, if it planned ahead.** A program that can write to your home folder could install a GNOME Shell extension, wait for your next login, and tamper with the prompt. peekexec cannot detect this.
 - **Commands that are bad ideas.** An approved command runs as full root. Warnings come from lists of known dangers, and those lists cannot be complete.
 - **Files a command reads.** You see `cp ./x /etc/`, not what is inside `./x`, and it can change after you approve. Use `peekexec install`, which shows the content.
-- **What a command does while it runs.** `--write` only says what the command claims it will touch; nothing enforces it. `--no-net` stops ordinary programs from using the network, but a root program can undo it.
+- **Groups that already give root, or your keystrokes.** Members of `docker`, `lxd`, `incus-admin`, `libvirt` or `disk`, or anyone with a `NOPASSWD` sudoers rule, can get root without peekexec, and so can every program they run. Read access to `/dev/input` (`input`) reveals the password as it is typed, and write access to `/dev/uinput` (check with `getfacl`) can press Enter for you. Hardware groups such as `dialout`, `plugdev`, `i2c` and `gpio` are fine. Check with `id -nG`.
+- **What a command does while it runs.** `--write` only says what the command claims it will touch; nothing enforces it. `--no-net` stops the command itself from using the network, not a system service acting for it (`systemctl start`, `snap`, a package manager's daemon), and a root program can undo it.
 
 Also worth knowing:
 - The output goes back to the requester. Approving `cat /etc/shadow` hands that file to the agent.
 - Commands have no terminal, so interactive programs will not work.
 - Anything a command leaves running is ended when it exits. To start a service, use `systemctl start`.
-- Stopping or upgrading peekexec ends running commands. The installer waits for them first.
+- Stopping or upgrading peekexec ends running commands. The installer waits for them first, on systems with cgroup v2; on others it says it cannot.
 - "From inside an agent's session" means the request came from that agent's process tree. Anything the agent started could have sent it.
 - A reason given with `deny_reason` may have been written by another program on X11. Treat it as advice.
 

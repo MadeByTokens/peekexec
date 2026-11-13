@@ -36,8 +36,11 @@ its answer is input too: what root relies on (program, interpreter, install
 directory, the directory descriptor) is checked again as root, with generic
 errors, and the helper cannot be driven by other programs of the user (its
 binary is not readable by them, so it is non-dumpable from exec). A request
-naming a path the user cannot reach is refused before approval; such steps go inside `peekexec script`,
-where the human reads them.
+whose program, working directory or install target the user cannot reach is
+refused before approval; such steps go inside `peekexec script`, where the
+human reads them. A path named in an argument or in script text is only
+checked for who controls it: one the user cannot reach is neither refused nor
+noted (`trust::check_named` skips what it cannot look at).
 
 It does not promise:
 
@@ -60,8 +63,15 @@ the requester controls, against every place the daemon uses it.
    privilege; the confused deputy). Whatever the daemon looks at before a
    human approves, it looks at with the requesting user's credentials, in a
    helper with `no_new_privs`, so the kernel decides what may be learned.
-   That includes other users' processes: the daemon reads only the
-   requester's own. What the helper answers is input too: whatever root
+   Known exceptions, all done by root before approval: the requester's
+   ancestors are read whatever their owner (name, command line, executable
+   path; `peer::walk`), and the executable paths are checked in root's view;
+   the display is found by scanning `/proc`, and from the environments of the
+   user's own processes (`display.rs`, `session::find`); on the desktop-prompt
+   path, logind, the bus and GNOME Shell's memory maps are read
+   (`polkit.rs`). `preview` runs all of these too. A script's snapshot is
+   written when the request is prepared, before approval, and removed on
+   every path that does not run it. What the helper answers is input too: whatever root
    can recompute from the request (the program, the `#!` interpreter and
    its flag, the install target) it recomputes and compares; the rest it
    checks, with generic errors.
@@ -256,6 +266,11 @@ This is checked before the queue, and again when the queue reaches the request,
 as a request can wait for many minutes. In practice this means GDM: other
 display managers start Xorg outside the session scope, and are refused.
 
+The requester's own login session is not checked on this path
+(`session::find`): a request sent over SSH, while the user is logged in at
+the verified X server, opens its dialog there, and the human approves it at
+that desktop.
+
 ### Anything else: the window is read-only
 
 On Wayland, or without logind, peekexec's window is found through the user's
@@ -376,8 +391,40 @@ every such dialog then says the display could not be verified.
 |---|---|---|
 | 1 | X11, verified X server | Requesters that only *ask* for the wrong thing: buggy, overeager, or talked into a bad request. **Not** a requester that runs programs of its own, and a prompt-injected agent with a shell can do exactly that: X11 lets any client draw fake windows, read keys, and synthesize input, so it can read the password as it is typed and later type it and click Approve itself (or forge a Deny reason). sudo and pkexec share this limit. |
 | 1- | Unverified display and no prompt that can be trusted (no polkit action, or not GNOME) | Refused, unless root starts the daemon with `--allow-unverified-display`; then as tier 1, and the dialog may be relayed through a display server the requester runs. Flagged on every request. |
-| 2 | GNOME on Wayland: password in GNOME Shell's polkit prompt | The password goes only to the compositor-drawn prompt, which other clients cannot read or drive, and which carries the decisive facts on its own. Holds against a requester acting in the current login; **not** one that planted a shell extension in `$HOME` before it (boundary 4). Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
-| 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. |
+| 2 | GNOME on Wayland: password in GNOME Shell's polkit prompt | The password goes only to the compositor-drawn prompt, which other Wayland clients cannot read or drive (an account with `input` or `/dev/uinput` access can: see below), and which carries the decisive facts on its own. Holds against a requester acting in the current login; **not** one that planted a shell extension in `$HOME` before it (boundary 4). Remaining risk: a decoy window next to it showing different details; the prompt's summary is what counts, and it holds the whole request (one that does not fit is refused). |
+| 3 | Dedicated VT and/or FIDO2 touch | Planned: the prompt is outside the user session; presence cannot be faked in software. Whether input injected through `/dev/uinput` reaches a VT has not been tested (see [The account's own groups](#the-accounts-own-groups)). |
+
+Every tier assumes the user's account holds no access that bypasses it. See
+the next section.
+
+## The account's own groups
+
+The requester runs as the user, so it holds everything the user's groups and
+device ACLs hold. Some of that makes peekexec moot, whatever the tier. peekexec
+does not check for it today; the README tells the user how to.
+
+- **Root without a password:** `docker`, `lxd`, `incus-admin` and `libvirt`
+  (`qemu:///system`) start a container or VM with the host's disk mounted, and
+  `disk` writes the raw block devices. A `NOPASSWD` sudoers rule does the same
+  through sudo. Membership of `sudo` or `wheel` alone does not, as sudo asks for
+  the password, just as peekexec does.
+- **The password:** read access to `/dev/input/event*` (`input`) reads every
+  keyboard below the display server, so it defeats tiers 1 and 2 alike.
+- **Driving input, not reading it:** write access to `/dev/uinput` (often a
+  `uaccess` ACL from a package's udev rule, Solaar's for one, and not visible
+  in `id`) makes a virtual keyboard and mouse, whose events reach the
+  compositor like any other input device's. So tier 2's "other clients cannot drive the prompt" holds for
+  Wayland clients, not for this device. It cannot learn the password: it can
+  press Enter once the human has typed it, or click Continue, so the human must
+  read before typing. Approval still needs the password.
+- **Not root, not the password:** device groups used for hardware work
+  (`dialout`, `uucp`, `dip`, `plugdev`, `cdrom`, `i2c`, `spi`, `gpio`,
+  `bluetooth`, `lp`) reach devices, not the system. `kvm` runs VMs and
+  `shadow` reads password hashes. Both are on the lasting-root list
+  (`ROOT_GROUPS`) to be cautious, so adding someone to them is flagged.
+
+Sources for what each group gives are in the README, under
+[Your account's groups](README.md#your-accounts-groups).
 
 ## Things a hurried human might assume
 

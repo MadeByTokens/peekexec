@@ -50,9 +50,11 @@ Then you choose:
   "use the vendor's rules file instead".
 
 **Enter or click?** A plain read-only command such as `ls`, `id` or `df` can be
-approved with your password and Enter. Everything else needs a click on Approve:
-scripts, installs, `sh -c`, anything that changes the system, anything with a
-warning, and any request that arrives right after another. The bottom of the
+approved with your password and Enter. So can a few everyday ones that reload
+system settings, such as `udevadm control --reload-rules`, `udevadm trigger`
+and `systemctl daemon-reload`. Everything else needs a click on Approve:
+scripts, installs, `sh -c`, other commands that change the system, anything
+with a warning, and any request that arrives right after another. The bottom of the
 window says which applies. This stops typing aimed at another window from
 approving anything, and makes you pause on what matters.
 
@@ -64,11 +66,11 @@ on setups it can't check.
 | Your desktop | What happens |
 |---|---|
 | **GNOME on Wayland** | Works. You read the request in peekexec's window, then type your password into GNOME's own prompt, which repeats the request. Requests must be short (see below). |
-| **GNOME on X11 with GDM** | Works. Everything happens in peekexec's window, but any program running as you can see what you type there. |
-| **Wayland with `ptrace_scope` set to 0** | Refused until you run `sysctl kernel.yama.ptrace_scope=1`. Some distributions may default to 0. |
+| **X11 started by GDM** (tested with GNOME; other desktops on GDM's X11 pass the same check, but are untested) | Works. Everything happens in peekexec's window, but any program running as you can see what you type there. |
+| **GNOME on Wayland with `ptrace_scope` set to 0** | Refused until you run `sysctl kernel.yama.ptrace_scope=1`, because your own programs could attach to GNOME Shell. Some distributions may default to 0. |
 | **KDE, Sway, other Wayland desktops** | Refused. |
 | **X11 with another login manager** (LightDM, SDDM), `startx` | Refused. |
-| **SSH, no desktop, containers, WSL** | Refused. peekexec needs a person at a local desktop. |
+| **SSH, no desktop, containers, WSL** | Refused, with one exception: if you're also logged in at an X11 desktop, a request sent over SSH opens its window there, and you approve it at that desktop. |
 | **macOS, Windows** | Not supported. |
 
 An administrator can allow the refused desktops by starting the daemon with
@@ -97,11 +99,18 @@ Please read this part before you rely on it.
   and that file can change after you approve. Use `peekexec install`, which
   shows you the content.
 - **What a command does while it runs.** `--write` only tells you what the
-  command says it will touch; nothing enforces it. `--no-net` stops ordinary
-  programs from using the network, but a program running as root can undo it.
+  command says it will touch; nothing enforces it. `--no-net` stops the command
+  itself from using the network. It doesn't stop a system service from using
+  the network on the command's behalf (`systemctl start`, `snap`, a package
+  manager's daemon), and a program running as root can undo it.
 - **Your screen settings, on Wayland.** GNOME's prompt can't scroll. If you
   don't see the line starting with **■ END**, part of the request is off
   screen: cancel it.
+- **Groups that already give your account root, or your keystrokes.** If
+  you're in `docker`, `lxd`, `incus-admin`, `libvirt` or `disk`, any program
+  running as you, your agent included, can get root without asking
+  peekexec. If you're in `input`, it can read every key you type, your
+  password too. See [Your account's groups](#your-accounts-groups) below.
 
 Some other things worth knowing:
 
@@ -117,10 +126,46 @@ Some other things worth knowing:
 - **There's no terminal.** Commands can't prompt you for anything, so interactive
   commands won't work.
 - **Stopping or upgrading peekexec ends running commands.** The installer waits
-  for them first.
+  for them first, on systems with cgroup v2; on others it says it can't.
 
 If you're not sure how much to trust it, read every script in full, and switch
 to the **Raw** view if anything looks odd.
+
+## Your account's groups
+
+People who work with hardware often add themselves to groups, so their tools
+work without root. Most of these are fine. A few give away root, or your
+keystrokes, to every program you run. Your agent is one of those programs, so
+with those groups peekexec's window is no longer what stands between it and
+root. Run `id -nG` to see your groups.
+
+| Access | What any program running as you can do |
+|---|---|
+| `docker`, `lxd`, `incus-admin`, `libvirt`, `disk` | **Get root, with no password.** It can start a container or virtual machine with your disk mounted inside, or write to the raw disk. |
+| `input` | **Read every key you type,** your password included, on X11 and Wayland alike, and in GNOME's prompt too. |
+| Write access to `/dev/uinput` | **Type and click as you.** It can't read your password, but once you've typed it, it can press Enter for you. So read the request *before* you type your password. This access often comes from a udev rule rather than a group (Solaar's, for example), so `id` won't show it. Check with `getfacl /dev/uinput`. |
+| A sudoers rule with `NOPASSWD` | **Get root, with no password,** through `sudo`. Being in `sudo` or `wheel` is fine: sudo asks for your password, just as peekexec does. Check with `sudo -n true`, which fails if sudo needs a password. |
+| `shadow`, `adm`, `systemd-journal`, `wireshark` | No root, but it can read things worth hiding: password hashes, logs that may hold tokens, all network traffic. |
+| `kvm` | No root. It runs virtual machines at full speed. peekexec warns when a command adds someone to it, which is more cautious than it needs to be. |
+| `dialout`, `uucp`, `dip`, `plugdev`, `cdrom`, `i2c`, `spi`, `gpio`, `bluetooth`, `lp` | Fine. These let you talk to devices: serial ports, dial-up, USB devices, removable disks, buses. A mistake can still damage a device (by overwriting its EEPROM, for example), but these groups don't give root or reveal your password. |
+
+If you're in a group from the first two rows, you can:
+
+- leave it: `sudo gpasswd -d $USER docker`, then log out and back in;
+- use rootless alternatives: Podman or rootless Docker, or libvirt's
+  `qemu:///session`;
+- or keep it, knowing that peekexec still catches your agent's *mistakes*, but
+  can't stop an agent that is trying to get root.
+
+Sources, checked on 2026-11-13:
+
+- Docker: ["The `docker` group grants root-level privileges to the user"](https://docs.docker.com/engine/install/linux-postinstall/).
+- LXD: local socket access ["always grants full access"; give it only to users "you'd trust with root access"](https://canonical.com/lxd/docs/latest/explanation/security/).
+- Incus: [`incus-admin` "can fully control Incus"](https://linuxcontainers.org/incus/docs/main/explanation/security/); the [`incus` group "will only grant access to the Incus user socket"](https://linuxcontainers.org/incus/docs/main/installing/).
+- libvirt: a connection to the system daemon's read-write socket ["gives the client privileges that are equivalent to having a root shell"](https://libvirt.org/daemons.html).
+- Debian's [list of system groups](https://wiki.debian.org/SystemGroups): `disk` is "mostly equivalent to root access"; `dialout` gives "full and direct access to serial ports"; `shadow` can read `/etc/shadow`.
+- Kernel docs: [uinput](https://www.kernel.org/doc/html/latest/input/uinput.html) "makes it possible to emulate input devices from userspace". systemd docs: on a device tagged [`uaccess`](https://www.freedesktop.org/software/systemd/man/latest/sd-login.html), "access to this device is tied to an active seat".
+- `input`: on Ubuntu, `/dev/input/event*` is mode 0660, group `input`.
 
 ## When to use something else
 
@@ -182,8 +227,9 @@ peekexec register --json --name "My Agent" --why "..."   # label your session
 ```
 
 With `--json`, the agent gets a structured answer: whether it was approved, the
-command's output, and your reason if you denied it. An agent can't approve,
-pre-approve or skip the window; there's no option for that.
+command's output, and your reason if you denied it. There's no option to
+approve, pre-approve or skip the window (on X11, see
+[What it won't protect you from](#what-it-wont-protect-you-from)).
 
 ## Learn more
 
