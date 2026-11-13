@@ -290,7 +290,7 @@ pub fn prepare(
     // what is on it; one that is not is a counted line under the command.
     for d in inspection.devices {
         if d.in_use {
-            notes.push(format!("Check the disk: {}", d.text));
+            notes.push(format!("{DISK_NOTE}{}", d.text));
         } else if let Some(main) = sections.last_mut() {
             main.invocation.push(display_line(&d.text, 400));
         }
@@ -327,6 +327,9 @@ pub fn prepare(
                 .into(),
         );
     }
+    // Which disk comes first: on a hardware job it is the fact that
+    // matters most (a stable sort keeps the rest in order).
+    notes.sort_by_key(|n| !n.starts_with(DISK_NOTE));
     // Some notes quote requester-chosen paths.
     let notes: Vec<Shown> = notes.iter().map(|n| display_line(n, 1000)).collect();
 
@@ -384,6 +387,9 @@ pub fn prepare(
         snapshot_dir,
     })
 }
+
+/// How a note about a disk in use begins.
+const DISK_NOTE: &str = "Check the disk: ";
 
 /// Programs that only read and report, whatever their arguments (`blkid -c`
 /// writes a file, and `lspci -O` names one, so neither is here). Enter is
@@ -1600,6 +1606,20 @@ mod tests {
         });
         let p = prepare_with(&r, &with(true), false).unwrap();
         assert!(!p.view.enter_approves);
+        // With another note made before it (a file only root can read),
+        // the disk still comes first.
+        if !nix::unistd::geteuid().is_root() && Path::new("/proc/1/environ").exists() {
+            let r = req(Action::Run {
+                argv: vec!["lsblk".into(), "/proc/1/environ".into()],
+            });
+            let p = prepare_with(&r, &with(true), false).unwrap();
+            assert!(p.view.notes.len() >= 2, "{:?}", p.view.notes);
+            assert!(
+                p.view.notes[0].starts_with(DISK_NOTE),
+                "the disk comes first: {:?}",
+                p.view.notes
+            );
+        }
         assert!(
             p.view
                 .notes

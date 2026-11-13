@@ -59,7 +59,7 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
             .with_inner_size([900.0, 640.0])
-            .with_min_inner_size([560.0, 420.0])
+            .with_min_inner_size(MIN_SIZE)
             .with_active(true),
         centered: true,
         persist_window: false,
@@ -104,6 +104,17 @@ fn answer(msg: &FromUi) {
     let _ = out.flush();
 }
 
+/// The smallest window: the dialog still works at this size.
+const MIN_SIZE: [f32; 2] = [560.0, 420.0];
+
+/// The size to open at on a monitor of `m` points.
+fn window_size(m: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (m.x * 0.85).clamp(MIN_SIZE[0], 1500.0).min(m.x),
+        (m.y * 0.85).max(MIN_SIZE[1]).min(m.y),
+    )
+}
+
 struct Dialog {
     view: PromptView,
     glyphs: &'static fonts::Glyphs,
@@ -129,6 +140,8 @@ struct Dialog {
     /// Keys arrived while the window was opening: the human was typing
     /// into something else (perhaps a password), so Enter must not approve.
     typed_early: bool,
+    /// Sized to the monitor already.
+    sized: bool,
 }
 
 impl Dialog {
@@ -154,6 +167,7 @@ impl Dialog {
             want_focus: true,
             system_prompt_open: false,
             typed_early: false,
+            sized: false,
         }
     }
 
@@ -223,6 +237,7 @@ impl eframe::App for Dialog {
             // Window managers may not focus a new window on their own.
             ctx.send_viewport_cmd(ViewportCommand::Focus);
         }
+        self.size_to_monitor(&ctx);
         let opened = *self.opened_at.get_or_insert(now);
         self.poll_daemon(&ctx, now);
 
@@ -280,6 +295,28 @@ impl eframe::App for Dialog {
 }
 
 impl Dialog {
+    /// Open large on whatever screen it is on: 85% of the monitor, at
+    /// most 1500 points wide (longer lines are harder to read), never
+    /// below the minimum, then centred. Only asked once: the user may
+    /// resize or move it as they like. Where the monitor is unknown, the
+    /// window keeps its default size.
+    fn size_to_monitor(&mut self, ctx: &egui::Context) {
+        let monitor = ctx.input(|i| i.viewport().monitor_size);
+        let Some(m) = monitor.filter(|m| m.x > 1.0 && m.y > 1.0) else {
+            return;
+        };
+        if self.sized {
+            return;
+        }
+        // Centred from the size asked for: the window's own rectangle
+        // still has the old size until the resize lands.
+        let size = window_size(m);
+        let at = ((m - size) * 0.5).max(egui::Vec2::ZERO);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(at.to_pos2()));
+        self.sized = true;
+    }
+
     fn header(&mut self, ui: &mut egui::Ui, _dark: bool) {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -348,12 +385,27 @@ impl Dialog {
             ViewKind::Root => self.view.summary(self.findings),
             ViewKind::Register => Vec::new(),
         };
-        for note in &self.view.notes {
-            ui.label(
-                RichText::new(format!("{} {note}", self.glyphs.warn))
-                    .color(WARN)
-                    .small(),
-            );
+        if !self.view.notes.is_empty() {
+            let n = self.view.notes.len();
+            egui::Frame::group(ui.style())
+                .stroke(egui::Stroke::new(1.5, WARN))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {n} {} to check before approving",
+                            self.glyphs.warn,
+                            if n == 1 { "thing" } else { "things" }
+                        ))
+                        .color(WARN)
+                        .strong(),
+                    );
+                    for note in &self.view.notes {
+                        ui.add(egui::Label::new(RichText::new(note.as_str()).color(WARN)).wrap());
+                    }
+                });
+            ui.add_space(4.0);
         }
         ui.horizontal_wrapped(|ui| {
             for (warn, text) in summary {
@@ -637,6 +689,18 @@ impl Dialog {
         if let Some(e) = &self.error {
             ui.label(RichText::new(e).color(DANGER).strong());
         }
+        // The header may be scrolled on a small screen: the count stays here.
+        if !self.view.notes.is_empty() {
+            let n = self.view.notes.len();
+            ui.label(
+                RichText::new(format!(
+                    "{} {n} {} to check above, before approving.",
+                    self.glyphs.warn,
+                    if n == 1 { "warning" } else { "warnings" }
+                ))
+                .color(WARN),
+            );
+        }
         if self.typed_early && self.view.enter_approves && self.view.wants_password {
             ui.label(
                 RichText::new(
@@ -691,7 +755,19 @@ fn delay_left(delay_ms: u32, opened: Option<f64>, now: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::delay_left;
+    use super::{delay_left, egui, window_size, MIN_SIZE};
+
+    #[test]
+    fn the_window_opens_large_but_fits() {
+        // A laptop: 85% of it.
+        let s = window_size(egui::vec2(1366.0, 768.0));
+        assert_eq!((s.x.round(), s.y.round()), (1161.0, 653.0));
+        // A wide monitor: lines stay readable.
+        assert_eq!(window_size(egui::vec2(3840.0, 2160.0)).x, 1500.0);
+        // A tiny screen: the minimum, but never larger than the screen.
+        let s = window_size(egui::vec2(600.0, 400.0));
+        assert_eq!((s.x, s.y), (MIN_SIZE[0], 400.0));
+    }
 
     #[test]
     fn the_approve_delay_counts_from_the_first_frame() {

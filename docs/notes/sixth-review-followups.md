@@ -14,10 +14,12 @@ real desktop goes under "To test when you are back".
 
 ## In progress / next
 
-- [ ] W1 Dialog: large and resizable (about 85% of the monitor, centred,
-      min 560x420 kept), warnings at reading size in a box above the command
-      with a count, disk warnings first. Off-screen renders at 1280x720,
-      1366x768, 1920x1080.
+- [x] W1 Dialog opens at 85% of the monitor (width at most 1500 points,
+      min 560x420), centred from the size asked for; warnings in a framed box
+      at reading size with a count, repeated in the footer; disk warnings
+      first (sorted in the daemon, so the desktop prompt agrees). Rendered on
+      Xvfb at 800x600, 1280x720, 1366x768, 1920x1080: centred, fits, and at
+      800x600 the box scrolls while the footer keeps the count.
 - [x] I3 The path note asks "could programs of yours change it?" (as the
       user, by the kernel: owner or `access(W_OK)`, groups and ACLs), not
       "does root own it?"; wording fits an image a command only reads. Gone:
@@ -37,8 +39,11 @@ real desktop goes under "To test when you are back".
 
 - [ ] Install the build (`packaging/install.sh --admin-group=sudo`) and approve
       one plain `run`, one script, one install, on the real X11 desktop.
-- [ ] The new window size on your real screen(s): does it open large, centred,
-      resizable; is it comfortable; can you still switch away (no grab).
+- [ ] The new window size on your real screen(s), with a real window manager
+      (Xvfb has none): does it open large and centred, can you resize it, move
+      it, and switch away (no grab). Also on a HiDPI screen if you have one
+      (egui points vs pixels), and in the Wayland VM (the compositor places
+      windows there; centring is not ours).
 - [ ] A disk warning on your real screen: e.g. `peekexec run --why test --
       lsblk /dev/nvme0n1` should need a click and say "in use: / ...".
 - [ ] With a USB stick plugged in and not mounted: `peekexec run -- lsblk

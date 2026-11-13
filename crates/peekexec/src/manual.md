@@ -27,6 +27,8 @@ In a man page viewer, press / and type a section's name to jump to it.
 @contents
 
 # THE APPROVAL WINDOW
+It opens large, about 85% of your screen and centred, and you can resize, move or leave it like any window. Warnings come first, in a box that says how many there are; on a small screen the box scrolls, and the bottom of the window repeats the count.
+
 ## What it shows
 - What will run: each argument on its own line, the full script with line numbers and colours, or the file being installed, with the changes if it replaces a file.
 - Anything hidden: invisible characters, look-alike letters, and long runs of spaces or blank lines are marked.
