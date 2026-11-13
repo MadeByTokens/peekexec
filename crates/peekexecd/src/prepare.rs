@@ -2927,14 +2927,20 @@ mod tests {
 
     #[test]
     fn bypass_bare_disk_in_code_with_cwd_dev_not_described() {
-        let argv = ["dd", "if=/dev/zero", "of=sda1", "count=0"];
-        let v = bypass_view(&argv, "/dev");
+        // Any block device this machine has (CI runners have no sda1).
+        let Some(disk) = std::fs::read_dir("/sys/class/block").ok().and_then(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .find(|n| Path::new("/dev").join(n).exists())
+        }) else {
+            return;
+        };
         let lines = |v: &PromptView| format!("{:?} {:?}", v.sections[0].invocation, v.notes);
-        eprintln!("argv: {}", lines(&v));
-        let v2 = bypass_view(&["sh", "-c", "dd if=/dev/zero of=sda1 count=0"], "/dev");
-        eprintln!("sh -c: {}", lines(&v2));
+        let code = format!("dd if=/dev/zero of={disk} count=0");
+        let v = bypass_view(&["sh", "-c", &code], "/dev");
+        eprintln!("sh -c: {}", lines(&v));
         assert!(
-            lines(&v2).contains("/dev/sda1:"),
+            lines(&v).contains(&format!("/dev/{disk}:")),
             "bare disk in a sh -c string, cwd /dev, not described"
         );
     }
