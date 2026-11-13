@@ -467,7 +467,11 @@ Sources for what each group gives are in the README, under
   of the user's can be re-pointed: each name that led to a disk is bound to
   it (`major:minor`), and just before running, root checks every one again
   and refuses to run if any now leads elsewhere (`blockdev::same_disks`,
-  rule 2). "In use" means mounted, swap, or held by LVM, RAID or crypt as
+  rule 2). A name under `/dev` that leads nowhere when shown is not bound:
+  without root it can only come to lead to an image of the user's own
+  (attached through udisks) or a device the human plugs in, and a name of
+  the user's that leads nowhere gets the "programs of yours can change"
+  note. "In use" means mounted, swap, or held by LVM, RAID or crypt as
   this system sees it; a disk open in a VM, a ZFS pool member, the second
   disk of a btrfs volume or a mount in another namespace is not seen. A
   disk named by a computation (a script's
