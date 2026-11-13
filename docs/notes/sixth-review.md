@@ -173,8 +173,9 @@ human see at approval? What would the fix cost a flashing or recovery job?
 
 The classic hardware disaster is an agent writing to the system disk instead of
 the target. On the installed daemon, `wipefs -a /dev/sda`, `mkfs.ext4 /dev/sda1`
-and `dd if=/dev/zero of=/dev/sda1`, where sda is the system disk, get **no note
-at all**. `dd if=x.img of=/dev/sda` gets only the generic note about the image
+and `dd if=/dev/zero of=/dev/sda1`, where sda is a mounted disk (on this host
+the backup disk; the system disk is nvme0n1, see the fixes below), get **no
+note at all**. `dd if=x.img of=/dev/sda` gets only the generic note about the image
 file. The human sees `/dev/sda` and must remember which disk that is.
 
 Fix, as a description rather than a list of dangerous commands: for every block
@@ -265,3 +266,30 @@ checked on 2026-11-13; the list is in README "Your account's groups". Code
 references in the docs name functions (`trust::check_named`, `peer::walk`,
 `session::find`), not line numbers, so they go stale less quietly. The line numbers
 in this note refer to commit 99f2713.
+
+## Fixes after the second pass
+
+- `f01a66a`: a device reached through a link is judged as the device, so
+  `/dev/disk/by-id/...`, `by-uuid` and `/dev/mapper/...` lose the false note.
+- `714e9de`: every link a name leads through is checked, closing an older gap
+  (a root-owned link to a user's link) that the previous commit had made
+  reachable for devices. Raised by an automated review of `f01a66a`.
+- Disks described (`blockdev.rs`): run on this host with `preview` against a
+  dev daemon, which reported
+  `/dev/nvme0n1: internal disk "KBG30ZMS512G NVMe TOSHIBA 512GB", 512.1 GB;
+  in use: / (on vgubuntu-root), /boot/efi (on nvme0n1p1), swap (on
+  vgubuntu-swap_1).`, and on Xvfb for the dialog. Seen there: every note is
+  drawn in small text, the disk warning included (not changed).
+- An automated review of the disk commit raised three points: (1) root does
+  not re-check the helper's description: accepted, like the other notes, and
+  stated in THREAT_MODEL; (2) `--cwd /dev` with a bare `sda` or `of=sda` was
+  missed: fixed; (3) the requester's name led the line: the kernel's `/dev`
+  name and facts now lead, the name used comes last, plain and cut. A second
+  pass found that checking every word let a long script use up the 1000-word
+  bound before naming a disk: now only distinct words count, and past the
+  bound a note says disks after it were not looked for.
+- Left: `/etc/resolv.conf` (owned by systemd-resolve) and `/run/utmp`
+  (group-writable) get "root does not control" notes, and `--cwd /dev` is
+  called a nosuid mount "for a user" (the cwd check does not exempt kernel
+  filesystems). That predates these
+  fixes and adds to the note fatigue.

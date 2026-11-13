@@ -66,6 +66,8 @@ Who is asking. Your user id comes from the kernel. Process names are chosen by t
 The reason given, labelled "unverified" because it is only a claim.
 .IP \(bu 2
 Warnings, such as a file that could make root run something later, or a request that arrived right after another.
+.IP \(bu 2
+Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning, so it takes a click.
 .PP
 .SS "Formatted and Raw"
 Formatted adds line breaks and indentation so that a long \fBsh \-c\fR command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.
@@ -418,7 +420,10 @@ GUIDE FOR AUTOMATED CALLERS
     Everything else takes a click: scripts, installs, `sh \-c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh \-c`: it costs the human a click and a closer read.
-    "enter_approves" in preview's view says which applies.
+    "enter_approves" in preview's view says which applies. A disk that is in
+    use (mounted, swap, LVM) also takes a click. Name disks by
+    /dev/disk/by\-id/...: unlike /dev/sdX, that name does not change between
+    boots or when a device is plugged in again.
 .fi
 .RE
 .PP

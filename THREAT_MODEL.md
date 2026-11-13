@@ -430,6 +430,20 @@ Sources for what each group gives are in the README, under
 
 - **The working directory's contents are not shown.** Running in a directory
   the user owns is flagged for this reason.
+- **`/dev/sdb` says nothing about which disk it is.** Every block device a
+  request names (an argument, an option value such as `of=`, a word of a
+  script) is described by the inspection helper, as the user, from sysfs
+  and mountinfo: model, size, how it is attached, and what is mounted on it,
+  used as swap or built on it (LVM, RAID), through partitions and holders.
+  One in use is a note, so it takes a click; one not in use is a counted line
+  under the command (`crate::blockdev`). The line starts with the kernel's
+  `/dev` name and facts; the name the request used comes last, plain and
+  cut. Bare words count too, relative to the working directory (`--cwd /dev`
+  with `sda`, `of=sda`). The model is the device's own claim, shown in quotes
+  and reduced to plain characters. A disk named by a computation (a script's
+  `/dev/sd$x`) is not described. Like the other notes, the description is the
+  helper's answer and is not re-checked by root (rule 1: root re-checks what
+  it acts on, and doing this as root would mean looking up requester paths).
 - **A write scope is not containment.** A udev rule, systemd unit, cron entry,
   sudoers fragment or profile script can run commands as root later, and so
   can a file put in `/usr/bin`, `/usr/lib` or `/root`; targets under such

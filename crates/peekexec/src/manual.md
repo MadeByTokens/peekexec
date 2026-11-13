@@ -33,6 +33,7 @@ In a man page viewer, press / and type a section's name to jump to it.
 - Who is asking. Your user id comes from the kernel. Process names are chosen by the processes themselves.
 - The reason given, labelled "unverified" because it is only a claim.
 - Warnings, such as a file that could make root run something later, or a request that arrived right after another.
+- Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning, so it takes a click.
 
 ## Formatted and Raw
 Formatted adds line breaks and indentation so that a long `sh -c` command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.

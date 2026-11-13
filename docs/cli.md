@@ -166,7 +166,10 @@ GUIDE FOR AUTOMATED CALLERS
     Everything else takes a click: scripts, installs, `sh -c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh -c`: it costs the human a click and a closer read.
-    "enter_approves" in preview's view says which applies.
+    "enter_approves" in preview's view says which applies. A disk that is in
+    use (mounted, swap, LVM) also takes a click. Name disks by
+    /dev/disk/by-id/...: unlike /dev/sdX, that name does not change between
+    boots or when a device is plugged in again.
 ```
 
 ## `--json` output

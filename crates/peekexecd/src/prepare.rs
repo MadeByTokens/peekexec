@@ -120,7 +120,7 @@ pub fn prepare(
     notes.extend(inspection.cwd_warning.clone());
     let mismatch = || "internal error: inspection does not match the request".to_string();
 
-    let (sections, exec, enforced) = match (&req.action, inspection.facts) {
+    let (mut sections, exec, enforced) = match (&req.action, inspection.facts) {
         (
             Action::Run { argv },
             Facts::Run {
@@ -285,6 +285,15 @@ pub fn prepare(
         _ => return Err(mismatch()),
     };
 
+    // Each disk named: one in use is a note (so it takes a click), with
+    // what is on it; one that is not is a counted line under the command.
+    for d in inspection.devices {
+        if d.in_use {
+            notes.push(format!("Check the disk: {}", d.text));
+        } else if let Some(main) = sections.last_mut() {
+            main.invocation.push(display_line(&d.text, 400));
+        }
+    }
     notes.extend(sensitive_targets(&sections, &enforced, &workdir.path));
     notes.extend(lasting_root(&executed_text(req)));
     if ctx.dev {
@@ -1569,6 +1578,56 @@ mod tests {
         assert!(with("LANG", "/home/u/locale").is_err());
     }
 
+    // A disk in use is a note, so Enter is off and the human reads which
+    // disk it is; one not in use is a line under the command, and a plain
+    // look at it keeps Enter.
+    #[test]
+    fn a_disk_in_use_takes_a_click_one_unused_is_a_fact() {
+        let with = |in_use: bool| {
+            move |r: &Request, owners: &[u32]| {
+                let (mut i, fd) = crate::inspect::inspect(r, owners)?;
+                i.devices = vec![crate::blockdev::Device {
+                    text: "/dev/sdz: USB disk \"X\", 32.0 GB; nothing on it is mounted or swap."
+                        .into(),
+                    in_use,
+                }];
+                Ok((i, fd))
+            }
+        };
+        let r = req(Action::Run {
+            argv: vec!["lsblk".into(), "/dev/null".into()],
+        });
+        let p = prepare_with(&r, &with(true), false).unwrap();
+        assert!(!p.view.enter_approves);
+        assert!(
+            p.view
+                .notes
+                .iter()
+                .any(|n| n.starts_with("Check the disk: /dev/sdz")),
+            "{:?}",
+            p.view.notes
+        );
+        let p = prepare_with(&r, &with(false), false).unwrap();
+        assert!(p.view.notes.is_empty(), "{:?}", p.view.notes);
+        assert!(p.view.enter_approves);
+        let inv: Vec<&str> = p.view.sections[0]
+            .invocation
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        assert!(
+            inv.iter().any(|l| l.starts_with("/dev/sdz: USB disk")),
+            "{inv:?}"
+        );
+        // Counted in the desktop prompt as well.
+        assert!(
+            system_prompt_message(&p.view, 1000)
+                .unwrap()
+                .contains("/dev/sdz: USB disk"),
+            "the prompt must carry it too"
+        );
+    }
+
     #[test]
     fn enter_approves_only_plain_runs() {
         let run = |argv: &[&str]| {
@@ -1882,6 +1941,10 @@ mod tests {
     }
 
     fn try_prepare_for_tests(r: &Request) -> Result<Prepared, String> {
+        prepare_with(r, &crate::inspect::inspect, true)
+    }
+
+    fn prepare_with(r: &Request, inspect: &Inspector, dev: bool) -> Result<Prepared, String> {
         let uid = nix::unistd::getuid().as_raw();
         let gid = nix::unistd::getgid().as_raw();
         #[cfg(target_os = "linux")]
@@ -1890,9 +1953,9 @@ mod tests {
         let sandbox = crate::platform::macos::Unported;
         let ctx = Ctx {
             sandbox: &sandbox,
-            inspect: &crate::inspect::inspect,
+            inspect,
             wants_password: true,
-            dev: true,
+            dev,
             snapshot_root: Path::new("/nonexistent/peekexec-tests"),
         };
         let peer = Peer {
@@ -2110,6 +2173,47 @@ mod tests {
         let long = format!("/{}", "a".repeat(MAX_WRITE_PATH_LEN));
         assert!(validate(&with(vec![long])).unwrap_err().contains("at most"));
         assert!(validate(&with(vec!["/etc/x".into()])).is_ok());
+    }
+
+    // The everyday hardware job, a disk copied onto a USB stick, names two
+    // disks; both descriptions, like this machine's busiest one, still fit
+    // the desktop prompt with the command.
+    #[test]
+    fn a_disk_to_disk_copy_fits_the_desktop_prompt() {
+        let inspect = |r: &Request, owners: &[u32]| {
+            let (mut i, fd) = crate::inspect::inspect(r, owners)?;
+            i.devices = vec![
+                crate::blockdev::Device {
+                    text: "/dev/nvme0n1: internal disk \"KBG30ZMS512G NVMe TOSHIBA 512GB\", \
+                           512.1 GB; in use: / (on vgubuntu-root), /boot/efi (on nvme0n1p1), \
+                           swap (on vgubuntu-swap_1)."
+                        .into(),
+                    in_use: true,
+                },
+                crate::blockdev::Device {
+                    text: "/dev/sdb: USB disk \"SanDisk Ultra\", 32.0 GB; nothing on it is mounted or \
+                           swap. Named as /dev/disk/by-id/usb-SanDisk_Ultra_4C530001-0:0."
+                        .into(),
+                    in_use: false,
+                },
+            ];
+            Ok((i, fd))
+        };
+        let r = req(Action::Run {
+            argv: [
+                "dd",
+                "if=/dev/null",
+                "of=/dev/null",
+                "bs=4M",
+                "status=progress",
+            ]
+            .map(String::from)
+            .to_vec(),
+        });
+        let mut v = prepare_with(&r, &inspect, false).unwrap().view;
+        v.approval = Approval::SystemPrompt;
+        let m = system_prompt_message(&v, PROMPT_SCREEN_LINES);
+        assert!(m.is_ok(), "{m:?}");
     }
 
     fn prompt_of(script: &str) -> String {

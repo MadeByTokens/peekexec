@@ -40,6 +40,12 @@ A window opens on your desktop, showing:
   "unverified", because it's only their claim.
 - **Warnings,** such as a file that could make root run something later (cron,
   sudoers, systemd), or a request that arrived right after another one.
+- **Which disk is which.** Every disk the command names (`/dev/sdb`,
+  `/dev/disk/by-id/...`) gets a line saying what it is: its model, size, USB or
+  internal, and what's mounted on it. A disk that's in use, such as the one
+  holding `/`, gets a warning and needs a click, so a `dd of=/dev/sda` meant
+  for a USB stick stands out. The model is the device's own claim; the size
+  and the mounts come from the kernel.
 
 Then you choose:
 

@@ -46,6 +46,9 @@ pub struct Inspection {
     pub cwd: String,
     pub cwd_warning: Option<String>,
     pub facts: Facts,
+    /// Each disk the request names, described (see [`crate::blockdev`]).
+    #[serde(default)]
+    pub devices: Vec<crate::blockdev::Device>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,11 +121,19 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             }
         }
     };
+    let (args, text): (&[String], &[u8]) = match &req.action {
+        Action::Run { argv } => (&argv[1..], b""),
+        Action::Script { content, args, .. } => (args, content),
+        Action::Install { content, .. } => (&[], content),
+    };
+    let text = String::from_utf8_lossy(text);
+    let devices = crate::blockdev::describe(named_paths(args, &text), &cwd);
     Ok((
         Inspection {
             cwd,
             cwd_warning,
             facts,
+            devices,
         },
         fd,
     ))
@@ -727,6 +738,21 @@ fn named_in_text(text: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
+/// Every value in a request that may name a path: each argument and its
+/// option forms, the words of an argument that is code, and the paths in
+/// `text` (a script, an installed file).
+fn named_paths<'a>(args: &'a [String], text: &'a str) -> impl Iterator<Item = String> + 'a {
+    args.iter()
+        .flat_map(|a| {
+            let inner = is_code(a).then(|| named_in_text(a));
+            path_candidates(a)
+                .into_iter()
+                .map(str::to_string)
+                .chain(inner.into_iter().flatten())
+        })
+        .chain(named_in_text(text))
+}
+
 /// Paths the user could change (`sh ~/x.sh`, `cp -r /tmp/d /etc/`,
 /// `--config=/home/u/c`, `-f/home/u/x`, a symlink of theirs, a file they
 /// may create later), named by an argument, by a word inside an argument
@@ -736,16 +762,7 @@ fn named_in_text(text: &str) -> impl Iterator<Item = String> + '_ {
 /// note for all of them.
 fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) -> Option<String> {
     let text = String::from_utf8_lossy(text);
-    let named = args
-        .iter()
-        .flat_map(|a| {
-            let inner = is_code(a).then(|| named_in_text(a));
-            path_candidates(a)
-                .into_iter()
-                .map(str::to_string)
-                .chain(inner.into_iter().flatten())
-        })
-        .chain(named_in_text(&text));
+    let named = named_paths(args, &text);
     let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<String> = Vec::new();
     let mut too_many = false;
@@ -1089,6 +1106,7 @@ mod tests {
                 program,
                 file_args_note: None,
             },
+            devices: Vec::new(),
         };
         assert!(verify(&run, &honest, &dir_fd("/"), &owners).is_ok());
 
@@ -1253,6 +1271,7 @@ mod tests {
                 program: program.to_str().unwrap().into(),
                 file_args_note: None,
             },
+            devices: Vec::new(),
         }
     }
 

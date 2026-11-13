@@ -9,6 +9,7 @@
 #[cfg(all(feature = "test-approver", not(debug_assertions)))]
 compile_error!("test-approver is for debug builds and tests only");
 
+pub mod blockdev;
 pub mod exec;
 pub mod inspect;
 pub mod platform;

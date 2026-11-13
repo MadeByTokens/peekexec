@@ -109,7 +109,17 @@ pub fn check_dir(dir: &std::fs::File, shown: &str, owners: &[u32]) -> Result<(),
 /// directory under the user's control counts too. Kernel filesystems
 /// (/proc, /sys, /dev) are nosuid but their owners are real.
 pub fn check_named(path: &Path, owners: &[u32]) -> Result<(), String> {
+    check_named_from(path, owners, 0)
+}
+
+/// As many links as the kernel follows in one lookup (`MAXSYMLINKS`).
+const MAX_LINKS: u32 = 40;
+
+fn check_named_from(path: &Path, owners: &[u32], links: u32) -> Result<(), String> {
     use std::os::unix::fs::FileTypeExt;
+    if links > MAX_LINKS {
+        return Err(format!("{}: too many links", path.display()));
+    }
     for p in path.ancestors() {
         // A device node's mode says who may use the device (/dev/null is
         // 0666), not who may change what the name refers to: its directory
@@ -120,7 +130,16 @@ pub fn check_named(path: &Path, owners: &[u32]) -> Result<(), String> {
         };
         match std::fs::symlink_metadata(p) {
             Ok(m) if device(&m) => continue,
-            Ok(_) => {
+            Ok(m) => {
+                // The link's target is a name too, looked up again after
+                // approval: each link followed is held to this same rule,
+                // not only the prefixes as written and the final target.
+                if m.file_type().is_symlink() {
+                    let target =
+                        std::fs::read_link(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                    let target = p.parent().unwrap_or(Path::new("/")).join(target);
+                    check_named_from(&target, owners, links + 1)?;
+                }
                 check_with(p, owners, true)?;
             }
             Err(_) => {}
@@ -135,6 +154,17 @@ fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf
         .map_err(|e| format!("{}: {e}", path.display()))?;
     for p in canon.ancestors() {
         let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        // A name a program uses (`kernel_fs_ok`, from `check_named`) that
+        // leads to a device through a link (`/dev/disk/by-id/...`): judged
+        // as the device named directly, by the directories above it. Only
+        // the last component can be a device.
+        if kernel_fs_ok && {
+            use std::os::unix::fs::FileTypeExt;
+            let t = m.file_type();
+            t.is_char_device() || t.is_block_device()
+        } {
+            continue;
+        }
         if !owners.contains(&m.uid()) {
             return Err(format!(
                 "{} is owned by uid {}, which is not trusted: it could change after approval",
@@ -272,6 +302,66 @@ mod tests {
         assert!(check(&f, &[0, me])
             .unwrap_err()
             .contains("writable by other"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // `/dev/disk/by-id/...` is how careful people name a disk: a link to a
+    // device is judged as the device named directly (by its directories,
+    // not by the node's mode, 0666 for /dev/null, 0660 for a disk), while
+    // the link and its directory still have to be root-controlled.
+    #[test]
+    fn a_link_to_a_device_is_judged_as_the_device() {
+        let Some(dir) = test_dir("devlink") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
+        let me = nix::unistd::geteuid().as_raw();
+        let owners = [0, me];
+        assert!(check_named(Path::new("/dev/null"), &owners).is_ok());
+        let link = dir.join("null");
+        std::os::unix::fs::symlink("/dev/null", &link).unwrap();
+        let r = check_named(&link, &owners);
+        assert!(r.is_ok(), "{r:?}");
+        // The rule is about the device node only: a link to a file others
+        // can write is still refused.
+        let f = dir.join("open");
+        std::fs::write(&f, "").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let to_file = dir.join("to-open");
+        std::os::unix::fs::symlink(&f, &to_file).unwrap();
+        assert!(check_named(&to_file, &owners).is_err());
+        // And a link in a directory root does not control is refused,
+        // whatever it points to.
+        if me != 0 {
+            assert!(check_named(&link, &[0]).is_err());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A link that a trusted link leads to is a name too: whoever controls
+    // its directory can point it elsewhere after approval, whether it
+    // ends at a device or at a file.
+    #[test]
+    fn every_link_followed_is_checked() {
+        let Some(dir) = test_dir("linkhop") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
+        let owners = [0, nix::unistd::geteuid().as_raw()];
+        let open = dir.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        for target in ["/dev/null", "/etc/hostname"] {
+            let hop = open.join("hop");
+            let _ = std::fs::remove_file(&hop);
+            std::os::unix::fs::symlink(target, &hop).unwrap();
+            let first = dir.join("first");
+            let _ = std::fs::remove_file(&first);
+            // Relative, as most links are: resolved from the link's directory.
+            std::os::unix::fs::symlink("open/hop", &first).unwrap();
+            let r = check_named(&first, &owners);
+            assert!(r.is_err(), "{target}: {r:?}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
