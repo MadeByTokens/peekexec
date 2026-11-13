@@ -269,17 +269,17 @@ in this note refer to commit 99f2713.
 
 ## Fixes after the second pass
 
-- `f01a66a`: a device reached through a link is judged as the device, so
+- In `c89f9e5`: a device reached through a link is judged as the device, so
   `/dev/disk/by-id/...`, `by-uuid` and `/dev/mapper/...` lose the false note.
-- `714e9de`: every link a name leads through is checked, closing an older gap
-  (a root-owned link to a user's link) that the previous commit had made
-  reachable for devices. Raised by an automated review of `f01a66a`.
+- Also in `c89f9e5`: every link a name leads through is checked, closing an
+  older gap (a root-owned link to a user's link) that judging links as
+  devices had made reachable. Raised by an automated review of that step.
 - Disks described (`blockdev.rs`): run on this host with `preview` against a
   dev daemon, which reported
   `/dev/nvme0n1: internal disk "KBG30ZMS512G NVMe TOSHIBA 512GB", 512.1 GB;
   in use: / (on vgubuntu-root), /boot/efi (on nvme0n1p1), swap (on
   vgubuntu-swap_1).`, and on Xvfb for the dialog. Seen there: every note is
-  drawn in small text, the disk warning included (fixed later in `12fde9d`).
+  drawn in small text, the disk warning included (fixed later in `7732721`).
 - An automated review of the disk commit raised three points: (1) root does
   not re-check the helper's description: accepted, like the other notes, and
   stated in THREAT_MODEL; (2) `--cwd /dev` with a bare `sda` or `of=sda` was
@@ -288,7 +288,7 @@ in this note refer to commit 99f2713.
   pass found that checking every word let a long script use up the 1000-word
   bound before naming a disk: now only distinct words count, and past the
   bound a note says disks after it were not looked for.
-- Found then, fixed later in `b4a5d7a`: `/etc/resolv.conf` (owned by
+- Found then, fixed later in `bc5491e`: `/etc/resolv.conf` (owned by
   systemd-resolve) and `/run/utmp` (group-writable) got "root does not
   control" notes, and `--cwd /dev` was called a nosuid mount "for a user".
 - Later work (items 3, 4, the window, the walk rules, the final review) is

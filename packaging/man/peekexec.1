@@ -69,7 +69,7 @@ The reason given, labelled "unverified" because it is only a claim.
 .IP \(bu 2
 Warnings, such as a file that could make root run something later, or a request that arrived right after another.
 .IP \(bu 2
-Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click unless you could read it yourself (members of \fBdisk\fR). A disk named as \fB/dev/disk/by\-label/...\fR or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
+Each disk the command names (up to four; more are a warning), described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click. A disk named as \fB/dev/disk/by\-label/...\fR or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
 .PP
 .SS "Formatted and Raw"
 Formatted adds line breaks and indentation so that a long \fBsh \-c\fR command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.
@@ -91,9 +91,11 @@ Enter works only if all of this is true:
 .IP \(bu 2
 It is a single \fBpeekexec run\fR of a program that only reads and reports, such as \fBls\fR, \fBcat\fR, \fBid\fR, \fBuname\fR or \fBdf\fR, or one of a few everyday commands, such as \fBsystemctl status\fR, \fBsystemctl daemon\-reload\fR, \fBudevadm trigger\fR or \fBudevadm control \-\-reload\-rules\fR (the last three re\-apply system settings; \fBudevadm trigger\fR replays device events, so rules run again).
 .IP \(bu 2
-It has at most 16 words, and no argument holds spaces or shell syntax.
+It has at most 16 words (1024 bytes), and no argument holds spaces or shell syntax.
 .IP \(bu 2
-Nothing in it triggered a warning. Naming a file you cannot read without root (\fBcat /etc/gshadow\fR, \fBhead \-c 512 /dev/sda\fR) is a warning: its content would come back to the agent.
+It does not list or read below what it names: \fBls \-R\fR, \fB\-\-recursive\fR, \fB\-\-files0\-from\fR, and any \fBdu\fR but a plain total (\fBdu \-sh\fR) need a click.
+.IP \(bu 2
+Nothing in it triggered a warning. Naming a file you cannot read without root (\fBcat /etc/gshadow\fR, \fBcat /proc/kallsyms\fR) is a warning: its content would come back to the agent. Naming any disk turns Enter off too.
 .IP \(bu 2
 It did not arrive right after another dialog, with others waiting, or as a near\-copy of a recent request.
 .IP \(bu 2
@@ -423,13 +425,14 @@ GUIDE FOR AUTOMATED CALLERS
     reload (udevadm control \-\-reload\-rules, udevadm trigger, systemctl
     daemon\-reload) with a few plain arguments and nothing to warn about.
     Naming a file the user cannot read without root is a warning: its
-    content would come back to you, so the human must click.
+    content would come back to you, so the human must click. A walk below
+    what is named (ls \-R, \-\-recursive, \-\-files0\-from, du other than a plain
+    total such as du \-sh) takes a click too.
     Everything else takes a click: scripts, installs, `sh \-c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh \-c`: it costs the human a click and a closer read.
     "enter_approves" in preview's view says which applies. Naming a disk
-    takes a click unless the user can read it, and one in use (mounted, swap,
-    LVM) is a warning. Name disks by /dev/disk/by\-id/...: unlike /dev/sdX,
+    always takes a click, and one in use (mounted, swap, LVM) is a warning. Name disks by /dev/disk/by\-id/...: unlike /dev/sdX,
     that name does not change between boots or when a device is plugged in
     again. If a disk name leads elsewhere by the time the command runs, it
     does not run ("no longer leads to the disk that was shown").

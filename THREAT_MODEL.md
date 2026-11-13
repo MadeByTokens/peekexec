@@ -41,7 +41,8 @@ refused before approval; such steps go inside `peekexec script`, where the
 human reads them. A path named in an argument or in script text is not
 refused: one that exists but that the user cannot read, or cannot reach, gets
 a note (the command would read it as root and its output comes back to the
-requester), which also turns Enter off.
+requester), which also turns Enter off. A disk gets its own line instead,
+and naming one always turns Enter off.
 
 It does not promise:
 
@@ -449,11 +450,12 @@ Sources for what each group gives are in the README, under
   about a working directory root does not control.
 - **`/dev/sdb` says nothing about which disk it is.** Every block device a
   request names (an argument, an option value such as `of=`, a word of a
-  script) is described by the inspection helper, as the user, from sysfs
+  script; the first four, more get one warning line) is described by the
+  inspection helper, as the user, from sysfs
   and mountinfo: model, size, how it is attached, and what is mounted on it,
   used as swap or built on it (LVM, RAID), through partitions and holders.
-  One in use is a note, so it takes a click; one not in use is a counted line
-  under the command (`crate::blockdev`). The line starts with the kernel's
+  One in use is a note; one not in use is a counted line under the command
+  (`crate::blockdev`); naming any disk takes a click. The line starts with the kernel's
   `/dev` name and facts; the name the request used comes last, plain and
   cut. In arguments, bare words count too, relative to the working directory
   (`--cwd /dev` with `sda`, `of=sda`), and so do the words of an argument
@@ -494,8 +496,11 @@ Sources for what each group gives are in the README, under
   and a few everyday subcommands (`udevadm control`, `systemctl status`), with
   at most 16 words and 1024 bytes, no argument holding spaces or shell
   syntax, only when there is nothing to warn about (naming a path the user
-  cannot read without root is a warning: `cat /etc/gshadow`, `head -c 512
-  /dev/sda`, `ls /root`, and under `/proc` anything but a short list that
+  cannot read without root is a warning, a bare word counting from the
+  working directory, except that for `id` a directory in `/` is a user
+  name (`id root`); for any other program it counts, as `ls root` there
+  lists /root, and so does a file there, `cat swapfile`): `cat /etc/gshadow`,
+  `ls /root`, and under `/proc` anything but a short list that
   shows every reader the same (`cpuinfo`, `partitions`, `mtd`, `bus/`,
   `sys/`...) and the reader's own `/proc/self`: `/proc/kallsyms`,
   `/proc/net/unix` or another process's `maps` show root more than the
@@ -565,7 +570,8 @@ a process that already has one keeps it).
 ## Known limits
 
 These are open, and known. Details of the smaller ones are in
-[docs/notes/fifth-review.md](docs/notes/fifth-review.md).
+[docs/notes/sixth-review-followups.md](docs/notes/sixth-review-followups.md)
+and, for earlier ones, [docs/notes/fifth-review.md](docs/notes/fifth-review.md).
 
 - **Tier 2 and shell extensions.** See
   [What that evidence does not prove](#what-that-evidence-does-not-prove).

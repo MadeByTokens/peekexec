@@ -112,3 +112,47 @@ fn a_helper_that_never_answers_is_cut_off() {
         "{took:?}"
     );
 }
+
+// The production path for a disk: the helper process describes and binds
+// it, the answer crosses the socket, and root's `verify` accepts the names
+// as ones the request uses, plain, bare from the working directory, and as
+// an option's value.
+#[test]
+fn a_named_disk_crosses_the_helper_and_verifies() {
+    let _serial = serial();
+    let Some(disk) = std::fs::read_dir("/sys/block").ok().and_then(|d| {
+        d.flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .find(|n| Path::new("/dev").join(n).exists())
+    }) else {
+        eprintln!("skipped: no block device");
+        return;
+    };
+    let argv = |cwd: &str, args: &[&str]| Request {
+        action: Action::Run {
+            argv: std::iter::once("true")
+                .chain(args.iter().copied())
+                .map(String::from)
+                .collect(),
+        },
+        cwd: cwd.into(),
+        ..request("/")
+    };
+    let full = format!("/dev/{disk}");
+    let of = format!("of={disk}");
+    for (cwd, args) in [
+        ("/", vec![full.as_str()]),
+        ("/dev", vec![disk.as_str()]),
+        ("/dev", vec![of.as_str()]),
+        ("/", vec!["/proc/1/environ", full.as_str()]),
+    ] {
+        let (inspection, _fd) = inspect_as(Path::new(HELPER), None, &argv(cwd, &args), &owners())
+            .unwrap_or_else(|e| panic!("{cwd} {args:?}: {e}"));
+        assert!(
+            inspection.disks.iter().any(|(_, mm)| !mm.is_empty()),
+            "{cwd} {args:?}: {:?}",
+            inspection.disks
+        );
+        assert!(!inspection.devices.is_empty(), "{cwd} {args:?}");
+    }
+}

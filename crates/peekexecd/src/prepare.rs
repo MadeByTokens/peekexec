@@ -383,7 +383,10 @@ pub fn prepare(
         return Err("this request is too large for the dialog to show; split it".into());
     }
     let mut view = view;
-    view.enter_approves = plain_run(req, &exec) && view.notes.is_empty() && view.findings() == 0;
+    // Naming a disk at all takes a click: a raw read of one is a secret
+    // handed to the requester, and a write the step hardest to undo.
+    view.enter_approves =
+        plain_run(req, &exec) && view.notes.is_empty() && view.findings() == 0 && disks.is_empty();
     Ok(Prepared {
         view,
         exec,
@@ -540,7 +543,20 @@ pub fn use_system_prompt(view: &mut PromptView) {
     view.approval = Approval::SystemPrompt;
     view.wants_password = false;
     view.notes.retain(|n| !n.starts_with(UNVERIFIED_NOTE));
-    view.notes.insert(0, Shown::fixed(SYSTEM_PROMPT_NOTE_TEXT));
+    first_note(view, Shown::fixed(SYSTEM_PROMPT_NOTE_TEXT));
+}
+
+/// Put `note` at the top of the view's notes, below any disk in use: on a
+/// hardware job which disk it is matters most, and notes added after
+/// preparing (back to back, a near-copy, the desktop prompt) must not push
+/// it down.
+pub fn first_note(view: &mut PromptView, note: Shown) {
+    let disks = view
+        .notes
+        .iter()
+        .take_while(|n| n.as_str().starts_with(DISK_NOTE))
+        .count();
+    view.notes.insert(disks, note);
 }
 
 /// What GNOME Shell's polkit dialog can show, measured on GNOME Shell 46
@@ -1644,11 +1660,25 @@ mod tests {
         assert!(with("LANG", "/home/u/locale").is_err());
     }
 
+    /// Whether this machine adds no note of its own to every request (the
+    /// Yama one): tests that expect Enter skip where it would.
+    fn quiet_machine() -> bool {
+        let quiet = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+            .is_ok_and(|s| s.trim().parse::<u32>().is_ok_and(|v| v >= 1));
+        if !quiet {
+            eprintln!("skipped: ptrace_scope is not 1 or more here, so every request has a note");
+        }
+        quiet
+    }
+
     // A disk in use is a note, so Enter is off and the human reads which
     // disk it is; one not in use is a line under the command, and a plain
     // look at it keeps Enter.
     #[test]
     fn a_disk_in_use_takes_a_click_one_unused_is_a_fact() {
+        if !quiet_machine() {
+            return;
+        }
         let with = |in_use: bool| {
             move |r: &Request, owners: &[u32]| {
                 let (mut i, fd) = crate::inspect::inspect(r, owners)?;
@@ -1690,6 +1720,13 @@ mod tests {
         let p = prepare_with(&r, &with(false), false).unwrap();
         assert!(p.view.notes.is_empty(), "{:?}", p.view.notes);
         assert!(p.view.enter_approves);
+        // A disk actually named and bound takes a click, in use or not.
+        let bound = |r: &Request, owners: &[u32]| {
+            let (mut i, fd) = crate::inspect::inspect(r, owners)?;
+            i.disks = vec![("/dev/sdz".into(), "8:250".into())];
+            Ok((i, fd))
+        };
+        assert!(!prepare_with(&r, &bound, false).unwrap().view.enter_approves);
         let inv: Vec<&str> = p.view.sections[0]
             .invocation
             .iter()
@@ -1713,7 +1750,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn reading_what_only_root_can_read_takes_a_click() {
-        if nix::unistd::geteuid().is_root() {
+        if nix::unistd::geteuid().is_root() || !quiet_machine() {
             return;
         }
         let view = |argv: &[&str], cwd: &str| {
@@ -1758,6 +1795,13 @@ mod tests {
             .notes
             .iter()
             .any(|n| n.contains("without root: the command gets it")));
+        // A bare word in / is a name for `id`: `id root` keeps Enter. For
+        // any other program it is the path: `ls root` lists /root.
+        assert!(view(&["id", "root"], "/").enter_approves);
+        if nix::unistd::access("/root", nix::unistd::AccessFlags::R_OK).is_err() {
+            assert!(!view(&["ls", "root"], "/").enter_approves);
+            assert!(!view(&["/usr/bin/ls", "root"], "/").enter_approves);
+        }
         // What the user can read keeps Enter, and a file not there yet is
         // no secret.
         for argv in [
@@ -1770,6 +1814,25 @@ mod tests {
         }
         let v = view(&["ls", "/no/such/path"], "/");
         assert!(v.notes.is_empty(), "{:?}", v.notes);
+    }
+
+    // Notes added after preparing go first, but below a disk in use.
+    #[test]
+    fn a_disk_stays_above_later_notes() {
+        let mut v = prepare_for_tests(&req(Action::Run {
+            argv: vec!["true".into()],
+        }))
+        .view;
+        v.notes = vec![
+            Shown::fixed("Check the disk: /dev/sda: internal disk"),
+            Shown::fixed("other"),
+        ];
+        first_note(&mut v, Shown::fixed("Differs in 2 lines"));
+        use_system_prompt(&mut v);
+        let order: Vec<&str> = v.notes.iter().map(|n| n.as_str()).collect();
+        assert!(order[0].starts_with(DISK_NOTE), "{order:?}");
+        assert_eq!(order[1], SYSTEM_PROMPT_NOTE_TEXT, "{order:?}");
+        assert_eq!(order[2], "Differs in 2 lines", "{order:?}");
     }
 
     #[test]
@@ -2371,6 +2434,12 @@ mod tests {
                         .into(),
                     in_use: false,
                 },
+            ];
+            // As on a real machine, where both are named: bound, and no
+            // root-only note for a disk (it has its line).
+            i.disks = vec![
+                ("/dev/nvme0n1".into(), "259:0".into()),
+                ("/dev/sdb".into(), "8:16".into()),
             ];
             Ok((i, fd))
         };

@@ -1021,8 +1021,8 @@ impl Daemon {
             if recent {
                 prepared.view.input_guard_ms = 1500;
                 prepared.view.enter_approves = false;
-                prepared.view.notes.insert(
-                    0,
+                prepare::first_note(
+                    &mut prepared.view,
                     Shown::fixed(
                         "This request arrived right after the previous one. Read it before \
                          approving.",
@@ -1033,7 +1033,7 @@ impl Daemon {
             // would approve into.
             if let Some(note) = self.waiting_note(peer.uid, id) {
                 prepared.view.enter_approves = false;
-                prepared.view.notes.insert(0, note);
+                prepare::first_note(&mut prepared.view, note);
             }
             self.compare_with_last(peer.uid, request, &mut prepared.view);
             let withdrawn = cancel.load(Ordering::SeqCst);
@@ -1251,8 +1251,8 @@ impl Daemon {
             Compared::Alike(section, changed) => {
                 view.sections.push(section);
                 view.enter_approves = false;
-                view.notes.insert(
-                    0,
+                prepare::first_note(
+                    view,
                     display_line(
                         &format!(
                             "Differs in {changed} line{} from the request you saw at {}: the \
@@ -1268,8 +1268,8 @@ impl Daemon {
             // Rewriting enough of a request must not be a way to lose the note.
             Compared::Unlike => {
                 view.enter_approves = false;
-                view.notes.insert(
-                    0,
+                prepare::first_note(
+                    view,
                     display_line(
                         &format!(
                             "Much of this differs from the request you saw at {}: read all of it.",

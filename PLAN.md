@@ -10,9 +10,10 @@ For what it is and how to use it, see the [README](README.md).
 
 ## The problem
 
-pkexec's dialog says "run /bin/sh as super user". You cannot see the command or
-the script, and nothing stops the script from changing between the prompt and
-the run.
+pkexec's dialog says "run /bin/sh as super user" (polkit before 123; since then
+it shows the command line cut to about 80 characters, middle left out). You
+cannot see the whole command or the script, and nothing stops the script from
+changing between the prompt and the run.
 
 ## What it guarantees, and what not
 

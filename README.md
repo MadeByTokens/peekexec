@@ -5,8 +5,10 @@ what it wants to run before you type your password.
 
 It was built for AI coding agents. They often need root for a step or two, and
 the usual prompt tells you almost nothing: pkexec asks for your password to
-"run /bin/sh as super user". peekexec shows you the real command instead, along
-with who is asking and why.
+"run /bin/sh as super user" (polkit before 123, as on Ubuntu 22.04), or shows
+the command cut to about 80 characters with its middle left out (123 and later).
+peekexec shows you the real command instead, along with who is asking and why
+([compared with pkexec's source](docs/notes/pkexec-comparison.md)).
 
 > [!WARNING]
 > **This is experimental, pre-alpha software, and no independent security
@@ -40,13 +42,12 @@ A window opens on your desktop, showing:
   "unverified", because it's only their claim.
 - **Warnings,** such as a file that could make root run something later (cron,
   sudoers, systemd), or a request that arrived right after another one.
-- **Which disk is which.** Every disk the command names (`/dev/sdb`,
-  `/dev/disk/by-id/...`) gets a line saying what it is: its model, size, USB or
+- **Which disk is which.** Each disk the command names (`/dev/sdb`,
+  `/dev/disk/by-id/...`; up to four, more are a warning) gets a line saying what it is: its model, size, USB or
   internal, and what's mounted on it. A disk that's in use, such as the one
   holding `/`, gets a warning, so a `dd of=/dev/sda` meant for a USB stick
-  stands out. Naming a disk at all needs a click unless you could read it
-  yourself (members of `disk` can). The model is the device's own claim; the
-  size and the mounts come from the kernel.
+  stands out. Naming a disk at all needs a click. The model is the device's
+  own claim; the size and the mounts come from the kernel.
 
 Then you choose:
 
@@ -128,8 +129,8 @@ Some other things worth knowing:
 
 - **The output goes back to the agent.** If you approve `cat /etc/shadow`, the
   agent receives it. So a command that names a file you couldn't read
-  yourself (`/etc/gshadow`, your Wi-Fi passwords, a raw disk) gets a warning
-  and needs a click.
+  yourself (`/etc/gshadow`, your Wi-Fi passwords) gets a warning and needs a
+  click. Naming a disk needs a click too.
 - **Requests must be short on Wayland.** About 22 lines of 45 characters,
   warnings included, on a 768-pixel-tall screen. Longer requests are refused,
   so agents have to split them into steps.
@@ -177,9 +178,13 @@ Sources, checked on 2026-11-13:
 - LXD: local socket access ["always grants full access"; give it only to users "you'd trust with root access"](https://canonical.com/lxd/docs/latest/explanation/security/).
 - Incus: [`incus-admin` "can fully control Incus"](https://linuxcontainers.org/incus/docs/main/explanation/security/); the [`incus` group "will only grant access to the Incus user socket"](https://linuxcontainers.org/incus/docs/main/installing/).
 - libvirt: a connection to the system daemon's read-write socket ["gives the client privileges that are equivalent to having a root shell"](https://libvirt.org/daemons.html).
-- Debian's [list of system groups](https://wiki.debian.org/SystemGroups): `disk` is "mostly equivalent to root access"; `dialout` gives "full and direct access to serial ports"; `shadow` can read `/etc/shadow`.
+- Debian's [list of system groups](https://wiki.debian.org/SystemGroups): `disk` is "mostly equivalent to root access"; `dialout` gives "full and direct access to serial ports"; `shadow` can read `/etc/shadow`; `adm` "is used for system monitoring tasks"; `plugdev` may mount and unmount removable devices; `dip` members "may run the programs that make use of" the modem.
 - Kernel docs: [uinput](https://www.kernel.org/doc/html/latest/input/uinput.html) "makes it possible to emulate input devices from userspace". systemd docs: on a device tagged [`uaccess`](https://www.freedesktop.org/software/systemd/man/latest/sd-login.html), "access to this device is tied to an active seat".
 - `input`: on Ubuntu, `/dev/input/event*` is mode 0660, group `input`.
+- Not from a cited source: the rows for `systemd-journal`, `wireshark`,
+  `kvm`, `uucp`, `cdrom`, `i2c`, `spi`, `gpio`, `bluetooth` and `lp` follow
+  from the device files or sockets those groups own on Ubuntu. Check what
+  a group gives on your machine with `find /dev /run -group NAME -ls`.
 
 ## When to use something else
 
@@ -257,7 +262,7 @@ troubleshooting.
 | [docs/cli.md](docs/cli.md) | The full command-line and JSON reference |
 | [PLAN.md](PLAN.md) | Design, architecture and what's planned |
 | [docs/review-checklist.md](docs/review-checklist.md) | How security reviews are done |
-| [docs/notes/fifth-review.md](docs/notes/fifth-review.md) | The latest review, and what it left open |
+| [docs/notes/sixth-review.md](docs/notes/sixth-review.md) | The latest review; [its follow-ups](docs/notes/sixth-review-followups.md) say what was fixed and what is left |
 
 To work on peekexec itself:
 

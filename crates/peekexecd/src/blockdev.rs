@@ -254,10 +254,11 @@ fn identity(disk: &Path) -> String {
     }
     let vendor = read(&disk.join("device/vendor")).unwrap_or_default();
     let model = read(&disk.join("device/model")).unwrap_or_default();
-    // "ATA" is the transport, not a maker.
+    // "ATA" is the transport, not a maker, and virtio and NVMe disks give
+    // a PCI vendor number ("0x1af4") where a name would be.
     let label = [vendor.as_str(), model.as_str()]
         .iter()
-        .filter(|s| !s.is_empty() && **s != "ATA")
+        .filter(|s| !s.is_empty() && **s != "ATA" && !s.starts_with("0x"))
         .copied()
         .collect::<Vec<_>>()
         .join(" ");
@@ -718,6 +719,26 @@ mod tests {
         let twice = [first.clone(), format!("/dev/./{}", &first[5..])];
         let (_, bound) = describe_and_bind(twice.into_iter(), "/");
         assert_eq!(bound.len(), 2, "{bound:?}");
+    }
+
+    // A virtio disk: a vendor number and no model is "no model name".
+    #[test]
+    fn a_vendor_number_is_not_a_name() {
+        let root = fake_sys("virtio");
+        let vda = root.join("devices/pci0000:00/virtio1/block/vda");
+        fs::create_dir_all(vda.join("device")).unwrap();
+        fs::write(vda.join("size"), "62914560\n").unwrap();
+        fs::write(vda.join("removable"), "0\n").unwrap();
+        fs::write(vda.join("dev"), "252:0\n").unwrap();
+        fs::write(vda.join("device/vendor"), "0x1af4\n").unwrap();
+        std::os::unix::fs::symlink(&vda, root.join("dev/block/252:0")).unwrap();
+        let d = describe_at(&system(&root, "", &[]), "/dev/vda", "252:0").unwrap();
+        assert!(
+            d.text.starts_with("/dev/vda: internal disk, no model name"),
+            "{}",
+            d.text
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

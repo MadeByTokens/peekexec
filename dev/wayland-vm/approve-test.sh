@@ -28,6 +28,13 @@ if [ "${1:-}" = --install ]; then
 fi
 
 failed=0
+# peekexec's Continue button on the 1024x768 screen. The window opens at 85%
+# of the screen (GNOME fits it to the work area) with the warnings count above
+# the buttons; measured from a screenshot. If it moves, cases that end with
+# Esc would pass without reaching GNOME's prompt: "approve" is the case
+# that shows it was reached.
+continue_x=968
+continue_y=700
 # A word in every request, so that no earlier run's denial (remembered for
 # an hour) matches it.
 nonce=$(date +%s)
@@ -61,25 +68,28 @@ check() {
 
 # Approve: Continue in peekexec's window, then the password in GNOME's prompt.
 start approve run --json -- id -u
-"$here/click.sh" 968 718
+"$here/click.sh" "$continue_x" "$continue_y"
 sleep 3
 "$here/type.sh" tester
 check approve 'r["status"] == "approved" and r["stdout"] == "0\n" and r["display_verified"] is False'
 
 # Dismissing GNOME's prompt cancels the request.
 start dismiss run --json -- true "dismiss-$nonce"
-"$here/click.sh" 968 718
+"$here/click.sh" "$continue_x" "$continue_y"
 sleep 3
 "$here/key.sh" esc
 check dismiss 'r["status"] == "cancelled"'
 
 # A wrong password is not an approval.
 start wrong run --json -- true "wrong-$nonce"
-"$here/click.sh" 968 718
+"$here/click.sh" "$continue_x" "$continue_y"
 sleep 3
 "$here/type.sh" wrongpassword
 sleep 3
 "$here/key.sh" esc
+# GNOME's prompt stays open after a wrong password, so the Esc that ends the
+# case dismisses it: cancelled is as right as auth_failed. That Continue was
+# reached is shown by "approve" above, with the same position.
 check wrong 'r["status"] in ("auth_failed", "cancelled")'
 
 # Deny with a reason, in peekexec's window: the reason comes back.

@@ -158,21 +158,29 @@ fn readers_own(path: &Path) -> bool {
     if path.components().any(|c| c == Component::ParentDir) {
         return false;
     }
-    let p = path.to_string_lossy();
     // Entries that lead on to other files (`/proc/self/root/tmp/x` is
     // `/tmp/x`, `cwd/...` the command's directory) are judged where they
-    // lead, as the path note always did.
+    // lead, as the path note always did. Decided on the parsed components,
+    // so `//` and `.` cannot hide one (`/proc/self//root/...`).
     const LEADS_ON: &[&str] = &["root", "cwd", "fd", "map_files", "exe", "task"];
-    let own = |base: &str| {
-        p.strip_prefix(base)
-            .and_then(|r| r.strip_prefix('/'))
-            .is_some_and(|r| !LEADS_ON.contains(&r.split('/').next().unwrap_or("")))
-    };
-    own("/proc/self")
-        || own("/proc/thread-self")
-        || p == "/proc/net"
-        || p.starts_with("/proc/net/")
-        || p == "/proc/mounts"
+    let mut parts = path.components();
+    if parts.next() != Some(Component::RootDir) {
+        return false;
+    }
+    let names: Vec<String> = parts
+        .map(|c| match c {
+            Component::Normal(n) => n.to_string_lossy().into_owned(),
+            // Anything else (`.` at the start, a prefix) is not plain.
+            _ => String::from("\0"),
+        })
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    match names.as_slice() {
+        ["proc", "self" | "thread-self", first, ..] => !LEADS_ON.contains(first) && *first != "\0",
+        ["proc", "net", ..] => true,
+        ["proc", "mounts"] => true,
+        _ => false,
+    }
 }
 
 /// As many links as the kernel follows in one lookup (`MAXSYMLINKS`).
@@ -511,6 +519,14 @@ mod tests {
         // process of the user's, by number, is the user's.
         assert!(check_named(Path::new("/proc/self/status"), &yours).is_ok());
         assert!(check_named(Path::new("/proc/net/unix"), &yours).is_ok());
+        // `//` and `.` do not hide an entry that leads on.
+        for hidden in [
+            "/proc/self//root/tmp",
+            "/proc/self/./cwd",
+            "/proc/self//fd/0",
+        ] {
+            assert!(!readers_own(Path::new(hidden)), "{hidden}");
+        }
         let mine = format!("/proc/{}/fd/0", std::process::id());
         assert!(check_named(Path::new(&mine), &yours).is_err(), "{mine}");
         let back = format!("/proc/self/../{}/environ", std::process::id());

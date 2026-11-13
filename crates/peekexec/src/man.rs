@@ -331,6 +331,8 @@ mod tests {
             "release",
             "locked",
             "reload-rules",
+            "recursive",
+            "files0-from",
         ];
         for word in MANUAL.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
             if let Some(name) = word.strip_prefix("--").filter(|n| !n.is_empty()) {

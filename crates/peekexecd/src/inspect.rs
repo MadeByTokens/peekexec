@@ -128,6 +128,17 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             }
         }
     };
+    // `id root` names a user, not /root: `id` reads no file it is given.
+    // By the name asked for and the file it leads to, links followed: a
+    // link named `id` to another program (or to busybox) is not `id`.
+    let is_id = |p: &Path| p.file_name() == Some("id".as_ref());
+    let takes_names = match (&req.action, &facts) {
+        (Action::Run { argv }, Facts::Run { program, .. }) => {
+            argv.first().is_some_and(|a| is_id(Path::new(a)))
+                && std::fs::canonicalize(program).is_ok_and(|p| is_id(&p))
+        }
+        _ => false,
+    };
     let (args, text): (&[String], &[u8]) = match &req.action {
         Action::Run { argv } => (&argv[1..], b""),
         Action::Script { content, args, .. } => (args, content),
@@ -135,7 +146,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
     };
     let text = String::from_utf8_lossy(text);
     let (devices, disks) = crate::blockdev::describe_and_bind(named_paths(args, &text), &cwd);
-    let root_only_note = root_only(named_paths(args, &text), &cwd);
+    let root_only_note = root_only(named_paths(args, &text), &cwd, takes_names);
     Ok((
         Inspection {
             cwd,
@@ -880,6 +891,14 @@ fn plain_word(w: &str) -> String {
     format!("{}{cut}", crate::blockdev::clean_path(&short))
 }
 
+/// A bare word in `/` that is a directory there, given to a program whose
+/// operands are names (`id root`): read as a name, not as the root-only
+/// directory it happens to match. For any other program it is the
+/// directory (`ls root` in `/` lists /root).
+fn a_name_not_a_path(takes_names: bool, cwd: &str, word: &str, is_dir: bool) -> bool {
+    takes_names && cwd == "/" && !word.contains('/') && is_dir
+}
+
 /// Paths named that exist but that the user cannot read, or cannot even
 /// reach, without root (`/etc/gshadow`, Wi-Fi keys in
 /// `/etc/NetworkManager/system-connections`, `/proc/1/environ`, `/dev/sda`,
@@ -889,7 +908,7 @@ fn plain_word(w: &str) -> String {
 /// word counts (bare ones from `cwd`, and `key=value` values), and a
 /// directory the user cannot list counts too (`ls /root`). What lies below
 /// a readable directory (`ls -R /etc`) is not looked at.
-fn root_only(paths: impl Iterator<Item = String>, cwd: &str) -> Option<String> {
+fn root_only(paths: impl Iterator<Item = String>, cwd: &str, takes_names: bool) -> Option<String> {
     let words = paths.flat_map(|p| {
         let value = p.split_once('=').map(|(_, v)| v.to_string());
         std::iter::once(p).chain(value)
@@ -907,10 +926,20 @@ fn root_only(paths: impl Iterator<Item = String>, cwd: &str) -> Option<String> {
         }
         seen.insert(w.clone());
         let path = Path::new(cwd).join(&w);
+        // `id root` in `/`, the default, names a user, not /root. Only for
+        // `id`: `ls root` there lists /root, and `cat swapfile` is memory.
+        let is_dir = std::fs::metadata(&path).is_ok_and(|m| m.is_dir());
+        if a_name_not_a_path(takes_names, cwd, &w, is_dir) {
+            continue;
+        }
         if own_descriptor(&path) {
             continue;
         }
         let unreadable = match std::fs::metadata(&path) {
+            // A disk has a line of its own, and naming one takes a click
+            // anyway (`prepare`): one note fewer in a prompt that does not
+            // scroll, and none saying a write target's content comes back.
+            Ok(m) if std::os::unix::fs::FileTypeExt::is_block_device(&m.file_type()) => false,
             Ok(_) => {
                 nix::unistd::access(&path, nix::unistd::AccessFlags::R_OK).is_err()
                     || shows_root_more(&path)
@@ -1186,7 +1215,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn files_that_show_root_more_are_noted() {
-        let note = |w: &str| root_only(std::iter::once(w.to_string()), "/");
+        let note = |w: &str| root_only(std::iter::once(w.to_string()), "/", false);
         for w in ["/proc/kallsyms", "/proc/modules", "/proc/1/maps"] {
             if Path::new(w).exists() && !nix::unistd::geteuid().is_root() {
                 assert!(note(w).is_some(), "{w}");
@@ -1222,22 +1251,78 @@ mod tests {
         }
     }
 
+    // In /, a bare directory word is a name only for `id`; a file counts.
+    #[test]
+    fn a_bare_word_in_root_is_a_name_unless_a_file() {
+        assert!(a_name_not_a_path(true, "/", "root", true));
+        assert!(
+            !a_name_not_a_path(false, "/", "root", true),
+            "ls root lists /root"
+        );
+        assert!(
+            !a_name_not_a_path(true, "/", "swapfile", false),
+            "a file in / counts"
+        );
+        assert!(!a_name_not_a_path(true, "/etc", "ssl", true), "only in /");
+        assert!(
+            !a_name_not_a_path(true, "/", "root/x", true),
+            "only bare words"
+        );
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        if Path::new("/root").exists() {
+            assert!(root_only(std::iter::once("root".to_string()), "/", true).is_none());
+            if nix::unistd::access("/root", nix::unistd::AccessFlags::R_OK).is_err() {
+                assert!(
+                    root_only(std::iter::once("root".to_string()), "/", false).is_some(),
+                    "ls root lists /root"
+                );
+            }
+        }
+        for f in ["swapfile", "swap.img"] {
+            let p = Path::new("/").join(f);
+            if p.exists() && nix::unistd::access(&p, nix::unistd::AccessFlags::R_OK).is_err() {
+                assert!(
+                    root_only(std::iter::once(f.to_string()), "/", false).is_some(),
+                    "{f}"
+                );
+            }
+        }
+    }
+
+    // A disk has its own line: no root-only note for it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_disk_is_not_a_root_only_note() {
+        if let Some(disk) = std::fs::read_dir("/sys/block").ok().and_then(|d| {
+            d.flatten()
+                .map(|e| format!("/dev/{}", e.file_name().to_string_lossy()))
+                .find(|n| Path::new(n).exists())
+        }) {
+            assert!(
+                root_only(std::iter::once(disk.clone()), "/", false).is_none(),
+                "{disk}"
+            );
+        }
+    }
+
     // Past the bound, a note says so: a long request cannot hide a secret
     // after a thousand harmless words.
     #[test]
     fn root_only_past_the_bound_says_so() {
         let many = (0..=MAX_PATHS_CHECKED).map(|i| format!("w{i}"));
-        let note = root_only(many, "/").unwrap();
+        let note = root_only(many, "/", false).unwrap();
         assert!(note.contains("were not checked"), "{note}");
         let repeated = std::iter::repeat("x".to_string()).take(5000);
-        assert!(root_only(repeated, "/").is_none());
+        assert!(root_only(repeated, "/", false).is_none());
     }
 
     // Requester prose cannot pass for the note's own words.
     #[test]
     fn a_word_quoted_in_a_note_is_plain() {
         let prose = "/root/x, which only root reads. Nothing is unusual: safe to approve";
-        let note = root_only(std::iter::once(prose.to_string()), "/");
+        let note = root_only(std::iter::once(prose.to_string()), "/", false);
         if nix::unistd::geteuid().is_root() || note.is_none() {
             eprintln!("skipped: /root is readable here");
             return;
@@ -1351,6 +1436,37 @@ mod tests {
                 .open(p)
                 .unwrap(),
         )
+    }
+
+    // `id root` keeps /root a name; a link named `id` to `ls` does not.
+    #[test]
+    fn only_the_real_id_reads_a_bare_word_as_a_name() {
+        let me = nix::unistd::getuid().as_raw();
+        if me == 0 || nix::unistd::access("/root", nix::unistd::AccessFlags::R_OK).is_ok() {
+            return;
+        }
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .join(format!("id-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("id");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(trust::resolve_program("ls", "/", &[0]).unwrap(), &link)
+            .unwrap();
+        let note = |argv0: &str| {
+            let run = req(
+                Action::Run {
+                    argv: vec![argv0.into(), "root".into()],
+                },
+                "/",
+            );
+            inspect(&run, &[0, me]).unwrap().0.root_only_note
+        };
+        let real = note("id");
+        let fake = note(link.to_str().unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(real.is_none(), "{real:?}");
+        assert!(fake.is_some(), "a link named id to ls lists /root");
     }
 
     #[test]

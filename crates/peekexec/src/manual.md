@@ -35,7 +35,7 @@ It opens large, about 85% of your screen (at most 1500 points wide) and centred,
 - Who is asking. Your user id comes from the kernel. Process names are chosen by the processes themselves.
 - The reason given, labelled "unverified" because it is only a claim.
 - Warnings, such as a file that could make root run something later, or a request that arrived right after another.
-- Each disk the command names, described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click unless you could read it yourself (members of `disk`). A disk named as `/dev/disk/by-label/...` or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
+- Each disk the command names (up to four; more are a warning), described: model (the device's own claim), size, USB or internal, and what is mounted on it. A disk in use (mounted, swap, LVM) is a warning. Naming any disk takes a click. A disk named as `/dev/disk/by-label/...` or through a link is checked again just before running, and nothing runs if the name now leads to another disk.
 
 ## Formatted and Raw
 Formatted adds line breaks and indentation so that a long `sh -c` command is easier to read. Raw shows the lines as they are, with long runs of spaces and blank lines still shown as markers. If anything looks odd, use Raw.
@@ -52,8 +52,9 @@ Pressing Enter approves a request only if it is simple enough to judge at a glan
 
 Enter works only if all of this is true:
 - It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status`, `systemctl daemon-reload`, `udevadm trigger` or `udevadm control --reload-rules` (the last three re-apply system settings; `udevadm trigger` replays device events, so rules run again).
-- It has at most 16 words, and no argument holds spaces or shell syntax.
-- Nothing in it triggered a warning. Naming a file you cannot read without root (`cat /etc/gshadow`, `head -c 512 /dev/sda`) is a warning: its content would come back to the agent.
+- It has at most 16 words (1024 bytes), and no argument holds spaces or shell syntax.
+- It does not list or read below what it names: `ls -R`, `--recursive`, `--files0-from`, and any `du` but a plain total (`du -sh`) need a click.
+- Nothing in it triggered a warning. Naming a file you cannot read without root (`cat /etc/gshadow`, `cat /proc/kallsyms`) is a warning: its content would come back to the agent. Naming any disk turns Enter off too.
 - It did not arrive right after another dialog, with others waiting, or as a near-copy of a recent request.
 - You were not already typing when the window opened.
 

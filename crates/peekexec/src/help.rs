@@ -126,13 +126,14 @@ pub const AGENT_GUIDE: &str = r#"GUIDE FOR AUTOMATED CALLERS
     reload (udevadm control --reload-rules, udevadm trigger, systemctl
     daemon-reload) with a few plain arguments and nothing to warn about.
     Naming a file the user cannot read without root is a warning: its
-    content would come back to you, so the human must click.
+    content would come back to you, so the human must click. A walk below
+    what is named (ls -R, --recursive, --files0-from, du other than a plain
+    total such as du -sh) takes a click too.
     Everything else takes a click: scripts, installs, `sh -c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh -c`: it costs the human a click and a closer read.
     "enter_approves" in preview's view says which applies. Naming a disk
-    takes a click unless the user can read it, and one in use (mounted, swap,
-    LVM) is a warning. Name disks by /dev/disk/by-id/...: unlike /dev/sdX,
+    always takes a click, and one in use (mounted, swap, LVM) is a warning. Name disks by /dev/disk/by-id/...: unlike /dev/sdX,
     that name does not change between boots or when a device is plugged in
     again. If a disk name leads elsewhere by the time the command runs, it
     does not run ("no longer leads to the disk that was shown").
