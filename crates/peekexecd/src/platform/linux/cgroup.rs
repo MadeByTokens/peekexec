@@ -34,7 +34,8 @@ pub struct CommandGroup {
 pub enum NoGroup {
     /// This system has none to give: no cgroup v2 hierarchy, or one this
     /// process may not write (not root and not delegated, or a service
-    /// without `Delegate=yes`). Known before approval, and said there.
+    /// without `Delegate=yes`). Found before approval
+    /// ([`can_hold_commands`]), and said there.
     Unavailable(String),
     /// There should have been one: something went wrong just now, and a
     /// command run anyway would leave its children alive with no one told.
@@ -52,6 +53,27 @@ impl std::fmt::Display for NoGroup {
 /// Whether this system holds commands in a group of their own at all.
 pub fn available() -> bool {
     Path::new(ROOT).join("cgroup.controllers").exists()
+}
+
+/// Whether an approved command would get a group of its own, found by
+/// making one and removing it again: a hierarchy may exist that this
+/// process may not write. Asked before approval, so the dialog says what
+/// will happen. A failure of another kind (`Failed`) counts as yes: if it
+/// lasts, the command is not run at all, so no promise is broken.
+pub fn can_hold_commands() -> bool {
+    probe().0
+}
+
+/// [`can_hold_commands`], and the group it made and removed (for tests).
+fn probe() -> (bool, Option<PathBuf>) {
+    match CommandGroup::create() {
+        Ok(g) => {
+            let _ = std::fs::remove_dir(&g.dir);
+            (true, Some(g.dir))
+        }
+        Err(NoGroup::Unavailable(_)) => (false, None),
+        Err(NoGroup::Failed(_)) => (true, None),
+    }
 }
 
 impl CommandGroup {
@@ -239,5 +261,14 @@ mod tests {
         assert_eq!(events_flag(ev, "populated"), Some(true));
         assert_eq!(events_flag(ev, "frozen"), Some(false));
         assert_eq!(events_flag(ev, "x"), None);
+    }
+
+    // The probe makes a group and removes it: nothing is left behind.
+    // Only its own group is checked: other tests make groups meanwhile.
+    #[test]
+    fn the_probe_leaves_no_group() {
+        if let (true, Some(dir)) = probe() {
+            assert!(!dir.exists(), "{} left behind", dir.display());
+        }
     }
 }

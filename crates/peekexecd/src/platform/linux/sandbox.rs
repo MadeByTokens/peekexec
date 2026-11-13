@@ -22,6 +22,35 @@ fn is_root() -> bool {
     nix::unistd::geteuid().is_root()
 }
 
+/// The command's group, or why it runs without one, or why it does not run.
+/// Without a group, only its process group is ended when it exits; that is
+/// acceptable only where the dialog said so (`promised` is false).
+fn group_for<G>(
+    made: Result<G, NoGroup>,
+    promised: bool,
+    root: bool,
+) -> Result<Option<G>, PlatformError> {
+    match made {
+        Ok(g) => Ok(Some(g)),
+        // Not root (development mode): there is no group to give.
+        Err(_) if !root => Ok(None),
+        Err(NoGroup::Unavailable(e)) if !promised => {
+            eprintln!(
+                "peekexecd: no cgroup of its own for the approved command ({e}); only its \
+                 process group is ended when it exits"
+            );
+            Ok(None)
+        }
+        Err(NoGroup::Unavailable(e)) => Err(PlatformError::Other(format!(
+            "no cgroup for the command ({e}), though there was one when it was shown: \
+             anything it left running would not be ended"
+        ))),
+        Err(NoGroup::Failed(e)) => Err(PlatformError::Other(format!(
+            "no cgroup for the command ({e}): anything it left running would not be ended"
+        ))),
+    }
+}
+
 impl Sandbox for Namespaces {
     fn enforcement(&self, plan: &ExecPlan) -> Enforced {
         let mut e = declared_only(plan);
@@ -65,26 +94,7 @@ impl Sandbox for Namespaces {
             .map(|uid| std::ffi::CString::new(uid.to_string()).expect("digits"));
         // A cgroup of its own, entered before exec, so everything the
         // command starts can be ended with it.
-        let group = match CommandGroup::create() {
-            Ok(g) => Some(g),
-            // Said in the dialog, before approval.
-            Err(NoGroup::Unavailable(e)) => {
-                if is_root() {
-                    eprintln!(
-                        "peekexecd: no cgroup of its own for the approved command ({e}); only \
-                         its process group is ended when it exits"
-                    );
-                }
-                None
-            }
-            Err(NoGroup::Failed(e)) if is_root() => {
-                return Err(PlatformError::Other(format!(
-                    "no cgroup for the command ({e}): anything it left running would not be \
-                     ended"
-                )))
-            }
-            Err(NoGroup::Failed(_)) => None,
-        };
+        let group = group_for(CommandGroup::create(), plan.own_group, is_root())?;
         let procs = group.as_ref().map(CommandGroup::procs);
         // SAFETY: only async-signal-safe libc calls; no allocation or locks.
         unsafe {
@@ -133,5 +143,28 @@ impl Sandbox for Namespaces {
                 Err(PlatformError::io(format!("start {}", plan.program), e))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unavailable() -> Result<(), NoGroup> {
+        Err(NoGroup::Unavailable("EACCES".into()))
+    }
+
+    // Without a group, a command runs only where the dialog said so.
+    #[test]
+    fn a_command_runs_without_a_group_only_if_the_dialog_said_so() {
+        assert!(matches!(group_for(Ok(()), true, true), Ok(Some(()))));
+        assert!(matches!(group_for(unavailable(), false, true), Ok(None)));
+        assert!(
+            group_for(unavailable(), true, true).is_err(),
+            "shown with a group, run without one"
+        );
+        assert!(group_for(Err::<(), _>(NoGroup::Failed("x".into())), false, true).is_err());
+        // Development mode: not root, no group to give, nothing promised.
+        assert!(matches!(group_for(unavailable(), true, false), Ok(None)));
     }
 }

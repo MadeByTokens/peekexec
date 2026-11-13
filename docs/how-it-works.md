@@ -151,9 +151,10 @@ the file's own summary is identify → prepare → ask → execute → report.
    where the daemon can make one, a cgroup of its own entered before exec
    ([`sandbox.rs`](../crates/peekexecd/src/platform/linux/sandbox.rs),
    [`cgroup.rs`](../crates/peekexecd/src/platform/linux/cgroup.rs)).
-   Without a cgroup v2 hierarchy at all, the dialog said so before approval;
-   if one exists but the daemon may not create a group in it, the command
-   runs without one and only the daemon's log says so. An install writes the file
+   Whether it can make one is found before approval, by making one and
+   removing it; where it cannot, the dialog said so, and where the dialog
+   did not say so and none can be made when the command starts, the command
+   does not run. An install writes the file
    itself, atomically, with no command at all
    ([`exec.rs`](../crates/peekexecd/src/exec.rs)).
    Details: [Boundaries, 5](../THREAT_MODEL.md#boundaries-and-how-each-is-held).
@@ -180,7 +181,7 @@ the file's own summary is identify → prepare → ask → execute → report.
 | Approval never remembered | Each request is a decision about that request | A password for every request | Password path: PAM asked in each dialog (`Approver::verify` in [`prompt.rs`](../crates/peekexecd/src/prompt.rs)); GNOME path: [the polkit action](../packaging/polkit/org.peekexec.approve.policy) is `auth_self`, and [a remembered authorization is refused](../THREAT_MODEL.md#anything-else-the-window-is-read-only) |
 | Output goes back to the agent | The agent needs it to do its job | Reading what you could not read yourself hands it to the agent, so such reads need a click | [Hurried human](../THREAT_MODEL.md#things-a-hurried-human-might-assume) |
 | Disks described, bound, and re-checked | The classic hardware mistake is the right command on the wrong disk | Naming any disk takes a click | [`blockdev.rs`](../crates/peekexecd/src/blockdev.rs) |
-| A cgroup per command, killed at the end | Commands should not leave things running as root by habit | Work handed to systemd (`systemd-run`, `systemctl start`) is not ended; where the daemon cannot make a cgroup, only the process group is | [Boundaries, 5](../THREAT_MODEL.md#boundaries-and-how-each-is-held) |
+| A cgroup per command, killed at the end | Commands should not leave things running as root by habit | Work handed to systemd (`systemd-run`, `systemctl start`) is not ended; where the daemon cannot make a cgroup, only the process group is, and the dialog says so | [Boundaries, 5](../THREAT_MODEL.md#boundaries-and-how-each-is-held) |
 | Economy of mechanism | Every feature that runs as root before approval is attack surface | Some conveniences were left out on purpose | [Rule 7](../THREAT_MODEL.md#design-rules) |
 
 The design rules are the classic principles of Saltzer and Schroeder,

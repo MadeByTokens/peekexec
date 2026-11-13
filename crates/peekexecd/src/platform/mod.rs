@@ -127,6 +127,9 @@ pub struct ExecPlan {
     pub no_net: bool,
     /// The requesting user, recorded as the command's audit login uid.
     pub audit_uid: Option<u32>,
+    /// The dialog said nothing about a missing cgroup, so the command must
+    /// get one: if none can be made when it runs, it does not run.
+    pub own_group: bool,
 }
 
 pub trait Sandbox: Send + Sync {

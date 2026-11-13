@@ -1770,6 +1770,7 @@ mod tests {
             write: None,
             no_net: false,
             audit_uid: None,
+            own_group: false,
         };
         let exec = Execution::Command(plan);
         let program_ok = ready_to_run(&exec, &[]);

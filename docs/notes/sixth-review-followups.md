@@ -15,7 +15,10 @@ commit then took in four later ones (the `id` exemption, the `Cargo.lock`
 bump, the pkexec comparison; kept on `backup/pre-fold-sixth-review`), and
 differs from that branch only in these notes. Reinstalled on this machine
 from this code (`peekexecd.socket` active; a preview of `ls root` shows the
-new root-only note); only notes and docs changed after the install. Local CI passes at the
+new root-only note). Reinstalled again on 2026-11-13 from the commit with
+the cgroup probe and refusal: a preview shows no cgroup note here, the
+probe leaves no group behind, and an approved script's `setsid` child was
+ended when the script exited. Local CI passes at the
 last code change: `cargo fmt --check`, both clippy runs, `cargo test
 --workspace --features peekexecd/test-approver`, the macOS `cargo check`,
 shellcheck, `gen-cli-doc.sh` up to date, `cargo deny check` (ok), `cargo

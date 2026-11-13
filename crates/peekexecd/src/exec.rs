@@ -418,6 +418,7 @@ mod tests {
             write: None,
             no_net: false,
             audit_uid: None,
+            own_group: false,
         };
         let out = run(&Namespaces, &plan).unwrap();
         let pid: u32 = out.stdout.trim().parse().expect(&out.stdout);

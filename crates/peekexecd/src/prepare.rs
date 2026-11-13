@@ -122,6 +122,14 @@ pub fn prepare(
     };
     notes.extend(inspection.cwd_warning.clone());
     let mismatch = || "internal error: inspection does not match the request".to_string();
+    // Whether the command will have a cgroup of its own, found by making
+    // one: the dialog says so if not, and the run holds to what it said.
+    #[cfg(target_os = "linux")]
+    let own_group = nix::unistd::geteuid().is_root()
+        && matches!(req.action, Action::Run { .. } | Action::Script { .. })
+        && crate::platform::linux::cgroup::can_hold_commands();
+    #[cfg(not(target_os = "linux"))]
+    let own_group = false;
 
     let (mut sections, exec, enforced) = match (&req.action, inspection.facts) {
         (
@@ -140,6 +148,7 @@ pub fn prepare(
                 write: req.write.clone(),
                 no_net: req.no_net,
                 audit_uid: Some(peer.uid),
+                own_group,
             };
             let enforced = ctx.sandbox.enforcement(&plan);
             notes.extend(file_args_note);
@@ -200,6 +209,7 @@ pub fn prepare(
                 write: req.write.clone(),
                 no_net: req.no_net,
                 audit_uid: Some(peer.uid),
+                own_group,
             };
             let text = String::from_utf8_lossy(content).into_owned();
             let is_shell = SHELLS.contains(&basename(&interp));
@@ -322,12 +332,10 @@ pub fn prepare(
         );
     }
     #[cfg(target_os = "linux")]
-    if matches!(exec, Execution::Command(_))
-        && nix::unistd::geteuid().is_root()
-        && !crate::platform::linux::cgroup::available()
-    {
+    if matches!(exec, Execution::Command(_)) && nix::unistd::geteuid().is_root() && !own_group {
         notes.push(
-            "No cgroup v2 here: what this command leaves running is not ended when it exits."
+            "No cgroup of its own for this command here: what it leaves running outside its \
+             process group is not ended when it exits."
                 .into(),
         );
     }
