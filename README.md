@@ -257,6 +257,7 @@ troubleshooting.
 
 | Read this | For |
 |---|---|
+| [docs/how-it-works.md](docs/how-it-works.md) | How it works, from the idea to the code: the life of a request, the design decisions and what they cost, and what was accepted |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What holds against whom, in detail, and why |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability, what's installed, `unsafe` code |
 | [docs/cli.md](docs/cli.md) | The full command-line and JSON reference |

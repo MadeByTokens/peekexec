@@ -7,8 +7,8 @@ real desktop is under "To test when you are back".
 
 ## State
 
-All work below is committed on `main`, **not pushed**: 8 commits after
-`99f2713`, squashed on 2026-11-13 from 34 working commits (kept on the local
+All work below is on `main` and was pushed on 2026-11-13 (CI green on
+GitHub at `0b5fe3d` and `12415da`): 8 commits after `99f2713`, squashed on 2026-11-13 from 34 working commits (kept on the local
 branch `backup/pre-squash-sixth-review`; each of the first seven squashed
 commits has the same tree as the tested working commit it ends on). The last
 commit then took in four later ones (the `id` exemption, the `Cargo.lock`
@@ -97,12 +97,16 @@ Also run through the real helper process: a disk named plainly, bare from
       (no grab). Also on a HiDPI screen if you have one. In the Wayland VM it
       fills most of the 1024x768 screen (seen, fine).
 - [ ] A disk warning: `peekexec run --why test -- lsblk /dev/nvme0n1` needs a
-      click and says "in use: / (on vgubuntu-root), ...".
+      click and says "in use: / (on vgubuntu-root), ...". Run on the real
+      desktop on 2026-11-13 (approved, exit 0; the preview showed the
+      warning); whether Enter was refused was not reported back.
 - [ ] A USB stick plugged in, not mounted: `peekexec run --why test -- lsblk
       /dev/disk/by-id/usb-...` names it ("USB disk ...", "nothing on it is
       mounted or swap") and needs a click (naming a disk always does).
 - [ ] Enter still works for an everyday read: `peekexec run --why test --
-      lsblk -f`, password, Enter.
+      lsblk -f`, password, Enter. Run on 2026-11-13 (approved, exit 0); how
+      it was approved was not reported back.
 - [ ] Your account has `docker`, `lxd`, `libvirt` (README "Your account's
       groups"): decide whether to keep them.
-- [ ] Then confirm the push.
+- [x] Push: done on 2026-11-13, after a test that assumed `/dev/sda1` was
+      fixed for GitHub's runners (`0b5fe3d`).

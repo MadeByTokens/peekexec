@@ -236,9 +236,12 @@ has a seat and is its active one"), never the absence of a warning sign
    systemd (`systemd-run`, `systemctl start`) becomes a unit of systemd's
    own and is not ended. This bounds what a command leaves running by habit
    or by accident; being root, a command written to escape can move itself
-   out of its group. Without a writable cgroup v2 hierarchy only the
-   process group is killed, and the dialog says so before approval; where
-   there should be a group and it cannot be made, the command does not run.
+   out of its group. Without a cgroup v2 hierarchy only the process group
+   is killed, and the dialog says so before approval. If there is one but
+   the daemon may not create a group in it (`EACCES`, `EPERM`, `EROFS`),
+   the command still runs with only its process group, and only the
+   daemon's log says so; any other failure to make the group stops the
+   command (`cgroup::CommandGroup::create`, `sandbox.rs`).
    If something survives the kill, the response's `warning` and the audit
    line say so. Just before running, root checks again that the program
    or install directory is root-controlled. Its output goes to the
