@@ -49,6 +49,9 @@ pub struct Inspection {
     /// Each disk the request names, described (see [`crate::blockdev`]).
     #[serde(default)]
     pub devices: Vec<crate::blockdev::Device>,
+    /// Paths named that the user cannot read without root.
+    #[serde(default)]
+    pub root_only_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,12 +131,14 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
     };
     let text = String::from_utf8_lossy(text);
     let devices = crate::blockdev::describe(named_paths(args, &text), &cwd);
+    let root_only_note = root_only(named_paths(args, &text), &cwd);
     Ok((
         Inspection {
             cwd,
             cwd_warning,
             facts,
             devices,
+            root_only_note,
         },
         fd,
     ))
@@ -754,6 +759,61 @@ fn named_paths<'a>(args: &'a [String], text: &'a str) -> impl Iterator<Item = St
         .chain(named_in_text(text))
 }
 
+/// Paths named that exist but that the user cannot read, or cannot even
+/// reach, without root (`/etc/gshadow`, Wi-Fi keys in
+/// `/etc/NetworkManager/system-connections`, `/proc/1/environ`, `/dev/sda`,
+/// a file under `/etc/ssl/private`). Approving such a request lets the
+/// command read it as root, and its output comes back to the requester:
+/// worth a note, so it takes a click. Asked as the user (`access`), every
+/// word counts (bare ones from `cwd`, and `key=value` values), and a
+/// directory the user cannot list counts too (`ls /root`). What lies below
+/// a readable directory (`ls -R /etc`) is not looked at.
+fn root_only(paths: impl Iterator<Item = String>, cwd: &str) -> Option<String> {
+    let words = paths.flat_map(|p| {
+        let value = p.split_once('=').map(|(_, v)| v.to_string());
+        std::iter::once(p).chain(value)
+    });
+    let mut seen = std::collections::HashSet::new();
+    let mut hits = Vec::new();
+    for w in words.filter(|w| !w.is_empty()) {
+        if seen.len() == MAX_PATHS_CHECKED {
+            break;
+        }
+        if !seen.insert(w.clone()) {
+            continue;
+        }
+        let path = Path::new(cwd).join(&w);
+        if own_descriptor(&path) {
+            continue;
+        }
+        let unreadable = match std::fs::metadata(&path) {
+            Ok(_) => nix::unistd::access(&path, nix::unistd::AccessFlags::R_OK).is_err(),
+            Err(e) => e.kind() == std::io::ErrorKind::PermissionDenied,
+        };
+        if unreadable {
+            hits.push(w);
+        }
+    }
+    (!hits.is_empty()).then(|| {
+        let shown: Vec<String> = hits
+            .iter()
+            .take(3)
+            .map(|h| h.chars().take(100).collect())
+            .collect();
+        let more = hits.len().saturating_sub(3);
+        format!(
+            "Names {}{}, which you cannot read without root: the command gets it as root, and \
+             what it prints comes back to the requester.",
+            shown.join(", "),
+            if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            }
+        )
+    })
+}
+
 /// Paths the user could change (`sh ~/x.sh`, `cp -r /tmp/d /etc/`,
 /// `--config=/home/u/c`, `-f/home/u/x`, a symlink of theirs, a file they
 /// may create later), named by an argument, by a word inside an argument
@@ -1114,6 +1174,7 @@ mod tests {
                 file_args_note: None,
             },
             devices: Vec::new(),
+            root_only_note: None,
         };
         assert!(verify(&run, &honest, &dir_fd("/"), &owners).is_ok());
 
@@ -1279,6 +1340,7 @@ mod tests {
                 file_args_note: None,
             },
             devices: Vec::new(),
+            root_only_note: None,
         }
     }
 

@@ -51,7 +51,7 @@ Pressing Enter approves a request only if it is simple enough to judge at a glan
 Enter works only if all of this is true:
 - It is a single `peekexec run` of a program that only reads and reports, such as `ls`, `cat`, `id`, `uname` or `df`, or one of a few everyday commands, such as `systemctl status`, `systemctl daemon-reload`, `udevadm trigger` or `udevadm control --reload-rules` (the last three change system settings, but only by reloading them).
 - It has at most 16 words, and no argument holds spaces or shell syntax.
-- Nothing in it triggered a warning.
+- Nothing in it triggered a warning. Naming a file you cannot read without root (`cat /etc/gshadow`, `head -c 512 /dev/sda`) is a warning: its content would come back to the agent.
 - It did not arrive right after another dialog, with others waiting, or as a near-copy of a recent request.
 - You were not already typing when the window opened.
 

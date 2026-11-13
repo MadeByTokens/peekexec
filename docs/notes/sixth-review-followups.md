@@ -24,9 +24,10 @@ real desktop goes under "To test when you are back".
       the `/etc/resolv.conf`, `/run/utmp` and `--cwd /dev` false notes. The
       helper's cwd warning now uses root's by-descriptor check, so dev
       previews match production.
-- [ ] I4 Enter only when the user could read every named path (EACCES = note,
-      click); raw devices always a click; THREAT_MODEL line about unreachable
-      paths updated.
+- [x] I4 A path named that the user cannot read or reach without root gets a
+      note (`inspect::root_only`), so a click; raw disks follow from the same
+      rule. Everyday hardware reads keep Enter (lsusb -v, lsblk -f,
+      /proc/mtd, /dev/serial/by-id, sysfs). Docs updated.
 - [ ] Docs for all of the above (README, man page via manual.md +
       gen-cli-doc.sh, help agents, THREAT_MODEL, checklist).
 - [ ] Final review / bypass pass on everything since 99f2713.

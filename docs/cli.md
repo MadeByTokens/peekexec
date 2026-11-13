@@ -165,6 +165,8 @@ GUIDE FOR AUTOMATED CALLERS
     read-only program (ls, cat, id, df, systemctl status...) or an everyday
     reload (udevadm control --reload-rules, udevadm trigger, systemctl
     daemon-reload) with a few plain arguments and nothing to warn about.
+    Naming a file the user cannot read without root is a warning: its
+    content would come back to you, so the human must click.
     Everything else takes a click: scripts, installs, `sh -c`, and other
     commands that change the system. So don't wrap a
     simple command in `sh -c`: it costs the human a click and a closer read.

@@ -38,9 +38,10 @@ errors, and the helper cannot be driven by other programs of the user (its
 binary is not readable by them, so it is non-dumpable from exec). A request
 whose program, working directory or install target the user cannot reach is
 refused before approval; such steps go inside `peekexec script`, where the
-human reads them. A path named in an argument or in script text is only
-checked for who controls it: one the user cannot reach is neither refused nor
-noted (`trust::check_named` skips what it cannot look at).
+human reads them. A path named in an argument or in script text is not
+refused: one that exists but that the user cannot read, or cannot reach, gets
+a note (the command would read it as root and its output comes back to the
+requester), which also turns Enter off.
 
 It does not promise:
 
@@ -465,7 +466,10 @@ Sources for what each group gives are in the README, under
   list of ones that only read and report (`ls`, `cat`, `stat`, `lsblk`...)
   and a few everyday subcommands (`udevadm control`, `systemctl status`), with
   at most 16 words and 1024 bytes, no argument holding spaces or shell
-  syntax, only when there is nothing to warn about, and only when no key
+  syntax, only when there is nothing to warn about (naming a path the user
+  cannot read without root is a warning: `cat /etc/gshadow`, `head -c 512
+  /dev/sda`, `ls /root`; what lies below a readable directory, as in
+  `ls -R /etc`, is not looked at), and only when no key
   was pressed while the window was opening (the human was typing into
   something else, perhaps a password); otherwise approving needs a pointer
   click, which the keyboard (Tab, then Space) cannot stand in for. This is

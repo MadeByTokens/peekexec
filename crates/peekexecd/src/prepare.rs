@@ -285,6 +285,7 @@ pub fn prepare(
         _ => return Err(mismatch()),
     };
 
+    notes.extend(inspection.root_only_note);
     // Each disk named: one in use is a note (so it takes a click), with
     // what is on it; one that is not is a counted line under the command.
     for d in inspection.devices {
@@ -1626,6 +1627,70 @@ mod tests {
                 .contains("/dev/sdz: USB disk"),
             "the prompt must carry it too"
         );
+    }
+
+    // Reading as root what the user cannot read hands it to the requester:
+    // a note, so a click. What the user can read keeps Enter.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reading_what_only_root_can_read_takes_a_click() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let view = |argv: &[&str], cwd: &str| {
+            let mut r = req(Action::Run {
+                argv: argv.iter().map(|a| a.to_string()).collect(),
+            });
+            r.cwd = cwd.into();
+            prepare_with(&r, &crate::inspect::inspect, false)
+                .unwrap()
+                .view
+        };
+        let unreadable = ["/etc/gshadow", "/etc/shadow", "/proc/1/environ", "/root"]
+            .into_iter()
+            .find(|p| {
+                Path::new(p).exists()
+                    && nix::unistd::access(*p, nix::unistd::AccessFlags::R_OK).is_err()
+            });
+        let Some(secret) = unreadable else {
+            eprintln!("skipped: every candidate is readable here");
+            return;
+        };
+        let v = view(&["cat", secret], "/");
+        assert!(!v.enter_approves);
+        assert!(
+            v.notes
+                .iter()
+                .any(|n| n.contains("cannot read without root")),
+            "{:?}",
+            v.notes
+        );
+        // Named bare from its directory, or as an option's value.
+        let (dir, name) = secret.rsplit_once('/').unwrap();
+        if !dir.is_empty() {
+            let v = view(&["cat", name], dir);
+            assert!(v
+                .notes
+                .iter()
+                .any(|n| n.contains("cannot read without root")));
+        }
+        let v = view(&["ls", &format!("--color={secret}")], "/");
+        assert!(v
+            .notes
+            .iter()
+            .any(|n| n.contains("cannot read without root")));
+        // What the user can read keeps Enter, and a file not there yet is
+        // no secret.
+        for argv in [
+            &["ls", "-l", "/etc"][..],
+            &["cat", "/etc/hostname"],
+            &["uname", "-a"],
+        ] {
+            let v = view(argv, "/");
+            assert!(v.enter_approves, "{argv:?}: {:?}", v.notes);
+        }
+        let v = view(&["ls", "/no/such/path"], "/");
+        assert!(v.notes.is_empty(), "{:?}", v.notes);
     }
 
     #[test]

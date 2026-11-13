@@ -56,7 +56,8 @@ Then you choose:
   "use the vendor's rules file instead".
 
 **Enter or click?** A plain read-only command such as `ls`, `id` or `df` can be
-approved with your password and Enter. So can a few everyday ones that reload
+approved with your password and Enter, as long as it reads only what you
+could read yourself. So can a few everyday ones that reload
 system settings, such as `udevadm control --reload-rules`, `udevadm trigger`
 and `systemctl daemon-reload`. Everything else needs a click on Approve:
 scripts, installs, `sh -c`, other commands that change the system, anything
@@ -123,7 +124,9 @@ Please read this part before you rely on it.
 Some other things worth knowing:
 
 - **The output goes back to the agent.** If you approve `cat /etc/shadow`, the
-  agent receives it.
+  agent receives it. So a command that names a file you couldn't read
+  yourself (`/etc/gshadow`, your Wi-Fi passwords, a raw disk) gets a warning
+  and needs a click.
 - **Requests must be short on Wayland.** About 22 lines of 45 characters,
   warnings included, on a 768-pixel-tall screen. Longer requests are refused,
   so agents have to split them into steps.
