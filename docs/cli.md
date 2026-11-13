@@ -139,6 +139,8 @@ GUIDE FOR AUTOMATED CALLERS
      TERM, NO_COLOR, ...); PATH, LD_*, PYTHONPATH and the like are refused.
    - Files a command reads while running (e.g. `cp ./x /etc/`) are NOT shown to
      the human and could change after approval; use `peekexec install` instead.
+     For an image the command only reads (`dd if=`, `flashrom -w`), that is
+     expected: the human sees a note, and may want its sha256 from you.
      Commands run in / (relative paths resolve there) unless you pass --cwd DIR;
      a DIR you own is flagged to the human, because programs load code from it.
    - Where peekexec cannot verify its own window (Wayland), the human approves

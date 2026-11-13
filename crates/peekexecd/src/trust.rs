@@ -44,7 +44,7 @@ pub fn not_readable_by_others(path: &Path) -> Result<(), String> {
 /// Canonicalize `path` and check it and every ancestor. Returns the
 /// canonical path.
 pub fn check(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
-    check_with(path, owners, false)
+    check_with(path, owners)
 }
 
 /// Like [`check`], for a directory already open: it walks up from the
@@ -73,7 +73,8 @@ pub fn check_dir(dir: &std::fs::File, shown: &str, owners: &[u32]) -> Result<(),
         let nosuid = nix::sys::statvfs::fstatvfs(&cur).map_or(true, |s| {
             s.flags().contains(nix::sys::statvfs::FsFlags::ST_NOSUID)
         });
-        if nosuid {
+        // /dev, /proc and /sys are nosuid, and their owners are real.
+        if nosuid && !on_kernel_fs_fd(&cur) {
             return Err(format!(
                 "{what} is on a filesystem mounted nosuid: whoever mounted it controls its files"
             ));
@@ -103,19 +104,34 @@ pub fn check_dir(dir: &std::fs::File, shown: &str, owners: &[u32]) -> Result<(),
     Err(format!("{shown}: too many directories above it"))
 }
 
-/// Whether the user could change what `path` names, as the program will
-/// look it up after approval: every existing prefix of the path *as
-/// written* must be root-controlled, so a symlink, a missing file or a
-/// directory under the user's control counts too. Kernel filesystems
-/// (/proc, /sys, /dev) are nosuid but their owners are real.
-pub fn check_named(path: &Path, owners: &[u32]) -> Result<(), String> {
-    check_named_from(path, owners, 0)
+/// Who may change a file or directory: the question the path note asks.
+pub type MayChange<'a> = &'a dyn Fn(&Path, &std::fs::Metadata) -> bool;
+
+/// For the process asking, which for the path note is the inspection
+/// helper, running as the requesting user: it owns the file (and so can
+/// change its mode), or the kernel would let it write there, groups and
+/// ACLs included. A file of a system service (`/etc/resolv.conf` leads to
+/// systemd-resolved's) or of a group the user is not in (`/run/utmp`) is
+/// not the requester's to change.
+pub fn yours(p: &Path, m: &std::fs::Metadata) -> bool {
+    m.uid() == nix::unistd::getuid().as_raw()
+        || nix::unistd::access(p, nix::unistd::AccessFlags::W_OK).is_ok()
+}
+
+/// Whether `may` could change what `path` names, as the program will look
+/// it up after approval: no existing prefix of the path *as written*, no
+/// link followed, and no directory of the final target may be changeable,
+/// and none may sit on a mount made for a user (nosuid, not a kernel
+/// filesystem). A missing file counts by its directories, so one the user
+/// may create later counts too. `Err` says why.
+pub fn check_named(path: &Path, may: MayChange) -> Result<(), String> {
+    check_named_from(path, may, 0)
 }
 
 /// As many links as the kernel follows in one lookup (`MAXSYMLINKS`).
 const MAX_LINKS: u32 = 40;
 
-fn check_named_from(path: &Path, owners: &[u32], links: u32) -> Result<(), String> {
+fn check_named_from(path: &Path, may: MayChange, links: u32) -> Result<(), String> {
     use std::os::unix::fs::FileTypeExt;
     if links > MAX_LINKS {
         return Err(format!("{}: too many links", path.display()));
@@ -138,9 +154,15 @@ fn check_named_from(path: &Path, owners: &[u32], links: u32) -> Result<(), Strin
                     let target =
                         std::fs::read_link(p).map_err(|e| format!("{}: {e}", p.display()))?;
                     let target = p.parent().unwrap_or(Path::new("/")).join(target);
-                    check_named_from(&target, owners, links + 1)?;
+                    check_named_from(&target, may, links + 1)?;
                 }
-                check_with(p, owners, true)?;
+                if may(p, &m) {
+                    return Err(format!(
+                        "{} can be changed by programs of yours",
+                        p.display()
+                    ));
+                }
+                named_chain(p, may)?;
             }
             Err(_) => {}
         }
@@ -148,23 +170,44 @@ fn check_named_from(path: &Path, owners: &[u32], links: u32) -> Result<(), Strin
     Ok(())
 }
 
-fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf, String> {
+/// The final target of `path` and every directory above it.
+fn named_chain(path: &Path, may: MayChange) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
     let canon = path
         .canonicalize()
         .map_err(|e| format!("{}: {e}", path.display()))?;
     for p in canon.ancestors() {
         let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        // A name a program uses (`kernel_fs_ok`, from `check_named`) that
-        // leads to a device through a link (`/dev/disk/by-id/...`): judged
-        // as the device named directly, by the directories above it. Only
-        // the last component can be a device.
-        if kernel_fs_ok && {
-            use std::os::unix::fs::FileTypeExt;
-            let t = m.file_type();
-            t.is_char_device() || t.is_block_device()
-        } {
+        // A device reached through a link (`/dev/disk/by-id/...`) is
+        // judged as one named directly: by the directories above it.
+        // Only the last component can be a device.
+        if m.file_type().is_char_device() || m.file_type().is_block_device() {
             continue;
         }
+        if may(p, &m) {
+            return Err(format!(
+                "{} can be changed by programs of yours",
+                p.display()
+            ));
+        }
+        if on_nosuid_mount(p) && !on_kernel_fs(p) {
+            return Err(format!(
+                "{} is on a filesystem mounted nosuid (removable media, a disk image or FUSE \
+                 mounted for a user): whoever mounted it controls its files, whatever owner \
+                 they show",
+                p.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_with(path: &Path, owners: &[u32]) -> Result<PathBuf, String> {
+    let canon = path
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    for p in canon.ancestors() {
+        let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
         if !owners.contains(&m.uid()) {
             return Err(format!(
                 "{} is owned by uid {}, which is not trusted: it could change after approval",
@@ -172,7 +215,7 @@ fn check_with(path: &Path, owners: &[u32], kernel_fs_ok: bool) -> Result<PathBuf
                 m.uid()
             ));
         }
-        if on_nosuid_mount(p) && !(kernel_fs_ok && on_kernel_fs(p)) {
+        if on_nosuid_mount(p) {
             return Err(format!(
                 "{} is on a filesystem mounted nosuid (removable media, a disk image or FUSE \
                  mounted for a user): whoever mounted it controls its files, whatever owner \
@@ -223,18 +266,33 @@ fn on_nosuid_mount(p: &Path) -> bool {
     statvfs(p).map_or(true, |s| s.flags().contains(FsFlags::ST_NOSUID))
 }
 
+/// `f_type` of proc, sysfs, tmpfs (and devtmpfs), devpts, cgroup2.
+#[cfg(target_os = "linux")]
+const KERNEL: [i64; 5] = [0x9fa0, 0x6265_6572, 0x0102_1994, 0x1cd1, 0x6367_7270];
+
 /// proc, sysfs, tmpfs (and devtmpfs), devpts, cgroup2: files the kernel
 /// owns, whose owners cannot be claimed by whoever mounted them.
 // f_type is i64 here but differs by architecture.
 #[cfg(target_os = "linux")]
 #[allow(clippy::unnecessary_cast)]
 fn on_kernel_fs(p: &Path) -> bool {
-    const KERNEL: [i64; 5] = [0x9fa0, 0x6265_6572, 0x0102_1994, 0x1cd1, 0x6367_7270];
     nix::sys::statfs::statfs(p).is_ok_and(|s| KERNEL.contains(&(s.filesystem_type().0 as i64)))
 }
 
 #[cfg(not(target_os = "linux"))]
 fn on_kernel_fs(_: &Path) -> bool {
+    false
+}
+
+/// [`on_kernel_fs`] for a directory held open.
+#[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_cast)]
+fn on_kernel_fs_fd(f: &std::fs::File) -> bool {
+    nix::sys::statfs::fstatfs(f).is_ok_and(|s| KERNEL.contains(&(s.filesystem_type().0 as i64)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_kernel_fs_fd(_: &std::fs::File) -> bool {
     false
 }
 
@@ -305,52 +363,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A rule for tests: only what is under `base` may be changed.
+    fn under(base: &Path) -> impl Fn(&Path, &std::fs::Metadata) -> bool + '_ {
+        move |p, _| p.starts_with(base)
+    }
+
     // `/dev/disk/by-id/...` is how careful people name a disk: a link to a
     // device is judged as the device named directly (by its directories,
     // not by the node's mode, 0666 for /dev/null, 0660 for a disk), while
-    // the link and its directory still have to be root-controlled.
+    // the link and its directory are still checked.
     #[test]
     fn a_link_to_a_device_is_judged_as_the_device() {
         let Some(dir) = test_dir("devlink") else {
             eprintln!("skipped: no trusted scratch directory");
             return;
         };
-        let me = nix::unistd::geteuid().as_raw();
-        let owners = [0, me];
-        assert!(check_named(Path::new("/dev/null"), &owners).is_ok());
+        let open = dir.join("open");
+        std::fs::create_dir(&open).unwrap();
+        let may = under(&open);
+        assert!(check_named(Path::new("/dev/null"), &may).is_ok());
         let link = dir.join("null");
         std::os::unix::fs::symlink("/dev/null", &link).unwrap();
-        let r = check_named(&link, &owners);
+        let r = check_named(&link, &may);
         assert!(r.is_ok(), "{r:?}");
-        // The rule is about the device node only: a link to a file others
-        // can write is still refused.
-        let f = dir.join("open");
+        // The rule is about the device node only: a link to a file that may
+        // be changed is still flagged.
+        let f = open.join("f");
         std::fs::write(&f, "").unwrap();
-        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
-        let to_file = dir.join("to-open");
+        let to_file = dir.join("to-f");
         std::os::unix::fs::symlink(&f, &to_file).unwrap();
-        assert!(check_named(&to_file, &owners).is_err());
-        // And a link in a directory root does not control is refused,
-        // whatever it points to.
-        if me != 0 {
-            assert!(check_named(&link, &[0]).is_err());
-        }
+        assert!(check_named(&to_file, &may).is_err());
+        // And a link in a directory that may be changed, whatever it
+        // points to.
+        let inside = open.join("null");
+        std::os::unix::fs::symlink("/dev/null", &inside).unwrap();
+        assert!(check_named(&inside, &may).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // A link that a trusted link leads to is a name too: whoever controls
-    // its directory can point it elsewhere after approval, whether it
-    // ends at a device or at a file.
+    // A link that an unchangeable link leads to is a name too: whoever may
+    // change its directory can point it elsewhere after approval, whether
+    // it ends at a device or at a file.
     #[test]
     fn every_link_followed_is_checked() {
         let Some(dir) = test_dir("linkhop") else {
             eprintln!("skipped: no trusted scratch directory");
             return;
         };
-        let owners = [0, nix::unistd::geteuid().as_raw()];
         let open = dir.join("open");
         std::fs::create_dir(&open).unwrap();
-        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let may = under(&open);
         for target in ["/dev/null", "/etc/hostname"] {
             let hop = open.join("hop");
             let _ = std::fs::remove_file(&hop);
@@ -359,10 +421,62 @@ mod tests {
             let _ = std::fs::remove_file(&first);
             // Relative, as most links are: resolved from the link's directory.
             std::os::unix::fs::symlink("open/hop", &first).unwrap();
-            let r = check_named(&first, &owners);
+            let r = check_named(&first, &may);
             assert!(r.is_err(), "{target}: {r:?}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The path note asks the kernel, as the requester: a file of its own,
+    // or one it may write, is flagged; a system service's file, or one a
+    // group it is not in may write, is not.
+    #[test]
+    fn yours_is_what_the_requester_may_change() {
+        let Some(dir) = test_dir("yours") else {
+            eprintln!("skipped: no trusted scratch directory");
+            return;
+        };
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        // Owned, even with no write bit anywhere: its owner may chmod it.
+        let sealed = dir.join("sealed");
+        std::fs::create_dir(&sealed).unwrap();
+        let mine = sealed.join("mine");
+        std::fs::write(&mine, "").unwrap();
+        std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = check_named(&mine, &|p: &Path, m: &std::fs::Metadata| {
+            // Only the sealed directory and its file: the scratch directory
+            // above is writable, and would flag both whatever the rule.
+            p.starts_with(&sealed) && yours(p, m)
+        });
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(r.is_err(), "{r:?}");
+        assert!(check_named(Path::new("/etc/hostname"), &yours).is_ok());
+        for p in ["/etc/resolv.conf", "/run/utmp"] {
+            let p = Path::new(p);
+            let writable = nix::unistd::access(p, nix::unistd::AccessFlags::W_OK).is_ok();
+            if p.exists() && !writable {
+                let r = check_named(p, &yours);
+                assert!(r.is_ok(), "{}: {r:?}", p.display());
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The working directory is checked by root, by descriptor: /dev is a
+    // nosuid kernel filesystem whose owners are real, unlike a user's mount.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_kernel_filesystem_is_not_a_users_mount() {
+        let open = |p: &str| std::fs::File::open(p).unwrap();
+        let r = check_dir(&open("/dev"), "/dev", &[0]);
+        assert!(r.is_ok(), "{r:?}");
+        // /dev/shm is a kernel filesystem too, and still writable by all.
+        if Path::new("/dev/shm").exists() {
+            assert!(check_dir(&open("/dev/shm"), "/dev/shm", &[0]).is_err());
+        }
     }
 
     #[test]

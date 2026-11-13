@@ -97,7 +97,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             let program = trust::resolve_program(&argv[0], &cwd, owners)?;
             Facts::Run {
                 program: path_str(&program)?,
-                file_args_note: untrusted_file_args(&argv[1..], b"", &cwd, owners),
+                file_args_note: untrusted_file_args(&argv[1..], b"", &cwd, &trust::yours),
             }
         }
         Action::Script { content, args, .. } => {
@@ -105,7 +105,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
             Facts::Script {
                 interpreter,
                 interpreter_arg,
-                file_args_note: untrusted_file_args(args, content, &cwd, owners),
+                file_args_note: untrusted_file_args(args, content, &cwd, &trust::yours),
             }
         }
         Action::Install {
@@ -117,7 +117,7 @@ fn inspect_unexplained(req: &Request, owners: &[u32]) -> Result<(Inspection, Own
                 dest: path_str(&dest)?,
                 // A unit, rule or cron entry that names a file of the
                 // user's runs it as root later.
-                file_args_note: untrusted_file_args(&[], content, &cwd, owners),
+                file_args_note: untrusted_file_args(&[], content, &cwd, &trust::yours),
             }
         }
     };
@@ -448,7 +448,8 @@ fn open_workdir(
     let path = path_str(&canon)?;
     // Programs load code and settings from the directory they run in
     // (git hooks and config, Python modules, Makefiles, ...).
-    let warning = trust::check(&canon, owners).err().map(|why| {
+    // By the descriptor, as root does again in `verify`, so the two agree.
+    let warning = trust::check_dir(&file, &path, owners).err().map(|why| {
         format!(
             "Runs inside {path}, which root does not control ({why}). Programs may load \
              code or settings from it (git, python, make, npm...)."
@@ -760,7 +761,12 @@ fn named_paths<'a>(args: &'a [String], text: &'a str) -> impl Iterator<Item = St
 /// (a script, an installed file): whatever runs as root may read or run
 /// it, but its content is not shown and can change after approval. One
 /// note for all of them.
-fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) -> Option<String> {
+fn untrusted_file_args(
+    args: &[String],
+    text: &[u8],
+    cwd: &str,
+    may: trust::MayChange,
+) -> Option<String> {
     let text = String::from_utf8_lossy(text);
     let named = named_paths(args, &text);
     let mut seen = std::collections::HashSet::new();
@@ -778,7 +784,7 @@ fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) 
         // A pattern names files that cannot be checked one by one.
         let pattern = value.contains(['*', '?', '[']);
         let path = Path::new(cwd).join(&value);
-        if pattern || (!own_descriptor(&path) && trust::check_named(&path, owners).is_err()) {
+        if pattern || (!own_descriptor(&path) && trust::check_named(&path, may).is_err()) {
             hits.push(value);
         }
     }
@@ -791,7 +797,7 @@ fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) 
     if too_many {
         return Some(format!(
             "Names more than {MAX_PATHS_CHECKED} paths, more than peekexec checks: some may \
-             be files root does not control, whose content is not shown here{}.",
+             be files programs of yours can change, whose content is not shown here{}.",
             if first.is_empty() {
                 String::new()
             } else {
@@ -803,9 +809,10 @@ fn untrusted_file_args(args: &[String], text: &[u8], cwd: &str, owners: &[u32]) 
         let shown = first;
         let more = hits.len().saturating_sub(3);
         format!(
-            "Names {}{}, which root does not control: whatever reads or runs it as root gets \
-             content that is not shown here and can change after approval. To run your own \
-             script use `peekexec script`; to put a file in place, `peekexec install`.",
+            "Names {}{}, which programs of yours can change: what root reads or runs there \
+             is not shown here and can change after approval. That is expected for a file \
+             root only reads, such as an image to flash; for a file root runs, use \
+             `peekexec script`, and to put a file in place, `peekexec install`.",
             shown.join(", "),
             if more > 0 {
                 format!(" and {more} more")
@@ -997,10 +1004,10 @@ mod tests {
         std::fs::write(&script, "echo hi\n").unwrap();
         let s = script.to_str().unwrap();
         // Trusted owners are root only, as in production.
-        let note = untrusted_file_args(&[s.into()], b"", "/", &[0]).unwrap();
+        let note = untrusted_file_args(&[s.into()], b"", "/", &trust::yours).unwrap();
         assert!(note.contains("job.sh"), "{note}");
         let opt = format!("--config={s}");
-        assert!(untrusted_file_args(&[opt], b"", "/", &[0]).is_some());
+        assert!(untrusted_file_args(&[opt], b"", "/", &trust::yours).is_some());
         // System files, kernel files, devices and plain words are not flagged.
         let system = [
             "/etc/hostname",
@@ -1013,7 +1020,7 @@ mod tests {
             "/dev/fd/3",
         ];
         let system: Vec<String> = system.map(String::from).to_vec();
-        let note = untrusted_file_args(&system, b"", "/", &[0]);
+        let note = untrusted_file_args(&system, b"", "/", &trust::yours);
         assert!(note.is_none(), "{note:?}");
         // Nor need the path exist, be a file, or be written plainly.
         let link = dir.join("link");
@@ -1035,14 +1042,14 @@ mod tests {
             format!("/usr/bin/../..{s}"),
         ] {
             assert!(
-                untrusted_file_args(std::slice::from_ref(&a), b"", "/", &[0]).is_some(),
+                untrusted_file_args(std::slice::from_ref(&a), b"", "/", &trust::yours).is_some(),
                 "{a}"
             );
         }
         // Inside text that runs: a `sh -c` string, a script, an installed
         // unit.
         let flagged = |args: &[String], text: &str| {
-            untrusted_file_args(args, text.as_bytes(), "/", &[0]).is_some()
+            untrusted_file_args(args, text.as_bytes(), "/", &trust::yours).is_some()
         };
         assert!(flagged(&[format!("dpkg -i {s} && echo ok")], ""));
         assert!(flagged(&[], &format!("#!/bin/sh\ncp {s} /etc/x.conf\n")));
@@ -1062,7 +1069,7 @@ mod tests {
         let many: String = (0..=MAX_PATHS_CHECKED)
             .map(|i| format!("/usr/x{i} "))
             .collect();
-        let note = untrusted_file_args(&[], many.as_bytes(), "/", &[0]).unwrap();
+        let note = untrusted_file_args(&[], many.as_bytes(), "/", &trust::yours).unwrap();
         assert!(note.contains("more than"), "{note}");
         std::fs::remove_dir_all(&dir).unwrap();
     }

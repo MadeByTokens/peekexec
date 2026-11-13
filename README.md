@@ -103,7 +103,9 @@ Please read this part before you rely on it.
   peekexec flags common dangers, but its lists can't be complete.
 - **Files the command reads.** You see `cp ./x /etc/`, not what's inside `./x`,
   and that file can change after you approve. Use `peekexec install`, which
-  shows you the content.
+  shows you the content. For an image you flash (`dd if=fw.img`), that's
+  expected: the window notes that programs of yours can change the file, so
+  compare its checksum first if it matters.
 - **What a command does while it runs.** `--write` only tells you what the
   command says it will touch; nothing enforces it. `--no-net` stops the command
   itself from using the network. It doesn't stop a system service from using
