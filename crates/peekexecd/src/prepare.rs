@@ -388,6 +388,20 @@ pub fn prepare(
     })
 }
 
+/// du options that make it print one total per argument, and the few
+/// that may go with them.
+const DU_TOTAL: &[&str] = &[
+    "-s",
+    "-sh",
+    "-hs",
+    "-sc",
+    "-cs",
+    "-shc",
+    "-hsc",
+    "--summarize",
+];
+const DU_PLAIN: &[&str] = &["-h", "-c", "--human-readable", "--total"];
+
 /// How a note about a disk in use begins.
 const DISK_NOTE: &str = "Check the disk: ";
 
@@ -449,9 +463,39 @@ fn plain_run(req: &Request, exec: &Execution) -> bool {
         !a.chars()
             .any(|c| c.is_whitespace() || c.is_control() || "$`;|&<>(){}".contains(c))
     };
+    // Below a directory the user may read lie ones it may not: a walk or a
+    // list of names read from a file reaches them, unseen by the helper's
+    // look at each named path. Names and sizes only, but not at a glance.
+    // By the name asked for and the file it resolved to alike.
+    let names = [basename(&argv[0]), basename(&plan.program)];
+    let is = |p: &str| names.contains(&p);
+    // Long options as getopt reads them: any prefix of the name will do
+    // (`--recur` is `--recursive`), and a value may follow `=`.
+    let long = |a: &str, name: &str| {
+        a.strip_prefix("--")
+            .map(|o| o.split('=').next().unwrap_or(o))
+            .is_some_and(|o| !o.is_empty() && name.starts_with(o))
+    };
+    let walks = argv.iter().skip(1).any(|a| {
+        let short = a.starts_with('-') && !a.starts_with("--");
+        long(a, "recursive")
+            || long(a, "files0-from")
+            || (is("du") && long(a, "all"))
+            || (short && is("ls") && a.contains('R'))
+            || (short && is("du") && a.contains('a'))
+    });
+    // du walks every directory below and lists each one; only its total
+    // is a look at what was named. An allowlist of exact options, as an
+    // option that takes a value (`-B`, `-d`, `-X`) can make any letter
+    // after it a value: `-Bs` is not `-s`.
+    let du_ok = |a: &String| DU_TOTAL.contains(&a.as_str()) || DU_PLAIN.contains(&a.as_str());
+    let total_only = argv.iter().skip(1).any(|a| DU_TOTAL.contains(&a.as_str()))
+        && argv.iter().skip(1).all(|a| !a.starts_with('-') || du_ok(a));
+    let walks = walks || (is("du") && !total_only);
     // The name asked for and the file it resolved to: a link to busybox is
     // not the program it is called after.
-    !argv.is_empty()
+    !walks
+        && !argv.is_empty()
         && listed(basename(&argv[0]))
         && listed(basename(&plan.program))
         && argv.len() <= PLAIN_MAX_ARGS
@@ -1727,6 +1771,37 @@ mod tests {
         assert!(plain(&run(&["ls", "/usr/share/shells"])));
         assert!(plain(&run(&["udevadm", "control", "--reload-rules"])));
         assert!(plain(&run(&["systemctl", "status", "ssh"])));
+        // Walks below what the helper looked at: not at a glance.
+        for argv in [
+            &["ls", "-R", "/etc"][..],
+            &["ls", "-laR", "/etc"],
+            &["ls", "--recursive", "/etc"],
+            &["du", "-a", "/etc"],
+            &["du", "-sha", "/etc"],
+            &["du", "--all", "/etc"],
+            &["wc", "--files0-from=/etc/hostname"],
+            &["du", "--files0-from", "/etc/hostname"],
+        ] {
+            assert!(!plain(&run(argv)), "{argv:?}");
+        }
+        assert!(plain(&run(&["du", "-sh", "/etc"])));
+        assert!(plain(&run(&["du", "--summarize", "-h", "/etc"])));
+        for argv in [
+            &["du", "/etc"][..],
+            &["du", "-h", "/etc"],
+            &["ls", "--recur", "/etc"],
+            &["ls", "--rec=x", "/etc"],
+            &["du", "-s", "--al", "/etc"],
+            &["wc", "--files0=/etc/hostname"],
+            &["du", "-Bs", "/etc"],
+            &["du", "-s", "--max-depth=5", "/etc"],
+            &["du", "-s", "--", "-x"],
+            &["du", "-d", "0", "/etc"],
+        ] {
+            assert!(!plain(&run(argv)), "{argv:?}");
+        }
+        assert!(plain(&run(&["ls", "-la", "/etc"])));
+        assert!(plain(&run(&["ls", "--all", "/etc"])));
         // More than a glance.
         let many: Vec<String> = (0..PLAIN_MAX_ARGS).map(|i| format!("a{i}")).collect();
         let mut argv = vec!["ls"];

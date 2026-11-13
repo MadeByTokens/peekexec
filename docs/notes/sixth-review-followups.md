@@ -30,8 +30,12 @@ real desktop goes under "To test when you are back".
       note (`inspect::root_only`), so a click; raw disks follow from the same
       rule. Everyday hardware reads keep Enter (lsusb -v, lsblk -f,
       /proc/mtd, /dev/serial/by-id, sysfs). Docs updated.
-- [ ] Docs for all of the above (README, man page via manual.md +
+- [x] Docs for all of the above (README, man page via manual.md +
       gen-cli-doc.sh, help agents, THREAT_MODEL, checklist).
+- [x] `4561498` Enter: no walks (ls -R, du -a, --files0-from), from an
+      automated review of the root-only change.
+- [ ] Final review: two independent agents (code bypass; docs vs code) on
+      99f2713..HEAD, started 2026-11-13. Findings go below.
 - [ ] Final review / bypass pass on everything since 99f2713.
 - [ ] Ask the owner before `git push`.
 

@@ -468,8 +468,11 @@ Sources for what each group gives are in the README, under
   at most 16 words and 1024 bytes, no argument holding spaces or shell
   syntax, only when there is nothing to warn about (naming a path the user
   cannot read without root is a warning: `cat /etc/gshadow`, `head -c 512
-  /dev/sda`, `ls /root`; what lies below a readable directory, as in
-  `ls -R /etc`, is not looked at), and only when no key
+  /dev/sda`, `ls /root`; what lies below a readable directory is not looked
+  at, so walks and lists of names read from a file take a click: `ls -R`,
+  `--recursive` (or any prefix getopt accepts), `--files0-from`, and `du`
+  unless its options are an exact list that only totals, `du -sh`), and only
+  when no key
   was pressed while the window was opening (the human was typing into
   something else, perhaps a password); otherwise approving needs a pointer
   click, which the keyboard (Tab, then Space) cannot stand in for. This is
